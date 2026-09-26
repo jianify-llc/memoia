@@ -1,3 +1,4 @@
+# Modified for Memoia: use the renamed internal server package.
 import dotenv
 
 dotenv.load_dotenv()
@@ -6,9 +7,9 @@ from sqlalchemy.schema import CreateTable
 import logging
 
 logging.disable(logging.CRITICAL)
-from memobase_server import __version__
-from memobase_server.connectors import DB_ENGINE
-from memobase_server.models.database import (
+from memoia_server import __version__
+from memoia_server.connectors import DB_ENGINE
+from memoia_server.models.database import (
     User,
     GeneralBlob,
     BufferZone,

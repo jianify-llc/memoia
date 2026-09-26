@@ -1,14 +1,15 @@
+# Modified for Memoia: use the renamed internal server package.
 import os
 import pytest
 import numpy as np
 from unittest.mock import patch, Mock, AsyncMock
 from api import app
 from fastapi.testclient import TestClient
-from memobase_server import controllers
-from memobase_server.models.database import DEFAULT_PROJECT_ID
-from memobase_server.models.blob import BlobType
+from memoia_server import controllers
+from memoia_server.models.database import DEFAULT_PROJECT_ID
+from memoia_server.models.blob import BlobType
 import numpy as np
-from memobase_server.env import CONFIG
+from memoia_server.env import CONFIG
 
 PREFIX = "/api/v1"
 TOKEN = os.getenv("ACCESS_TOKEN")
@@ -37,7 +38,7 @@ def test_health_check(client, db_env):
 @pytest.fixture
 def mock_llm_complete():
     with patch(
-        "memobase_server.controllers.modal.chat.extract.llm_complete"
+        "memoia_server.controllers.modal.chat.extract.llm_complete"
     ) as mock_llm:
         mock_client1 = AsyncMock()
         mock_client1.ok = Mock(return_value=True)
@@ -50,7 +51,7 @@ def mock_llm_complete():
 @pytest.fixture
 def mock_llm_validate_complete():
     with patch(
-        "memobase_server.controllers.modal.chat.merge_yolo.llm_complete"
+        "memoia_server.controllers.modal.chat.merge_yolo.llm_complete"
     ) as mock_llm:
         mock_client1 = AsyncMock()
         mock_client1.ok = Mock(return_value=True)
@@ -63,7 +64,7 @@ def mock_llm_validate_complete():
 @pytest.fixture
 def mock_event_summary_llm_complete():
     with patch(
-        "memobase_server.controllers.modal.chat.event_summary.llm_complete"
+        "memoia_server.controllers.modal.chat.event_summary.llm_complete"
     ) as mock_llm:
 
         mock_client2 = AsyncMock()
@@ -77,7 +78,7 @@ def mock_event_summary_llm_complete():
 @pytest.fixture
 def mock_entry_summary_llm_complete():
     with patch(
-        "memobase_server.controllers.modal.chat.entry_summary.llm_complete"
+        "memoia_server.controllers.modal.chat.entry_summary.llm_complete"
     ) as mock_llm:
 
         mock_client2 = AsyncMock()
@@ -91,7 +92,7 @@ def mock_entry_summary_llm_complete():
 @pytest.fixture
 def mock_event_get_embedding():
     with patch(
-        "memobase_server.controllers.event.get_embedding"
+        "memoia_server.controllers.event.get_embedding"
     ) as mock_event_get_embedding:
         async_mock = AsyncMock()
         async_mock.ok = Mock(return_value=True)
@@ -349,7 +350,13 @@ async def test_api_user_flush_buffer(
     assert d["errno"] == 0
     assert len(d["data"]["ids"]) == 1
 
-    p = client.post(f"{PREFIX}/users/buffer/{u_id}/chat")
+    flush_response = client.post(f"{PREFIX}/users/buffer/{u_id}/chat?wait_process=true")
+    assert flush_response.status_code == 200
+    flush_data = flush_response.json()
+    assert flush_data["errno"] == 0
+    assert len(flush_data["data"]) == 1
+    event_id = flush_data["data"][0]["event_id"]
+    assert event_id is not None
     p = await controllers.buffer.get_buffer_capacity(
         u_id, DEFAULT_PROJECT_ID, BlobType.chat
     )
@@ -373,6 +380,11 @@ async def test_api_user_flush_buffer(
     assert response.status_code == 200
     assert d["errno"] == 0
     assert len(d["data"]["events"]) == 1
+    assert d["data"]["events"][0]["id"] == event_id
+
+    response = client.delete(f"{PREFIX}/users/event/{u_id}/{event_id}")
+    assert response.json()["errno"] == 0
+    assert client.get(f"{PREFIX}/users/event/{u_id}").json()["data"]["events"] == []
     print(d)
 
     response = client.delete(f"{PREFIX}/users/{u_id}")
@@ -466,6 +478,8 @@ async def test_api_user_event(
     response = client.post(f"{PREFIX}/users/buffer/{u_id}/chat")
     assert response.status_code == 200
     assert response.json()["errno"] == 0
+    # The background endpoint acknowledges scheduling, not returned event IDs.
+    assert response.json()["data"] is None
 
     response = client.get(f"{PREFIX}/users/event/{u_id}?topk=5")
     d = response.json()
@@ -484,6 +498,32 @@ async def test_api_user_event(
     d = response.json()
     assert response.status_code == 200
     assert d["errno"] == 0
+
+
+def test_synchronous_flush_without_extracted_memory(
+    client, db_env, mock_entry_summary_llm_complete
+):
+    from memoia_server.models.utils import Promise
+
+    mock_entry_summary_llm_complete.side_effect = [Promise.resolve("")]
+    user_id = client.post(f"{PREFIX}/users", json={}).json()["data"]["id"]
+    try:
+        inserted = client.post(
+            f"{PREFIX}/blobs/insert/{user_id}",
+            json={
+                "blob_type": "chat",
+                "blob_data": {"messages": [{"role": "user", "content": "Hello"}]},
+            },
+        )
+        assert inserted.json()["errno"] == 0
+        flushed = client.post(f"{PREFIX}/users/buffer/{user_id}/chat?wait_process=true")
+        assert flushed.json()["errno"] == 0
+        assert flushed.json()["data"] == [
+            {"event_id": None, "add_profiles": [], "update_profiles": [], "delete_profiles": []}
+        ]
+        assert client.get(f"{PREFIX}/users/event/{user_id}").json()["data"]["events"] == []
+    finally:
+        assert client.delete(f"{PREFIX}/users/{user_id}").json()["errno"] == 0
 
 
 @pytest.mark.asyncio

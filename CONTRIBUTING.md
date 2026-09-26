@@ -1,6 +1,9 @@
-# Contributing to Memobase
+# Contributing to Memoia
 
-Thank you for your interest in contributing to Memobase! This document provides guidelines and instructions for contributing to the project.
+<!-- Modified for Memoia: maintained repository, runtime, and contribution workflow. -->
+
+Memoia is independently maintained from Memobase under Apache-2.0. Preserve upstream
+attribution and the compatibility boundaries in the [release guide](./docs/guide/memoia-release.md).
 
 ## Table of Contents
 - [Development Setup](#development-setup)
@@ -17,7 +20,7 @@ Thank you for your interest in contributing to Memobase! This document provides 
 ### Server Development
 
 #### Prerequisites
-- Python (>= 3.11)
+- Python 3.12 and uv
 - Docker
 - Git
 
@@ -25,16 +28,14 @@ Thank you for your interest in contributing to Memobase! This document provides 
 1. Fork the repository
 2. Clone your fork:
    ```bash
-   git clone https://github.com/your-username/memobase.git
-   cd memobase
+   git clone https://github.com/your-username/memoia.git
+   cd memoia
    ```
 
 3. Set up the virtual environment:
    ```bash
    cd src/server/api
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip3 install -r requirements.txt
+   uv sync --frozen
    ```
 
 4. Run the server:
@@ -62,12 +63,12 @@ For more detailed information, refer to the [server documentation](./src/server/
 
 ## Pull Request Process
 
-1. Rebase your branch onto the latest `dev` branch:
+1. Rebase your branch onto the latest Memoia `main` branch:
    ```bash
-   git checkout dev
-   git pull upstream dev
+   git checkout main
+   git pull origin main
    git checkout your-branch
-   git rebase dev
+   git rebase main
    ```
 
 2. Fix up commits to maintain clean history:
@@ -97,7 +98,6 @@ If you have questions or need help, please:
 
 - Check existing issues and documentation
 - Create a new issue for discussion
-- Join our [Discord](https://discord.com/invite/YdgwU4d9NB)
+- Use [Memoia issues](https://github.com/jianify/memoia/issues); upstream community channels do not provide support for this fork.
 
-Thank you for contributing to Memobase!
-
+Thank you for contributing to Memoia!

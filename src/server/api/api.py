@@ -1,4 +1,5 @@
-import memobase_server.env
+# Modified for Memoia: use the renamed internal server package.
+import memoia_server.env
 import os
 
 # Done setting up env
@@ -6,15 +7,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, APIRouter
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
-from memobase_server.connectors import (
+from memoia_server.connectors import (
     close_connection,
     init_redis_pool,
 )
-from memobase_server import api_layer
-from memobase_server.env import LOG
-from memobase_server.llms.embeddings import check_embedding_sanity
-from memobase_server.llms import llm_sanity_check
-from memobase_server.api_layer.docs import API_X_CODE_DOCS
+from memoia_server import api_layer
+from memoia_server.env import LOG
+from memoia_server.llms.embeddings import check_embedding_sanity
+from memoia_server.llms import llm_sanity_check
+from memoia_server.api_layer.docs import API_X_CODE_DOCS
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 
@@ -23,7 +24,7 @@ async def lifespan(app: FastAPI):
     init_redis_pool()
     await check_embedding_sanity()
     await llm_sanity_check()
-    LOG.info(f"Start Memobase Server {memobase_server.__version__} 🖼️")
+    LOG.info(f"Start Memoia Server {memoia_server.__version__} 🖼️")
     yield
     await close_connection()
 
@@ -60,9 +61,9 @@ def custom_openapi():
         servers.append({"url": host})
 
     openapi_schema = get_openapi(  # type: ignore
-        title="Memobase API",
-        version=memobase_server.__version__,
-        summary="APIs for Memobase, a user memory system for LLM Apps",
+        title="Memoia API",
+        version=memoia_server.__version__,
+        summary="Memobase-compatible APIs for Memoia, a user memory system for LLM Apps",
         routes=app.routes,
         servers=servers,
     )

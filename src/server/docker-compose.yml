@@ -23,13 +23,15 @@ services:
     image: redis:7.4
     restart: unless-stopped
     container_name: memobase-server-redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
     ports:
       - "${REDIS_EXPORT_PORT}:6379"
     volumes:
       - ${REDIS_LOCATION}:/data
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep -qx PONG"]
       interval: 5s
       timeout: 5s
       retries: 5

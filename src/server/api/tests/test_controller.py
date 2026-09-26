@@ -1,17 +1,18 @@
+# Modified for Memoia: use the renamed internal server package.
 import pytest
 import numpy as np
 from unittest.mock import patch, AsyncMock, Mock
-from memobase_server.env import CONFIG
-from memobase_server.controllers import full as controllers
-from memobase_server.models import response as res
-from memobase_server.models.blob import BlobType
-from memobase_server.models.database import DEFAULT_PROJECT_ID
+from memoia_server.env import CONFIG
+from memoia_server.controllers import full as controllers
+from memoia_server.models import response as res
+from memoia_server.models.blob import BlobType
+from memoia_server.models.database import DEFAULT_PROJECT_ID
 
 
 @pytest.fixture
 def mock_event_get_embedding():
     with patch(
-        "memobase_server.controllers.event.get_embedding"
+        "memoia_server.controllers.event.get_embedding"
     ) as mock_event_get_embedding:
         async_mock = AsyncMock()
         async_mock.ok = Mock(return_value=True)

@@ -1,0 +1,12 @@
+Memoia
+https://github.com/jianify/memoia
+
+Independently maintained from Memobase:
+https://github.com/memodb-io/memobase
+Original copyright: Copyright 2024 Memobase
+
+The internal server package was relocated to memoia_server by Memoia.
+The Memobase HTTP protocol, SDK namespaces and persisted identifiers are retained.
+The original Apache-2.0 license is included in LICENSE.
+
+This notice identifies the fork and does not imply upstream sponsorship or support.

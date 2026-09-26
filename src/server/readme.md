@@ -1,3 +1,14 @@
+# Memoia server
+
+<!-- Modified for Memoia: source builds, compatible deployment identity, and release instructions. -->
+
+This is the independently maintained server from [jianify/memoia](https://github.com/jianify/memoia),
+derived from Memobase under Apache-2.0. The Python package is `memoia_server`;
+client SDKs remain `memobase`. References to upstream features below remain applicable.
+
+**Existing installations:** follow the [release and rollback guide](../../docs/guide/memoia-release.md).
+Do not rename Compose resources, move data directories, or run development cleanup scripts on existing data.
+
 <div align="center">
     <a href="https://memobase.io">
     <picture>
@@ -5,7 +16,7 @@
       <img alt="Shows the Memobase logo" src="https://assets.memodb.io/memobase-light.svg" width="424">
     </picture>
   </a>
-  <p><strong>The server-side of Memobase</strong></p>
+  <p><strong>Memoia, compatible with the Memobase API</strong></p>
   <p>
     <img src="https://img.shields.io/github/v/tag/memodb-io/memobase">
   </p>
@@ -60,44 +71,53 @@ Check `./.env.example` for necessary vars. You can configure the running port an
    1. `.env` contains the service configs, like running port, secret token...
    2. `config.yaml` contains the Memobase configs, like LLM model, profile slots. [docs](https://docs.memobase.io/references/full)
 
-3. Run `docker-compose build && docker-compose up` to start the services.
+3. For a **new local development installation**, run `docker compose build && docker compose up`.
+   This builds your checked-out Memoia source. Published deployments instead use
+   the digest-pinned API-only override described in the release guide.
 
 Check out the [docs](https://docs.memobase.io/quickstart) of how to use Memobase client or APIs.
 
 
 
-## Use Memobase core only
+## Use a published Memoia API image
 
-1. If you have existing postgres and reids, you can only launch the Memobase core
+1. If you have existing PostgreSQL and Redis, only replace the API service.
 
-2. Find and download the docker image of Memobase:
+2. Use a successful Memoia release's verified digest, not a mutable tag:
 
    ```bash
-   docker pull ghcr.io/memodb-io/memobase:latest
+   # Set MEMOIA_IMAGE to the full digest reference from a successful release.
+   docker pull "${MEMOIA_IMAGE:?Set the verified Memoia image digest}"
    ```
 
 3. Setup your `config.yaml` and an `env.list` file, the `env.list` should look like [this](./api/.env.example):
 
-4. Run the service:
+4. For a new standalone API deployment, use absolute config paths and your verified digest:
    ```bash
-   docker run --env-file env.list -v ./api/config.yaml:/app/config.yaml -p 8019:8000 ghcr.io/memodb-io/memobase:main
+   docker run --env-file /absolute/path/env.list -v /absolute/path/config.yaml:/app/config.yaml -p 8019:8000 "${MEMOIA_IMAGE:?Set the verified Memoia image digest}"
    ```
 
 
 
 ## Development
 
-1. Start a local DB first by `sh script/up-dev.sh`
+1. Prepare `.env` and `api/config.yaml` as above with **dedicated development data paths and ports**.
+   Start dependencies with `docker compose up -d --wait memobase-server-db memobase-server-redis`.
+   Do not use `script/up-dev.sh` on data you need: that inherited script deletes its development directories.
 2. Open a new terminal window and `cd ./api`
-3. Install python deps: `uv sync`
-4. To test if you got everything right, run `uv run pytest` to see if all the tests are passed.
-5. Launch Memobase Server in dev mode: `uv run -m fastapi dev --port 8019`
+3. Copy `api/.env.example` to `api/.env`, matching the dedicated database/Redis ports and credentials; install dependencies with `uv sync --frozen`.
+4. Run `uv run --frozen pytest`. Tests write data: never point them at a shared or deployed database.
+5. Launch Memoia Server in dev mode: `uv run --frozen -m fastapi dev api.py --port 8019`.
 
 > `fastapi dev` has hot-reload, so you can just modify the code and test it without relaunch the service.
 
 
 
 ## Migrations
+
+The `memobase_server` → `memoia_server` namespace release has **no database migration**.
+The inherited schema-development procedure below is not an upgrade step for this release;
+never autogenerate or apply schema changes against a deployed database as part of a rename.
 
 Memobase may introduce breaking changes in DB schema, here is a guideline of how to migrate your data to latest Memobase:
 

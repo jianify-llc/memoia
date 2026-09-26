@@ -1,4 +1,10 @@
-# Memobase Backend API
+# Memoia Backend API
+
+<!-- Modified for Memoia: internal package name and maintenance references. -->
+
+The internal implementation lives in `memoia_server/`. This is an Apache-2.0 fork
+of Memobase; HTTP contracts and the original Memobase SDKs remain unchanged.
+Deployment and rollback boundaries are in the [release guide](../../../docs/guide/memoia-release.md).
 
 Memobase is a user memory system designed for LLM Applications. It provides a FastAPI-based server that manages user profiles, memories, and various types of data blobs. Details of developing it in [here](./DEVELOPMENT.md).
 

@@ -1,0 +1,4 @@
+# Memoia image-only deployment override. The base Compose resource identities stay unchanged.
+services:
+  memobase-server-api:
+    image: ${MEMOIA_IMAGE:?Set MEMOIA_IMAGE to ghcr.io/jianify/memoia@sha256:<verified-digest>}

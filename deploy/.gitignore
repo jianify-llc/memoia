@@ -1,0 +1,10 @@
+.env
+image.env
+infra-config.sha256
+deploy-state
+pending-deploy
+pending-infra
+standalone-mode
+.deploy.lock
+candidates/
+data/

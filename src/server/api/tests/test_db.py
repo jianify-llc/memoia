@@ -1,8 +1,9 @@
+# Modified for Memoia: use the renamed internal server package.
 import pytest
 from sqlalchemy.inspection import inspect
-from memobase_server.models.database import User, GeneralBlob, UserProfile
-from memobase_server.models.blob import BlobType
-from memobase_server.connectors import (
+from memoia_server.models.database import User, GeneralBlob, UserProfile
+from memoia_server.models.blob import BlobType
+from memoia_server.connectors import (
     Session,
     DB_ENGINE,
 )

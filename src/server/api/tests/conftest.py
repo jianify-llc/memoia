@@ -1,7 +1,8 @@
+# Modified for Memoia: use the renamed internal server package.
 import pytest
 import pytest_asyncio
 from api import app
-from memobase_server.env import CONFIG
+from memoia_server.env import CONFIG
 from fastapi.testclient import TestClient
 
 PREFIX = "/api/v1"

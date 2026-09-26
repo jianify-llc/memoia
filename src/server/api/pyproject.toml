@@ -1,8 +1,9 @@
+# Modified for Memoia: use the renamed internal server package.
 [project]
-name = "memobase_server"
+name = "memoia_server"
 version = "0.1.0"
-description = "Memobase Server"
-readme = "README.md"
+description = "Memoia Server, compatible with the Memobase API"
+readme = "readme.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi[standard]>=0.116.1",

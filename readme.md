@@ -1,10 +1,30 @@
+<!-- Modified for Memoia: independent maintenance entry point; upstream documentation retained. -->
+# Memoia
+
+Memoia is an independently maintained, Apache-2.0 fork of
+[Memobase](https://github.com/memodb-io/memobase), maintained at
+[jianify/memoia](https://github.com/jianify/memoia). The original copyright and
+[license](./LICENSE) remain intact; this project is not the upstream Memobase service.
+
+The internal server package is `memoia_server`. Existing Memobase SDK packages,
+HTTP `/api/v1` routes, bearer authentication, response envelopes, stored data, and
+deployment identities remain compatible. This repository does not publish renamed SDKs.
+
+- [Run or develop the Memoia server](./src/server/readme.md)
+- [Release, drain, upgrade, and rollback](./docs/guide/memoia-release.md)
+- [Report a Memoia issue](https://github.com/jianify/memoia/issues)
+
+The feature descriptions, examples, logos, SDK badges, and third-party links below
+are inherited from Memobase. Upstream cloud/community links are references, not
+Memoia-operated services or a promise of upstream support.
+
 <div align="center">
     <a href="https://memobase.io">
     <picture>
       <img alt="Memobase logo" src="./assets/images/logo.png" width="80%">
     </picture>
   </a>
-  <h1>Memobase</h1>
+  <h2>Based on Memobase</h2>
   <p>
     <a href="https://pypi.org/project/memobase/">
       <img src="https://img.shields.io/pypi/v/memobase.svg">
@@ -23,11 +43,11 @@
     </a>
   </p>
   <p>
-    <a href="https://github.com/memodb-io/memobase/actions/workflows/publish.yaml">
-      <img src="https://github.com/memodb-io/memobase/actions/workflows/publish.yaml/badge.svg">
+    <a href="https://github.com/jianify/memoia/actions/workflows/publish.yaml">
+      <img src="https://github.com/jianify/memoia/actions/workflows/publish.yaml/badge.svg">
     </a>
-        <a href="https://github.com/orgs/memodb-io/packages?repo_name=memobase">
-    <img src="https://img.shields.io/github/v/tag/memodb-io/memobase">
+        <a href="https://github.com/jianify/memoia/pkgs/container/memoia">
+    <img src="https://img.shields.io/github/v/tag/jianify/memoia">
     </a>
   </p>
   <p>
@@ -397,7 +417,7 @@ For detailed usage instructions, visit the [documentation](https://docs.memobase
 
 ## Stay Updated
 
-Star Memobase on Github to support and receive instant notifications!
+Star [Memoia on GitHub](https://github.com/jianify/memoia) for this fork's updates.
 
 ![click_star](./assets/images/click.gif)
 
@@ -405,7 +425,8 @@ Star Memobase on Github to support and receive instant notifications!
 
 ## Support
 
-Join the community for support and discussions:
+Use [Memoia issues](https://github.com/jianify/memoia/issues) for this fork.
+The following are upstream community references, not Memoia support channels:
 
 -  [Join our Discord](https://discord.gg/YdgwU4d9NB) 👻 
 
@@ -426,4 +447,5 @@ Or just [email us](mailto:contact@memobase.io) ❤️
 
 ## License
 
-This project is licensed under the Apache 2.0 License - see the [LICENSE](https://github.com/memodb-io/memobase/blob/main/LICENSE) file for details.
+This project remains licensed under Apache-2.0; see [LICENSE](./LICENSE).
+Original Memobase attribution is preserved. Modified source files carry Memoia change notices.

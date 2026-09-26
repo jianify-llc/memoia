@@ -1,3 +1,16 @@
+# Memoia — unreleased
+
+<!-- Modified for Memoia: independent server maintenance release. -->
+
+- Rename the internal server package to `memoia_server`; keep Memobase SDKs,
+  HTTP contracts, database schema, Redis keys, and deployment identities unchanged.
+- Build Memoia-owned AMD64/ARM64 images with source SHA/digest release artifacts,
+  packaged Apache-2.0 attribution, and an API-only deployment override.
+- Add SDK/wire compatibility tests and a documented drain, backup, and recovery boundary.
+- See the [release guide](./docs/guide/memoia-release.md) before upgrading existing data.
+
+The entries below are inherited upstream Memobase history.
+
 ### [0.0.40] - 2025/8/28
 
 Added:

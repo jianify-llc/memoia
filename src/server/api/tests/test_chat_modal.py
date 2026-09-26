@@ -1,11 +1,12 @@
+# Modified for Memoia: use the renamed internal server package.
 import pytest
 from unittest.mock import AsyncMock, Mock, patch
-from memobase_server import controllers
-from memobase_server.models import response as res
-from memobase_server.models.database import DEFAULT_PROJECT_ID
-from memobase_server.models.blob import BlobType
-from memobase_server.models.utils import Promise
-from memobase_server.env import CONFIG
+from memoia_server import controllers
+from memoia_server.models import response as res
+from memoia_server.models.database import DEFAULT_PROJECT_ID
+from memoia_server.models.blob import BlobType
+from memoia_server.models.utils import Promise
+from memoia_server.env import CONFIG
 import numpy as np
 
 
@@ -57,7 +58,7 @@ def dict_contains(a: dict, b: dict) -> bool:
 @pytest.fixture
 def mock_extract_llm_complete():
     with patch(
-        "memobase_server.controllers.modal.chat.extract.llm_complete"
+        "memoia_server.controllers.modal.chat.extract.llm_complete"
     ) as mock_llm:
         mock_client1 = AsyncMock()
         mock_client1.ok = Mock(return_value=True)
@@ -70,7 +71,7 @@ def mock_extract_llm_complete():
 @pytest.fixture
 def mock_merge_llm_complete():
     with patch(
-        "memobase_server.controllers.modal.chat.merge_yolo.llm_complete"
+        "memoia_server.controllers.modal.chat.merge_yolo.llm_complete"
     ) as mock_llm:
         mock_client1 = AsyncMock()
         mock_client1.ok = Mock(return_value=True)
@@ -83,7 +84,7 @@ def mock_merge_llm_complete():
 @pytest.fixture
 def mock_organize_llm_complete():
     with patch(
-        "memobase_server.controllers.modal.chat.organize.llm_complete"
+        "memoia_server.controllers.modal.chat.organize.llm_complete"
     ) as mock_llm:
         mock_client2 = AsyncMock()
         mock_client2.ok = Mock(return_value=True)
@@ -96,7 +97,7 @@ def mock_organize_llm_complete():
 @pytest.fixture
 def mock_event_tag_llm_complete():
     with patch(
-        "memobase_server.controllers.modal.chat.event_summary.llm_complete"
+        "memoia_server.controllers.modal.chat.event_summary.llm_complete"
     ) as mock_llm:
 
         mock_client2 = AsyncMock()
@@ -110,7 +111,7 @@ def mock_event_tag_llm_complete():
 @pytest.fixture
 def mock_entry_summary_llm_complete():
     with patch(
-        "memobase_server.controllers.modal.chat.entry_summary.llm_complete"
+        "memoia_server.controllers.modal.chat.entry_summary.llm_complete"
     ) as mock_llm:
 
         mock_client2 = AsyncMock()
@@ -124,7 +125,7 @@ def mock_entry_summary_llm_complete():
 @pytest.fixture
 def mock_event_get_embedding():
     with patch(
-        "memobase_server.controllers.event.get_embedding"
+        "memoia_server.controllers.event.get_embedding"
     ) as mock_event_get_embedding:
         async_mock = AsyncMock()
         async_mock.ok = Mock(return_value=True)
