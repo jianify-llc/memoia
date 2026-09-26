@@ -133,8 +133,11 @@ def extract_values_from_json(json_string, allow_no_quotes=False):
     return extracted_values
 
 
-def convert_response_to_json(response: str) -> dict:
+def convert_response_to_json(response: str) -> dict | None:
     """Convert response string to JSON, with error handling and fallback to non-standard JSON extraction."""
+    # 空摘要可合法完成，但结构化输出没有内容时不能用 fallback 的 {} 冒充解析成功。
+    if not response.strip():
+        return None
     prediction_json = extract_first_complete_json(response)
 
     if prediction_json is None:

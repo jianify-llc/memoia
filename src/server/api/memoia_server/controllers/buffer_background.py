@@ -1,7 +1,8 @@
-# Modified for Memoia: relocated from the upstream memobase_server package.
+# Modified for Memoia: relocated package and renewable background user leases.
 import uuid
 import asyncio
 import traceback
+from contextlib import suppress
 from sqlalchemy import func
 from pydantic import BaseModel
 from ..env import CONFIG, BufferStatus, TRACE_LOG
@@ -19,6 +20,21 @@ if redis.call("get", KEYS[1]) == ARGV[1] then
 else
     return 0
 end
+"""
+
+REDIS_LUA_CHECK_AND_EXPIRE_LOCK = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("pexpire", KEYS[1], ARGV[2])
+else
+    return 0
+end
+"""
+
+REDIS_LUA_CHECK_AND_POP_BATCH = """
+if redis.call("get", KEYS[1]) ~= ARGV[1] then
+    return {0}
+end
+return {1, redis.call("lpop", KEYS[2])}
 """
 
 
@@ -105,7 +121,7 @@ async def flush_buffer_background_running(
     blob_type: BlobType,
     asleep_waiting_s: float = 0.1,  # Increased from 0.001 to reduce CPU usage
     max_iterations: int = 200,  # Maximum 200 tasks for this run, return after it reaches.
-    process_interval_s: float = 60 * 5,  # Reduced from 10 minutes to 5 minutes
+    process_interval_s: float = 60 * 5,  # Lease TTL, renewed throughout processing
     max_processing_time_s: float = 60 * 15,  # Maximum 15 minutes total processing time
     max_consecutive_errors=5,  # Stop after 5 consecutive errors
 ):
@@ -118,11 +134,15 @@ async def flush_buffer_background_running(
 
     __lock_value = str(uuid.uuid4())
     start_time = asyncio.get_event_loop().time()
+    if process_interval_s <= 0:
+        raise ValueError("User lease TTL must be positive")
+    lease_ttl_ms = max(1, int(process_interval_s * 1000))
+    renew_interval_s = lease_ttl_ms / 3000
+    lease_lost = asyncio.Event()
 
-    # Shorter lock timeout with renewal
     async with get_redis_client() as redis_client:
         acquired = await redis_client.set(
-            user_key, __lock_value, nx=True, ex=process_interval_s
+            user_key, __lock_value, nx=True, px=lease_ttl_ms
         )
         if not acquired:
             TRACE_LOG.debug(
@@ -132,11 +152,38 @@ async def flush_buffer_background_running(
             )
             return
 
+    async def heartbeat():
+        # 独立于整个 batch 的模型等待；失锁或无法确认续租时保守停止后续取任务。
+        try:
+            while True:
+                await asyncio.sleep(renew_interval_s)
+                async with asyncio.timeout(renew_interval_s):
+                    async with get_redis_client() as redis_client:
+                        renewed = await redis_client.eval(
+                            REDIS_LUA_CHECK_AND_EXPIRE_LOCK,
+                            1,
+                            user_key,
+                            __lock_value,
+                            lease_ttl_ms,
+                        )
+                if renewed != 1:
+                    lease_lost.set()
+                    TRACE_LOG.warning(project_id, user_id, "[background] User lease lost")
+                    return
+        except Exception as e:
+            lease_lost.set()
+            TRACE_LOG.error(
+                project_id, user_id, f"[background] Cannot confirm user lease renewal: {e}"
+            )
+
+    heartbeat_task = asyncio.create_task(heartbeat())
     try:
         iteration_count = 0
         consecutive_errors = 0
 
         while iteration_count < max_iterations:
+            if lease_lost.is_set():
+                break
             current_time = asyncio.get_event_loop().time()
 
             # Check if we've exceeded maximum processing time
@@ -148,10 +195,17 @@ async def flush_buffer_background_running(
                 )
                 break
 
-            # Check lock and get next batch
+            # 原子校验 owner 并弹出任务，禁止失锁后的旧执行者消费新 owner 的队列。
             async with get_redis_client() as redis_client:
-                lock_value = await redis_client.get(user_key)
-                if lock_value is None or lock_value != __lock_value:  # Lock is expired
+                batch = await redis_client.eval(
+                    REDIS_LUA_CHECK_AND_POP_BATCH,
+                    2,
+                    user_key,
+                    buffer_queue_key,
+                    __lock_value,
+                )
+                if batch[0] != 1:
+                    lease_lost.set()
                     TRACE_LOG.debug(
                         project_id,
                         user_id,
@@ -159,7 +213,7 @@ async def flush_buffer_background_running(
                     )
                     break
 
-                buffer_ids_str = await redis_client.lpop(buffer_queue_key)
+                buffer_ids_str = batch[1]
                 if buffer_ids_str is None:  # Queue is empty
                     TRACE_LOG.debug(
                         project_id,
@@ -168,8 +222,6 @@ async def flush_buffer_background_running(
                     )
                     break
 
-                # Renew lock timeout if needed
-                await redis_client.expire(user_key, process_interval_s)
                 current_queue_size = await redis_client.llen(buffer_queue_key)
 
             TRACE_LOG.info(
@@ -183,7 +235,7 @@ async def flush_buffer_background_running(
                 continue
 
             try:
-                # Process the buffer with timeout protection
+                # 不强行取消在途处理：取消等待不代表外部模型已停止，不能盲目重放。
                 processing_start = asyncio.get_event_loop().time()
 
                 p = await flush_buffer_by_ids(
@@ -251,6 +303,10 @@ async def flush_buffer_background_running(
         )
 
     finally:
+        # 释放前先停止并收回 heartbeat；异常、取消和正常退出共用此清理路径。
+        heartbeat_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat_task
         try:
             async with get_redis_client() as redis_client:
                 result = await redis_client.eval(

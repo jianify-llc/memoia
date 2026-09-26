@@ -22,6 +22,7 @@ RUN uv sync --frozen --no-dev --no-cache-dir
 COPY ./memoia_server /app/memoia_server
 COPY ./api.py /app
 COPY ./LICENSE ./NOTICE /app/
+COPY ./migrations /app/migrations
 
 
 

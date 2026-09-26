@@ -105,6 +105,70 @@ Key configuration options in `config.yaml`:
 - Language preferences
 - Model selection
 
+### GPT-6 Luna compatibility
+
+The OpenAI Chat Completions adapter recognizes the exact model ID `gpt-6-luna`.
+It sends `reasoning_effort=medium` and defaults to `max_completion_tokens=32768`
+for business calls through the configured best/thinking model. An explicit native
+`max_completion_tokens` overrides that default for the current request only.
+Startup uses a separate 4096-token completion budget and asks for exactly `OK`;
+empty, unexpected or incomplete probe results prevent startup. This shared request
+boundary ignores historical `max_tokens` limits such as 16/1024; it removes `max_tokens`,
+`temperature`, `top_p`, `logprobs` and `top_logprobs`. Keeping the old tiny limit
+with reasoning enabled can truncate the completion before usable text is produced.
+
+32768 is a generation **ceiling**, covering reasoning and visible output together,
+not a per-call reservation or guaranteed visible output length. Actual usage and
+latency require provider acceptance. Existing application telemetry tokenizes input
+and visible output, not the provider's full reasoning-token usage; it is not a
+provider billing record. GPT-6 Luna is the acceptance target; compatibility with
+older models is no longer promised or tested. Business prompts and SDK/HTTP
+contracts are unchanged. Reasoning effort is not a substitute
+for low sampling temperature or a guarantee of deterministic extraction.
+See [OpenAI parameter guidance](https://developers.openai.com/api/docs/guides/latest-model#gpt-6-astra-update-api-and-model-parameters)
+and [Chat Completions limits](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
+
+Refusal, absent/non-text content, truncation, content filtering and any completion
+state other than `stop` are errors. Normally completed `""` and whitespace strings
+are returned unchanged; the summary business layer treats these as successful
+no-event results. Missing optional usage metadata does not discard valid text.
+JSON mode routes empty/whitespace output to a parser failure (`UNPROCESSABLE_ENTITY`),
+not an empty object. The legacy fallback for non-empty malformed text remains:
+some malformed text can still become `{}`. This is **not** strict schema validation
+and this patch does not introduce Structured Outputs or guarantee determinism.
+
+`tests/test_openai_model_llm.py` exercises the installed OpenAI SDK through a
+mock HTTP transport, including request serialization, JSON mode, the actual empty
+summary HTTP/flush path, startup limits and failure responses. Run it and the complete `tests/` suite
+against disposable local PostgreSQL/Redis only. These checks do not establish
+API-key/model access, extraction quality, latency, cost or real flush acceptance;
+those require an explicitly configured provider acceptance run and a new image.
+
+### Background user lease
+
+The existing user/project/blob-type lock and queue names are unchanged. Each
+background runner holds a 300-second renewable lease. A separate asyncio heartbeat
+runs throughout the batch, including model waits, and atomically compare-and-expires
+the owner token every one-third TTL. Renewal I/O is bounded to one-third TTL;
+an error, timeout or owner mismatch blocks subsequent batches. Owner verification
+and queue pop are also atomic; an old runner cannot consume the next owner's queue.
+Normal exit, exceptions and cancellation stop/join the heartbeat before the
+existing compare-and-delete release, without deleting a successor's lock.
+
+Lease loss does not cancel or replay an admitted batch: external request cancellation
+does not prove server-side cancellation. This is not a database fencing protocol;
+Redis outages or event-loop stalls longer than TTL can still leave in-flight results
+requiring reconciliation. Do not infer drain completion from a missing/expired lock.
+The existing maximum processing duration is checked between batches, not a hard
+deadline for an individual model request. Shutdown/release safety still requires
+the drain and unknown-result checks in the release guide.
+
+`tests/test_buffer_background.py` executes the real runner/Lua against disposable
+Redis, with the processing boundary controlled by events. It verifies processing
+longer than two TTLs does not admit a second executor, owner replacement cannot
+renew/delete the successor or dequeue work, renewal errors stop later batches, and
+cancellation leaves no heartbeat behind.
+
 ## Development Guidelines
 1. Use async/await for database operations
 2. Implement proper error handling using Promise pattern
