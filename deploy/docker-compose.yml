@@ -43,6 +43,8 @@ services:
   memoia:
     image: ${MEMOIA_IMAGE:?Set an accepted Memoia manifest digest}
     restart: unless-stopped
+    labels:
+      io.jianify.environment: ${JIANIFY_ENV:?Set JIANIFY_ENV}
     environment:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
       REDIS_URL: ${REDIS_URL:?Set REDIS_URL}
@@ -50,12 +52,17 @@ services:
       PROJECT_ID: ${PROJECT_ID:?Set PROJECT_ID}
       MEMOBASE_LLM_API_KEY: ${MEMOBASE_LLM_API_KEY:?Set MEMOBASE_LLM_API_KEY}
       MEMOBASE_EMBEDDING_API_KEY: ${MEMOBASE_EMBEDDING_API_KEY:?Set MEMOBASE_EMBEDDING_API_KEY}
-      MEMOBASE_BEST_LLM_MODEL: ${MEMOBASE_BEST_LLM_MODEL:-gpt-4o-mini}
-      MEMOBASE_THINKING_LLM_MODEL: ${MEMOBASE_THINKING_LLM_MODEL:-o4-mini}
-      MEMOBASE_EMBEDDING_MODEL: ${MEMOBASE_EMBEDDING_MODEL:-text-embedding-3-small}
-      MEMOBASE_EMBEDDING_DIM: ${MEMOBASE_EMBEDDING_DIM:-1536}
       API_HOSTS: ${API_HOSTS:?Set API_HOSTS}
       USE_CORS: "false"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - type: bind
+        source: ./api/config.yaml
+        target: /app/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       postgres:
         condition: service_healthy
@@ -66,20 +73,6 @@ services:
         max-size: 10m
         max-file: "3"
     networks: [backend, ingress]
-
-  cloudflared:
-    image: ${CLOUDFLARED_IMAGE:?Set a cloudflared image digest}
-    restart: unless-stopped
-    command: ["tunnel", "--no-autoupdate", "run"]
-    environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?Set TUNNEL_TOKEN}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    logging:
-      options:
-        max-size: 10m
-        max-file: "3"
-    networks: [ingress]
 
 networks:
   backend:

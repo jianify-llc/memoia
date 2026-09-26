@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 root=${1:?deployment root}
-docker compose --env-file "$root/.env" --env-file "$root/image.env" \
-  -f "$root/compose.yml" config --format json \
-  | jq -Sc '{postgres:.services.postgres,redis:.services.redis,cloudflared:.services.cloudflared,api_contract:{database_url:.services.memoia.environment.DATABASE_URL,redis_url:.services.memoia.environment.REDIS_URL,project_id:.services.memoia.environment.PROJECT_ID,embedding_dim:.services.memoia.environment.MEMOBASE_EMBEDDING_DIM}}' \
+config_sha=$(sha256sum "$root/api/config.yaml" | cut -d' ' -f1)
+docker compose --env-file "$root/.env" -f "$root/docker-compose.yml" config --format json \
+  | jq -Sc --arg config_sha "$config_sha" '{postgres:.services.postgres,redis:.services.redis,api_contract:{database_url:.services.memoia.environment.DATABASE_URL,redis_url:.services.memoia.environment.REDIS_URL,project_id:.services.memoia.environment.PROJECT_ID,config_sha:$config_sha}}' \
   | sha256sum | cut -d' ' -f1

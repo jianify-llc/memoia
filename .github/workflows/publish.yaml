@@ -63,6 +63,19 @@ jobs:
           uv run --frozen python -c 'import memoia_server; print(memoia_server.__version__)'
           test -f LICENSE && test -f NOTICE && test -f Dockerfile
           ! grep -q 'memobase_server' Dockerfile
+      - name: Validate deployment layout and mocked safety contracts
+        run: |
+          set -euo pipefail
+          shellcheck deploy/*.sh
+          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_compose.py -v
+          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_workflow.py -v
+          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_recovery.py -v
+          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_sdk_probe.py -v
+          docker run --rm -e MEMOIA_DEPLOY_TEST_ISOLATED=1 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/deploy,target=/work/deploy,readonly" \
+            --entrypoint /bin/bash \
+            python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e \
+            -c 'set -e; apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=20 update -qq; apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=20 install -y -qq jq >/dev/null; python -m unittest discover -s /work/deploy/tests -p test_deploy.py -v'
       - name: Start containers
         working-directory: ./src/server
         run: |
@@ -173,6 +186,7 @@ jobs:
           docker buildx imagetools inspect "$image" --raw > "$RUNNER_TEMP/manifest.json"
           cp "$RUNNER_TEMP/manifest.json" manifest.json
           anonymous_config=$(mktemp -d)
+          schema=''
           for arch in amd64 arm64; do
             # shellcheck disable=SC2016 # jq variables are resolved by jq, not Bash.
             platform_digest=$(jq -er --arg arch "$arch" '
@@ -186,10 +200,13 @@ jobs:
             # shellcheck disable=SC2016 # Docker template is intentionally literal.
             docker image inspect "$platform_image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' | grep -Fx "$GITHUB_SHA"
             docker run --rm --platform "linux/$arch" --entrypoint /app/.venv/bin/python "$platform_image" -c 'import memoia_server; print(memoia_server.__version__)'
+            candidate_schema=$(bash deploy/schema-fingerprint.sh "$platform_image")
+            [[ -z "$schema" || "$candidate_schema" == "$schema" ]] || { echo 'Architecture schema sources differ' >&2; exit 1; }
+            schema="$candidate_schema"
           done
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           # shellcheck disable=SC2016 # jq variables are resolved by jq, not Bash.
-          jq -n --arg sha "$GITHUB_SHA" --arg image "$image" --arg config "$GITHUB_SHA" '{source_commit:$sha,image:$image,config_commit:$config,platforms:["linux/amd64","linux/arm64"]}' > release.json
+          jq -n --arg sha "$GITHUB_SHA" --arg image "$image" --arg config "$GITHUB_SHA" --arg schema "$schema" '{source_commit:$sha,image:$image,config_commit:$config,schema_source_sha256:$schema,platforms:["linux/amd64","linux/arm64"]}' > release.json
           printf 'Source: %s\nImage: %s\n' "$GITHUB_SHA" "$image" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload candidate identity
         uses: actions/upload-artifact@v4
@@ -215,47 +232,54 @@ jobs:
       contents: read
       deployments: write
     env:
-      TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-      TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
       SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
       SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
-      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
       TEST_BEARER_TOKEN: ${{ secrets.MEMOIA_TEST_BEARER_TOKEN }}
       GH_TOKEN: ${{ github.token }}
       MANIFEST_DIGEST: ${{ needs.publish-test.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
-      - name: Deploy through Access SSH and smoke test the public API
+      - name: Deploy over direct SSH and smoke test the public API
         run: |
           set -euo pipefail
-          for name in TUNNEL_SERVICE_TOKEN_ID TUNNEL_SERVICE_TOKEN_SECRET SSH_PRIVATE_KEY SSH_KNOWN_HOSTS DEPLOY_USER TEST_BEARER_TOKEN; do
+          for name in SSH_PRIVATE_KEY SSH_KNOWN_HOSTS DEPLOY_HOST DEPLOY_PORT DEPLOY_USER TEST_BEARER_TOKEN; do
             [[ -n "${!name:-}" ]] || { echo "Missing test Environment value: $name" >&2; exit 1; }
           done
+          [[ "$DEPLOY_USER" == github ]] || { echo 'Test SSH user must be github' >&2; exit 1; }
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || { echo 'DEPLOY_HOST must be an IPv4 address or DNS hostname' >&2; exit 1; }
+          if [[ ! "$DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$DEPLOY_PORT < 1 || 10#$DEPLOY_PORT > 65535 )); then
+            echo 'DEPLOY_PORT must be between 1 and 65535' >&2
+            exit 1
+          fi
           [[ "$(git ls-remote origin refs/heads/test | cut -f1)" == "$GITHUB_SHA" ]] || {
             echo 'A newer test commit exists; refusing stale deployment' >&2
             exit 1
           }
           image="${REGISTRY}/${IMAGE_NAME}@${MANIFEST_DIGEST}"
-          key="$RUNNER_TEMP/memoia-deploy-key"
-          hosts="$RUNNER_TEMP/memoia-known-hosts"
-          install -m 600 /dev/null "$key"
-          install -m 600 /dev/null "$hosts"
+          key=$(mktemp "$RUNNER_TEMP/memoia-deploy-key.XXXXXX")
+          hosts=''
+          # 无论 SSH、业务验收或 finalize 在何处失败，都清理本次生成的凭据文件。
+          trap 'rm -f -- "$key"; if [[ -n "$hosts" ]]; then rm -f -- "$hosts"; fi' EXIT
+          hosts=$(mktemp "$RUNNER_TEMP/memoia-known-hosts.XXXXXX")
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$key"
           printf '%s\n' "$SSH_KNOWN_HOSTS" > "$hosts"
-          proxy='docker run --rm -i -e TUNNEL_SERVICE_TOKEN_ID -e TUNNEL_SERVICE_TOKEN_SECRET cloudflare/cloudflared:2026.9.0@sha256:ff69a2225ad7c6f85ed84fbd5f3087df46202426b2388ec60214098e0adf05e9 access ssh --hostname %h'
-          ssh_opts=(-i "$key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$hosts" -o "ProxyCommand=$proxy")
-          target="$DEPLOY_USER@ssh-test-memoia.jianify.dev"
-          root=/opt/memoia/test
-          compose_sha=$(sha256sum deploy/compose.yml | cut -d' ' -f1)
+          # 不读取 runner 的 SSH 配置；只用专用密钥和已核验 host key，禁止代理或其它身份回退。
+          ssh_opts=(-F /dev/null -i "$key" -p "$DEPLOY_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$hosts" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+          root=/opt/memoia
+          compose_sha=$(sha256sum deploy/docker-compose.yml | cut -d' ' -f1)
           # shellcheck disable=SC2029 # Validated local identity is intentionally sent to the remote host.
-          ssh "${ssh_opts[@]}" "$target" "mkdir -p '$root/candidates/$GITHUB_SHA'"
+          ssh "${ssh_opts[@]}" "$target" "sudo -n test -d '$root' && sudo -n install -d -m 700 '$root/.deploy' '$root/.deploy/candidates' '$root/.deploy/candidates/$GITHUB_SHA'"
           # shellcheck disable=SC2029
-          tar -C deploy -cf - compose.yml deploy-api.sh infra-fingerprint.sh | ssh "${ssh_opts[@]}" "$target" "tar -C '$root/candidates/$GITHUB_SHA' -xf -"
+          tar -C deploy -cf - deploy-memoia.sh infra-fingerprint.sh schema-fingerprint.sh recovery.py | ssh "${ssh_opts[@]}" "$target" "sudo -n tar -C '$root/.deploy/candidates/$GITHUB_SHA' -xf -"
           # shellcheck disable=SC2029
-          ssh "${ssh_opts[@]}" "$target" "bash '$root/candidates/$GITHUB_SHA/deploy-api.sh' prepare '$root' '$image' '$GITHUB_SHA' '$GITHUB_RUN_ID' '$compose_sha'"
+          ssh "${ssh_opts[@]}" "$target" "sudo -n bash '$root/.deploy/candidates/$GITHUB_SHA/deploy-memoia.sh' prepare '$root' '$image' '$GITHUB_SHA' '$GITHUB_RUN_ID' '$compose_sha'"
           bash deploy/smoke-api.sh https://test-memoia.jianify.dev "$TEST_BEARER_TOKEN"
           # shellcheck disable=SC2029
-          ssh "${ssh_opts[@]}" "$target" "bash '$root/candidates/$GITHUB_SHA/deploy-api.sh' finalize '$root' '$image' '$GITHUB_SHA' '$GITHUB_RUN_ID' '$compose_sha'"
+          ssh "${ssh_opts[@]}" "$target" "sudo -n bash '$root/.deploy/candidates/$GITHUB_SHA/deploy-memoia.sh' finalize '$root' '$image' '$GITHUB_SHA' '$GITHUB_RUN_ID' '$compose_sha'"
       - name: Record successful test deployment
         run: |
           set -euo pipefail
