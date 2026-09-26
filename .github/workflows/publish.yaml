@@ -172,14 +172,21 @@ jobs:
           image="${REGISTRY}/${IMAGE_NAME}@${digest}"
           docker buildx imagetools inspect "$image" --raw > "$RUNNER_TEMP/manifest.json"
           cp "$RUNNER_TEMP/manifest.json" manifest.json
-          jq -e '([.manifests[].platform | .os + "/" + .architecture] | index("linux/amd64") != null and index("linux/arm64") != null)' "$RUNNER_TEMP/manifest.json"
           anonymous_config=$(mktemp -d)
-          DOCKER_CONFIG="$anonymous_config" docker pull --platform linux/amd64 "$image"
-          # shellcheck disable=SC2016 # Docker template is intentionally literal.
-          docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' | grep -Fx "$GITHUB_SHA"
-          docker run --rm --platform linux/amd64 --entrypoint /app/.venv/bin/python "$image" -c 'import memoia_server; print(memoia_server.__version__)'
-          DOCKER_CONFIG="$anonymous_config" docker pull --platform linux/arm64 "$image"
-          docker run --rm --platform linux/arm64 --entrypoint /app/.venv/bin/python "$image" -c 'import memoia_server; print(memoia_server.__version__)'
+          for arch in amd64 arm64; do
+            # shellcheck disable=SC2016 # jq variables are resolved by jq, not Bash.
+            platform_digest=$(jq -er --arg arch "$arch" '
+              [.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest]
+              | if length == 1 then .[0] else error("Expected exactly one linux/" + $arch + " manifest") end
+              | select(type == "string")
+              | select(test("^sha256:[0-9a-f]{64}$"))
+            ' "$RUNNER_TEMP/manifest.json")
+            platform_image="${REGISTRY}/${IMAGE_NAME}@${platform_digest}"
+            DOCKER_CONFIG="$anonymous_config" docker pull --platform "linux/$arch" "$platform_image"
+            # shellcheck disable=SC2016 # Docker template is intentionally literal.
+            docker image inspect "$platform_image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' | grep -Fx "$GITHUB_SHA"
+            docker run --rm --platform "linux/$arch" --entrypoint /app/.venv/bin/python "$platform_image" -c 'import memoia_server; print(memoia_server.__version__)'
+          done
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           # shellcheck disable=SC2016 # jq variables are resolved by jq, not Bash.
           jq -n --arg sha "$GITHUB_SHA" --arg image "$image" --arg config "$GITHUB_SHA" '{source_commit:$sha,image:$image,config_commit:$config,platforms:["linux/amd64","linux/arm64"]}' > release.json

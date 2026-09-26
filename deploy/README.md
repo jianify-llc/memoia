@@ -30,6 +30,13 @@ digest. GHCR packages may initially be private even when this repository is
 public: set package visibility to Public after its first push, then rerun the
 candidate to prove an anonymous pull.
 
+Candidate verification requires exactly one Linux manifest for each supported
+architecture. It anonymously pulls each architecture's child digest and checks
+its source revision and `memoia_server` import, avoiding a local Docker image
+store collision when pulling two platforms under the same index digest.
+Release records and deployments still use the **multi-architecture manifest
+digest**, not either child digest.
+
 ## First installation: operator procedure
 
 The test host is the Tokyo Lightsail instance `jianify-test-jp1`
