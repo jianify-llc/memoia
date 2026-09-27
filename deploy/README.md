@@ -2,6 +2,8 @@
 
 仓库维护模板/脚本，服务器不构建源码。test/online 使用相同路径，实际值由操作员填写。脚本可创建目录、设置配置权限、生成缺失模板；不生成密钥、不覆盖已有值。日常发布不得改写配置，online 保持关闭。
 
+Agent 操作远端服务器前，必须阅读相邻仓库 `../Jianify-LLC/ops/server/agent-operations.md` 的“Agent 可见运维”。共享终端及既有部署脚本的执行边界以该规范为准。
+
 ```text
 /opt/jianify/
 ├── .env                         宿主机环境与 Tunnel token，Jianify-LLC 管理
