@@ -2095,7 +2095,6 @@ buffer_flush_interval: 3600
 max_chat_blob_buffer_token_size: 1024
 max_profile_subtopics: 15
 max_pre_profile_token_size: 128
-cache_user_profiles_ttl: 1200
 
 # Timezone
 use_timezone: "UTC"
@@ -2138,8 +2137,13 @@ minimum_chats_token_size_for_event_summary: 256
 - `max_chat_blob_buffer_token_size`: int, default to `1024`. This is the parameter to control the buffer size of Memobase. Larger numbers lower your LLM cost but increase profile update lag.
 - `max_profile_subtopics`: int, default to `15`. The maximum subtopics one topic can have. When a topic has more than this, it will trigger a re-organization.
 - `max_pre_profile_token_size`: int, default to `128`. The maximum token size of one profile slot. When a profile slot is larger, it will trigger a re-summary.
-- `cache_user_profiles_ttl`: int, default to `1200` (20 minutes). Time-to-live for cached user profiles in seconds.
 - `llm_tab_separator`: string, default to `"::"`. The separator used for tabs in LLM communications.
+
+Memoia reads profiles directly from PostgreSQL for both API and internal processing.
+Consumers control their own profile-cache TTL and invalidation. The obsolete
+`cache_user_profiles_ttl` YAML option and `MEMOBASE_CACHE_USER_PROFILES_TTL`
+override are ignored. Existing expiring profile cache keys may expire naturally;
+Redis remains required for other server functions.
 
 ### Timezone Configuration
 - `use_timezone`: string, default to `null`. Options include `"UTC"`, `"America/New_York"`, `"Europe/London"`, `"Asia/Tokyo"`, and `"Asia/Shanghai"`. If not set, the system's local timezone is used.

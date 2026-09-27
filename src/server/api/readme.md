@@ -77,6 +77,27 @@ Memobase is a user memory system designed for LLM Applications. It provides a Fa
 - Buffer system for temporary storage
 - Token-aware content management
 
+### Profile reads and cache ownership
+
+Memoia reads profiles directly from PostgreSQL, including HTTP reads and internal
+extraction, merging and organization. It does not cache profiles in Redis or
+invalidate a server-side profile cache after writes. Reads reflect committed
+database state; they do not wait for in-flight extraction to finish.
+
+Consumers own any profile-cache TTL and invalidation policy. Luvel's existing
+consumer-side KV cache is not changed by this server behavior. Redis remains in
+use for background queues, renewable leases, authentication, telemetry and other
+existing non-profile functions.
+
+The obsolete `cache_user_profiles_ttl` YAML option and
+`MEMOBASE_CACHE_USER_PROFILES_TTL` override are ignored. Existing expiring
+`user_profiles::{project_id}::{user_id}` keys are no longer read or written and
+may expire naturally; no Redis cleanup or database migration is required.
+SDK signatures, response fields and descending profile update ordering are unchanged.
+
+`tests/test_profile_storage.py` verifies committed reads despite stale Redis data,
+project/user isolation and profile CRUD/merge/user deletion without Redis commands.
+
 ### Authentication
 - Bearer token authentication
 - Configurable access control
