@@ -129,6 +129,9 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    concurrency:
+      group: memoia-publication-${{ github.repository }}-${{ github.sha }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -287,9 +290,9 @@ jobs:
           # shellcheck disable=SC2016 # jq receives these variable names literally.
           payload=$(jq -nc --arg ref "$GITHUB_SHA" --arg image "$image" --arg config "$GITHUB_SHA" '{ref:$ref,environment:"test",auto_merge:false,required_contexts:[],payload:{image:$image,config_commit:$config}}')
           id=$(gh api "repos/$GITHUB_REPOSITORY/deployments" --method POST --input - --jq .id <<< "$payload")
-          status=$(jq -nc '{state:"success",environment_url:"https://test-memoia.jianify.dev",description:"API health, auth and read/write/delete smoke passed"}')
+          status=$(jq -nc '{state:"success",environment_url:"https://test-memoia.jianify.dev",description:"Basic acceptance: API health, auth and user CRUD passed"}')
           gh api "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" --method POST --input - <<< "$status" >/dev/null
-          printf 'Accepted test image: %s\nConfig commit: %s\n' "$image" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Accepted test image: %s\nConfig commit: %s\nAcceptance: basic deployment only, not full memory acceptance\n' "$image" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
 
   verify-release:
     if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v') }}

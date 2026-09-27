@@ -197,9 +197,6 @@ else
 fi
 
 tunnel_ready || { echo 'Host Tunnel is not connected' >&2; exit 1; }
-if [[ "$mode" != init ]]; then
-  [[ -f standalone-mode ]] || { echo 'External writers may be active; automatic deployment is disabled' >&2; exit 1; }
-fi
 # 拉取失败发生在停机之前；源码指纹读取不导入应用、不触碰数据库。
 MEMOIA_IMAGE="$image" "${compose[@]}" pull memoia
 revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")
@@ -228,26 +225,15 @@ if [[ "$mode" == init ]]; then
 fi
 [[ "$schema_sha" == "$(< schema.sha256)" ]] || { echo 'Schema source changed; migration maintenance is required' >&2; exit 1; }
 
-# The test stack must be isolated from external producers for this automatic path.
-[[ -f standalone-mode ]] || {
-  echo 'External writers may be active; automatic deployment is disabled' >&2
-  exit 1
-}
-
-active=$("${compose[@]}" exec -T postgres sh -c \
-  "psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -Atc \"SELECT count(*) FROM buffer_zones WHERE status IN ('processing', 'failed')\"" \
-  | tr -d '[:space:]')
-[[ "$active" == 0 ]] || { echo 'Processing or failed buffers block deployment' >&2; exit 1; }
-project_id=$("${compose[@]}" config --format json | jq -r '.services.memoia.environment.PROJECT_ID')
-for prefix in memobase:user_lock memobase:user_buffer_queue; do
-  # shellcheck disable=SC2016 # Redis 凭据与 PROJECT_ID 在容器内展开。
-  count=$("${compose[@]}" exec -T -e PROJECT_ID="$project_id" redis sh -c \
-    'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli --scan --pattern "'$prefix':${PROJECT_ID}:*" | wc -l' \
-    | tr -d '[:space:]')
-  [[ "$count" == 0 ]] || { echo "Pending $prefix keys block deployment" >&2; exit 1; }
-done
-
+# 兼容版本按服务生命周期切换，不要求消费者停写或业务队列为空。
+# 这里只校验发布身份；旧 API 的正常退出在下方确认，不重置业务处理状态。
 tunnel_ready || { echo 'Host Tunnel is not connected' >&2; exit 1; }
+old_container=$("${compose[@]}" ps -q memoia)
+[[ -n "$old_container" && -f deploy-state ]] || { echo 'No accepted running API to switch safely' >&2; exit 1; }
+accepted_image=$(cut -d' ' -f3 deploy-state)
+[[ "$accepted_image" =~ ^ghcr\.io/jianify/memoia@sha256:[0-9a-f]{64}$ && "$(docker inspect --format '{{.Config.Image}}' "$old_container")" == "$accepted_image" ]] || {
+  echo 'Running API differs from the accepted deployment; review manual changes before switching' >&2; exit 1;
+}
 for service in postgres redis; do
   container=$("${compose[@]}" ps -q "$service")
   [[ -n "$container" ]] || { echo "$service is not running" >&2; exit 1; }
@@ -271,8 +257,6 @@ done > pending-infra
 systemctl show jianify-cloudflared.service -p MainPID -p ActiveEnterTimestamp > pending-tunnel
 printf '%s %s %s %s\n' "$run_id" "$source_sha" "$image" "$config_sha" > pending-deploy
 
-old_container=$("${compose[@]}" ps -q memoia)
-[[ -n "$old_container" ]] || { echo 'No running API to stop safely' >&2; exit 1; }
 "${compose[@]}" stop --timeout 90 memoia
 [[ "$(docker inspect --format '{{.State.ExitCode}}' "$old_container")" == 0 ]] || {
   echo 'API did not exit gracefully; pending result preserved, candidate not started' >&2; exit 1;

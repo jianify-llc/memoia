@@ -102,8 +102,8 @@ def validate_isolation(config, target, source_config):
 
 def backup():
     state = ROOT / ".deploy"
-    if any((state / name).exists() for name in ("pending-deploy", "pending-maintenance")) or not (state / "standalone-mode").is_file():
-        raise RuntimeError("Unresolved execution or external writers block backup")
+    if any((state / name).exists() for name in ("pending-deploy", "pending-maintenance")):
+        raise RuntimeError("Unresolved deployment or maintenance blocks backup")
     accepted = (state / "deploy-state").read_text().split()
     image = accepted[2]
     command = compose(ROOT, image)

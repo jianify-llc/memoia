@@ -46,6 +46,21 @@ if command == "bash" and os.getenv("FIXTURE_SMOKE_FAIL"):
 '''
 
 
+class PublicationContract(unittest.TestCase):
+    def test_same_source_publications_are_serialized_without_cancellation(self):
+        job = yaml.safe_load(WORKFLOW.read_text())["jobs"]["publish-test"]
+        self.assertEqual(job["concurrency"], {
+            "group": "memoia-publication-${{ github.repository }}-${{ github.sha }}",
+            "cancel-in-progress": False,
+        })
+
+    def test_deployment_receipt_describes_only_basic_acceptance(self):
+        job = yaml.safe_load(WORKFLOW.read_text())["jobs"]["deploy-test"]
+        step = next(step for step in job["steps"] if step.get("name") == "Record successful test deployment")
+        self.assertIn("Basic acceptance: API health, auth and user CRUD passed", step["run"])
+        self.assertIn("not full memory acceptance", step["run"])
+
+
 class DirectSSHWorkflow(unittest.TestCase):
     def setUp(self):
         self.fixture = tempfile.TemporaryDirectory(prefix="memoia-workflow-")

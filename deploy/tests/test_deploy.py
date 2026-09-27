@@ -12,6 +12,7 @@ import unittest
 SOURCE = Path(__file__).resolve().parents[1]
 ROOT = Path("/opt/memoia")
 IMAGE = "ghcr.io/jianify/memoia@sha256:" + "e" * 64
+OLD_IMAGE = "ghcr.io/jianify/memoia@sha256:" + "a" * 64
 SHA = "d" * 40
 
 
@@ -33,7 +34,7 @@ class DeploymentBoundary(unittest.TestCase):
             file.chmod(0o644 if file.name == "docker-compose.yml" else 0o600)
         self.fixture = tempfile.TemporaryDirectory(prefix="memoia-deploy-test-")
         fixture = Path(self.fixture.name)
-        (fixture / "image").write_text("ghcr.io/jianify/memoia@sha256:" + "a" * 64)
+        (fixture / "image").write_text(OLD_IMAGE)
         mock = fixture / "mock-command.py"
         shutil.copyfile(SOURCE / "tests/mock-command.py", mock)
         mock.chmod(0o755)
@@ -47,8 +48,7 @@ class DeploymentBoundary(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         (self.state / "infra-config.sha256").write_text(result.stdout)
         (self.state / "schema.sha256").write_text("f" * 64 + "\n")
-        (self.state / "standalone-mode").touch()
-        (self.state / "deploy-state").write_text("100 fixture-old-source fixture-old-image\n")
+        (self.state / "deploy-state").write_text(f"100 {'b' * 40} {OLD_IMAGE}\n")
 
     def tearDown(self):
         # setUp 确认不存在后才创建；不接触真实主机或任何现有部署目录。
@@ -141,6 +141,21 @@ class DeploymentBoundary(unittest.TestCase):
         self.assertIn("--no-build", actions[-1]["args"])
         self.assertEqual(actions[-1]["image"], IMAGE)
 
+    def test_live_api_drift_blocks_switch_without_pending_or_stop(self):
+        self.env["FIXTURE_CURRENT_IMAGE"] = "ghcr.io/jianify/memoia@sha256:" + "f" * 64
+        result = self.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Running API differs from the accepted deployment", result.stderr)
+        self.assertFalse((self.state / "pending-deploy").exists())
+        self.assertTrue(all("pull" in action["args"] for action in self.actions()))
+        self.assert_configs_unchanged()
+
+    def test_missing_accepted_record_blocks_switch_without_stop(self):
+        (self.state / "deploy-state").unlink()
+        self.assertNotEqual(self.deploy().returncode, 0)
+        self.assertFalse((self.state / "pending-deploy").exists())
+        self.assertTrue(all("pull" in action["args"] for action in self.actions()))
+
     def test_missing_configuration_is_not_created(self):
         file = ROOT / "api/config.yaml"
         file.unlink()
@@ -168,10 +183,20 @@ class DeploymentBoundary(unittest.TestCase):
         self.assertEqual(self.actions(), [])
         self.assert_configs_unchanged()
 
-    def test_without_standalone_assertion_automation_stops(self):
-        (self.state / "standalone-mode").unlink()
-        self.assertNotEqual(self.deploy().returncode, 0)
-        self.assertEqual(self.actions(), [])
+    def test_update_without_standalone_marker_succeeds(self):
+        self.assertFalse((self.state / "standalone-mode").exists())
+        result = self.deploy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.deploy("finalize").returncode, 0)
+        self.assert_configs_unchanged()
+
+    def test_routine_update_does_not_probe_inflight_buffers_or_redis_queues(self):
+        self.env["FIXTURE_NO_DRAIN_PROBES"] = "1"
+        result = self.deploy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.deploy("finalize").returncode, 0)
+        self.assertTrue(all(action["args"][-1] == "memoia" for action in self.actions()))
+        self.assert_configs_unchanged()
 
     def test_disconnected_tunnel_blocks_update(self):
         self.env["FIXTURE_TUNNEL_DOWN"] = "1"
@@ -226,7 +251,7 @@ class DeploymentBoundary(unittest.TestCase):
         self.assertNotEqual(self.deploy(run="100").returncode, 0)
 
     def test_first_install_is_empty_only_and_does_not_grant_acceptance(self):
-        for file in ("infra-config.sha256", "schema.sha256", "deploy-state", "standalone-mode"):
+        for file in ("infra-config.sha256", "schema.sha256", "deploy-state"):
             (self.state / file).unlink()
         for service in ("postgres", "redis"):
             (ROOT / "data" / service).mkdir(parents=True)

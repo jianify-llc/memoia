@@ -11,7 +11,7 @@ fixture = Path(os.environ["MEMOIA_FIXTURE"])
 old_image = "ghcr.io/jianify/memoia@sha256:" + "a" * 64
 images = {"postgres": "pgvector/pgvector:pg17@sha256:" + "b" * 64,
           "redis": "redis:7.4@sha256:" + "c" * 64,
-          "memoia": (fixture / "image").read_text()}
+          "memoia": os.getenv("FIXTURE_CURRENT_IMAGE", (fixture / "image").read_text())}
 
 
 def output(value):
@@ -52,6 +52,8 @@ elif command == "docker":
             if not os.getenv("FIXTURE_EMPTY_STACK"):
                 output(args[-1])
         elif action == "exec":
+            if os.getenv("FIXTURE_NO_DRAIN_PROBES"):
+                sys.exit("Routine release must not probe buffer or Redis execution state")
             output("0")
         elif action in ("pull", "stop", "up"):
             with (fixture / "actions").open("a") as file:

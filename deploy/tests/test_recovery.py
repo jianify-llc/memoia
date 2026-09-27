@@ -14,6 +14,43 @@ recovery = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(recovery)
 
 
+class BackupBoundary(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.state = self.root / ".deploy"
+        self.state.mkdir()
+        (self.state / "deploy-state").write_text("100 fixture-source fixture-image\n")
+        override = patch.object(recovery, "ROOT", self.root)
+        override.start()
+        self.addCleanup(override.stop)
+
+    def test_backup_does_not_require_standalone_marker(self):
+        with patch.object(recovery, "run", side_effect=RuntimeError("fixture-config-stage")) as command:
+            with self.assertRaisesRegex(RuntimeError, "fixture-config-stage"):
+                recovery.backup()
+        self.assertEqual(command.call_count, 1)
+
+    def test_unresolved_deployment_or_maintenance_blocks_before_commands(self):
+        for name in ("pending-deploy", "pending-maintenance"):
+            with self.subTest(name=name):
+                pending = self.state / name
+                pending.touch()
+                with patch.object(recovery, "run") as command:
+                    with self.assertRaisesRegex(RuntimeError, "Unresolved"):
+                        recovery.backup()
+                    command.assert_not_called()
+                pending.unlink()
+
+    def test_backup_still_requires_quiescent_processing_and_redis_state(self):
+        config = {"services": {"memoia": {"environment": {"PROJECT_ID": "fixture"}}}}
+        for results in (["1"], ["0", "fixture-lock"], ["0", "", "fixture-queue"]):
+            with self.subTest(results=results), patch.object(recovery, "run", side_effect=results):
+                with self.assertRaises(RuntimeError):
+                    recovery.check_quiet(["docker", "compose"], config)
+
+
 class RestoreBoundary(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
