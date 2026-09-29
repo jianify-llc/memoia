@@ -47,6 +47,8 @@ MEMOIA_IMAGE 可填初始候选总 manifest digest，不用 latest；所有应�
 
 1. 推送含新部署脚本和 Compose 的 test 提交前，先将 GitHub **Repository Variable** `MEMOIA_TEST_DEPLOY_ENABLED` 设为 `false` 并核对（Settings → Secrets and variables → Actions → Variables）。`deploy-test` 的 job-level `if` 在读取 test Environment 配置之前求值，因此放在 Environment Variables 中不能控制这个门闩。test 推送仍会测试、构建和发布候选镜像；该门闩使 `deploy-test` 跳过。否则工作流会把新脚本传到仍使用旧 Compose 的服务器并调用 `prepare`，在切换前失败。跳过的 job 也不会传输新脚本，因此接纳阶段须单独将已审查的 `deploy-memoia.sh`、`infra-fingerprint.sh`、`schema-fingerprint.sh` 和 `recovery.py` 放入同一受保护的服务器候选目录。
 2. 在所有外部写入入口持续启用停写门闩，并验证请求无法继续写入；`MEMOIA_TEST_DEPLOY_ENABLED=false` 只禁止自动发布，**不是**业务停写。先从服务器部署记录核对旧 Compose 与实际运行的旧脚本版本，使用**仍匹配旧 Compose 的旧脚本**生成并离机保存配套 PG／Redis 备份；核对旧实例、备份哈希、逐表行数和迁移期容量。旧备份清单不符合新版 `recovery.py restore-data` 的输入格式，不能交给新版恢复入口；保留旧脚本、旧 Compose、旧数据目录及配套恢复说明作为回退证据。`backup` 成功后会重新启动旧 API，因此停写门闩必须一直保持到新库接纳完成；随后正常停止旧 API 与旧 PG。
+
+   测试环境可在 Cloudflare 的 `jianify.dev` 区域进入 **Security → WAF → Custom rules → Create rule**，用表达式 `(http.host eq "test-memoia.jianify.dev" and http.request.method in {"POST" "PUT" "PATCH" "DELETE"})`，动作选 **Block** 并部署；只匹配该测试域名。使用无效 Bearer Token 发一个不会成功写入的 `POST /api/v1/users`，应看到该规则的 Cloudflare 拦截记录，而不是源站的 401；`GET /api/v1/healthcheck` 应仍可读取。还须核对所有有效写入方是否都走这个域名，不能只凭一条无效请求证明停写完整。受控迁移探针所需的临时例外结束后立即撤销，整个数据切点期间保持其他写入被拦截。[Cloudflare 自定义规则说明](https://developers.cloudflare.com/waf/custom-rules/create-dashboard/)
 3. 公司 PG 管理员确认目标 `memoia` 库为空、`vector` 已安装。恢复旧 dump 时使用 `--no-owner --no-acl --no-comments --role=jianify_app`，确保新表及序列归应用账号所有；仅以 `postgres` 连接并加 `--no-owner` 会使新对象归 `postgres`，Memoia 随后无法正常写入。旧备份路径以本次 `backup` 的实际回执为准，示例命令在共享终端执行，不会输出连接密码：
 
    ```bash
