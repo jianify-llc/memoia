@@ -4,7 +4,7 @@ set -euo pipefail
 # 日常发布配置只读；init-config 仅补缺失模板与权限，绝不覆盖已有值。
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 [[ "$EUID" == 0 ]] || { echo 'Run with sudo -n' >&2; exit 2; }
-mode=${1:?init-config, init, prepare, finalize, restore-api, backup or restore-data}
+mode=${1:?init-config, init, prepare, finalize, restore-api, adopt-external-postgres, backup or restore-data}
 root=${2:?deployment root}
 
 [[ "$root" == /opt/memoia ]] || {
@@ -32,8 +32,8 @@ if [[ "$mode" == init-config ]]; then
       chmod "$permissions" "$file"
     fi
   done
-  # 不递归 chown 数据目录；已有 PG/Redis 所有权由各自镜像管理。
-  for directory in "$root/data" "$root/data/postgres" "$root/data/redis"; do
+  # 不递归 chown；历史 PostgreSQL 数据由迁移手册处理，不能自动改动。
+  for directory in "$root/data" "$root/data/redis"; do
     [[ ! -L "$directory" && ( ! -e "$directory" || -d "$directory" ) ]] || exit 2
     if [[ ! -e "$directory" ]]; then install -d -o root -g root -m 700 "$directory"; fi
   done
@@ -51,7 +51,7 @@ compose_sha=${6:?compose SHA-256}
 [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || exit 2
 [[ "$run_id" =~ ^[0-9]+$ ]] || exit 2
 [[ "$compose_sha" =~ ^[0-9a-f]{64}$ ]] || exit 2
-[[ "$mode" == init || "$mode" == prepare || "$mode" == finalize || "$mode" == restore-api ]] || exit 2
+[[ "$mode" == init || "$mode" == prepare || "$mode" == finalize || "$mode" == restore-api || "$mode" == adopt-external-postgres ]] || exit 2
 export MEMOIA_IMAGE="$image"
 
 [[ -d "$root" && ! -L "$root" && "$(stat -c '%u:%g:%a' "$root")" == 0:0:700 ]] || exit 2
@@ -72,28 +72,27 @@ resolved=$("${compose[@]}" config --format json)
 [[ "$(jq -r .name <<< "$resolved")" == memoia-test && "$(jq -r '.services.memoia.labels["io.jianify.environment"]' <<< "$resolved")" == test ]] || {
   echo 'Online deployment is disabled, and test identity must be explicit' >&2; exit 2;
 }
-for service in postgres redis; do
-  [[ "$(jq -r --arg service "$service" '.services[$service].volumes[0].source' <<< "$resolved")" == "$root/data/$service" ]] || {
-    echo 'Resolved data mount differs from the canonical absolute path' >&2; exit 1;
-  }
-done
+[[ "$(jq -r '.services.redis.volumes[0].source' <<< "$resolved")" == "$root/data/redis" ]] || {
+  echo 'Resolved data mount differs from the canonical absolute path' >&2; exit 1;
+}
 python3 -c '
 import json, sys
 from urllib.parse import unquote, urlsplit
 c = json.load(sys.stdin)["services"]
 pg = urlsplit(c["memoia"]["environment"]["DATABASE_URL"])
 redis = urlsplit(c["memoia"]["environment"]["REDIS_URL"])
-p = c["postgres"]["environment"]
-valid = (pg.hostname == "postgres" and (pg.port or 5432) == 5432
-         and pg.path == "/" + p["POSTGRES_DB"]
-         and unquote(pg.username or "") == p["POSTGRES_USER"]
-         and unquote(pg.password or "") == p["POSTGRES_PASSWORD"]
+valid = (pg.scheme == "postgresql" and pg.hostname == "jianify-postgres" and (pg.port or 5432) == 5432
+         and pg.path == "/memoia" and unquote(pg.username or "") == "jianify_app"
+         and bool(unquote(pg.password or "")) and not pg.query and not pg.fragment
          and redis.hostname == "redis" and (redis.port or 6379) == 6379
          and redis.path == "/0"
          and unquote(redis.password or "") == c["redis"]["environment"]["REDIS_PASSWORD"])
 if not valid:
-    sys.exit("API database/Redis connections do not match this isolated stack")
+    sys.exit("API connections must use the company Memoia database and local Redis")
 ' <<< "$resolved"
+[[ "$(jq -r '.networks.data.name' <<< "$resolved")" == jianify-data && "$(jq -r '.networks.data.external' <<< "$resolved")" == true ]] || {
+  echo 'Company PostgreSQL network is not the fixed external jianify-data network' >&2; exit 1;
+}
 [[ "$(sha256sum "$root/docker-compose.yml" | cut -d' ' -f1)" == "$compose_sha" ]] || {
   echo 'Compose changed; use the separate infrastructure maintenance procedure' >&2
   exit 1
@@ -106,8 +105,16 @@ umask 077
 cd "$state_dir"
 exec 9> .deploy.lock
 flock -x 9
+postgres_status=$(python3 /opt/postgres/postgresctl.py status)
+[[ "$(jq -r '.healthy' <<< "$postgres_status")" == true &&
+   "$(jq -r '.mount' <<< "$postgres_status")" == /opt/postgres/data &&
+   "$(jq -r '.network' <<< "$postgres_status")" == jianify-data &&
+   -n "$(jq -r '.container_id' <<< "$postgres_status")" ]] || {
+  echo 'Company PostgreSQL is not the expected healthy private instance' >&2; exit 1;
+}
+postgres_container=$(jq -r '.container_id' <<< "$postgres_status")
 [[ -f "$script_dir/infra-fingerprint.sh" && -f "$script_dir/schema-fingerprint.sh" ]] || exit 2
-if [[ "$mode" != init ]]; then
+if [[ "$mode" != init && "$mode" != adopt-external-postgres ]]; then
 [[ -f infra-config.sha256 && -f schema.sha256 ]] || {
   echo 'Infrastructure baseline is missing' >&2
   exit 1
@@ -124,6 +131,9 @@ tunnel_ready() {
     curl -fsS --max-time 5 http://127.0.0.1:20241/ready >/dev/null &&
     curl -fsS --max-time 5 http://127.0.0.1:20241/metrics |
     awk '/^cloudflared_tunnel_ha_connections(\{[^}]*\})?[[:space:]]/ {found=1; connections+=$NF} END {exit !(found && connections>0)}'
+}
+api_database_matches() {
+  [[ "$(docker inspect "$1" | jq -r '.[0].Config.Env[] | select(startswith("DATABASE_URL=")) | sub("^DATABASE_URL=";"")')" == "$(jq -r '.services.memoia.environment.DATABASE_URL' <<< "$resolved")" ]]
 }
 
 if [[ "$mode" == finalize ]]; then
@@ -144,12 +154,13 @@ if [[ "$mode" == finalize ]]; then
   [[ "$(docker inspect --format '{{.State.OOMKilled}} {{.RestartCount}}' "$container")" == 'false 0' ]] || {
     echo 'Candidate OOM or automatic restart blocks acceptance' >&2; exit 1;
   }
-  for service in postgres redis; do
-    [[ "$("${compose[@]}" ps -q "$service")" == "$(sed -n "/^$service /s/^$service //p" pending-infra)" ]] || {
-      echo "Infrastructure service $service changed during API deployment" >&2
-      exit 1
-    }
-  done
+  api_database_matches "$container" || { echo 'Candidate database connection differs from the fixed configuration' >&2; exit 1; }
+  [[ "$postgres_container" == "$(sed -n '/^postgres /s/^postgres //p' pending-infra)" ]] || {
+    echo 'Company PostgreSQL changed during API deployment' >&2; exit 1;
+  }
+  [[ "$("${compose[@]}" ps -q redis)" == "$(sed -n '/^redis /s/^redis //p' pending-infra)" ]] || {
+    echo 'Redis changed during API deployment' >&2; exit 1;
+  }
   [[ "$(systemctl show jianify-cloudflared.service -p MainPID -p ActiveEnterTimestamp)" == "$(< pending-tunnel)" ]] || {
     echo 'Host Tunnel changed during deployment' >&2; exit 1;
   }
@@ -176,14 +187,79 @@ fi
   exit 1
 }
 [[ ! -e pending-maintenance ]] || { echo 'Unresolved maintenance blocks deployment' >&2; exit 1; }
-if [[ -f deploy-state && "$mode" != restore-api ]]; then
+if [[ "$mode" == adopt-external-postgres ]]; then
+  # 只在数据库切换、应用验收之后显式接纳新基础设施基线，普通发布不执行此路径。
+  [[ -f deploy-state && -f infra-config.sha256 && -f schema.sha256 && ! -e pre-external-postgres &&
+     ! -e pending-infra && ! -e pending-tunnel ]] || {
+    echo 'Existing accepted deployment and an unused adoption record are required' >&2; exit 1;
+  }
+  read -r accepted_run accepted_sha accepted_image _old_compose _old_config < deploy-state
+  [[ "$run_id" == "$accepted_run" && "$source_sha" == "$accepted_sha" && "$image" == "$accepted_image" ]] || {
+    echo 'Adoption must target the current accepted API identity' >&2; exit 1;
+  }
+  [[ "$_old_compose" != "$compose_sha" && "$_old_config" != "$config_sha" ]] || {
+    echo 'Adoption requires the reviewed Compose and connection change' >&2; exit 1;
+  }
+  [[ -z "$(docker ps --filter label=com.docker.compose.project=memoia-test --filter label=com.docker.compose.service=postgres --format '{{.ID}}')" ]] || {
+    echo 'The old Memoia PostgreSQL container is still running' >&2; exit 1;
+  }
+  next_infra=$(bash "$script_dir/infra-fingerprint.sh" "$root")
+  [[ "$next_infra" != "$(< infra-config.sha256)" ]] || {
+    echo 'No infrastructure change to adopt' >&2; exit 1;
+  }
+  [[ "$(bash "$script_dir/schema-fingerprint.sh" "$image")" == "$(< schema.sha256)" ]] || {
+    echo 'Schema identity changed; this is not a PostgreSQL-only migration' >&2; exit 1;
+  }
+  api_container=$("${compose[@]}" ps -q memoia)
+  redis_container=$("${compose[@]}" ps -q redis)
+  [[ -n "$api_container" && -n "$redis_container" ]] || { echo 'API or Redis is not running' >&2; exit 1; }
+  [[ "$(docker inspect --format '{{.Config.Image}}' "$api_container")" == "$image" &&
+     "$(docker inspect --format '{{.State.Health.Status}}' "$api_container")" == healthy &&
+     "$(docker inspect --format '{{.State.OOMKilled}} {{.RestartCount}}' "$api_container")" == 'false 0' ]] || {
+    echo 'Accepted API image must be healthy without restart' >&2; exit 1;
+  }
+  api_database_matches "$api_container" || {
+    echo 'Running API is not connected with the new database configuration' >&2; exit 1;
+  }
+  [[ "$(docker inspect --format '{{.Config.Image}}' "$redis_container")" == "$(jq -r '.services.redis.image' <<< "$resolved")" &&
+     "$(docker inspect --format '{{.State.Health.Status}}' "$redis_container")" == healthy &&
+     "$(docker inspect "$redis_container" | jq -r '.[0].Mounts[] | select(.Destination == "/data") | .Source')" == "$root/data/redis" ]] || {
+    echo 'Redis differs from the fixed application deployment' >&2; exit 1;
+  }
+  [[ "$(docker exec "$postgres_container" psql -U jianify_app -d memoia -Atc "SELECT count(*) FROM pg_tables WHERE schemaname='public'")" =~ ^[1-9][0-9]*$ &&
+     "$(docker exec "$postgres_container" psql -U jianify_app -d memoia -Atc "SELECT count(*) FROM pg_extension WHERE extname='vector'")" == 1 ]] || {
+    echo 'Migrated Memoia tables or vector extension are missing' >&2; exit 1;
+  }
+  tunnel_ready || { echo 'Host Tunnel is not connected' >&2; exit 1; }
+  final_postgres_status=$(python3 /opt/postgres/postgresctl.py status)
+  [[ "$(jq -r '.container_id' <<< "$final_postgres_status")" == "$postgres_container" &&
+     "$(jq -r '.fingerprint' <<< "$final_postgres_status")" == "$(jq -r '.fingerprint' <<< "$postgres_status")" ]] || {
+    echo 'Company PostgreSQL changed during adoption verification' >&2; exit 1;
+  }
+  printf 'adopt-external-postgres %s\n' "$run_id" > pending-maintenance
+  cp deploy-state pre-external-postgres
+  [[ ! -f previous-accepted ]] || cp previous-accepted pre-external-postgres-previous
+  baseline_tmp=$(mktemp "$state_dir/.infra-config.XXXXXX")
+  state_tmp=$(mktemp "$state_dir/.deploy-state.XXXXXX")
+  printf '%s\n' "$next_infra" > "$baseline_tmp"
+  printf '%s %s %s %s %s\n' "$run_id" "$source_sha" "$image" "$compose_sha" "$config_sha" > "$state_tmp"
+  mv "$baseline_tmp" infra-config.sha256
+  install -d -m 700 accepted
+  cp "$state_tmp" "accepted/$source_sha"
+  mv "$state_tmp" deploy-state
+  rm -f previous-accepted
+  rm pending-maintenance
+  echo 'External PostgreSQL baseline adopted; previous API recovery target requires new compatibility acceptance.'
+  exit 0
+fi
+if [[ -f deploy-state && "$mode" != restore-api && "$mode" != adopt-external-postgres ]]; then
   previous_run=$(cut -d' ' -f1 deploy-state)
   (( run_id > previous_run )) || {
     echo 'Stale or repeated workflow run; use an explicit recovery procedure' >&2
     exit 1
   }
 fi
-if [[ "$mode" != restore-api ]]; then
+if [[ "$mode" != restore-api && "$mode" != adopt-external-postgres ]]; then
 head_sha=$(curl -fsSL --max-time 15 https://api.github.com/repos/jianify/memoia/git/ref/heads/test | jq -r .object.sha)
 [[ "$head_sha" == "$source_sha" ]] || {
   echo 'A newer test branch head exists; refusing stale deployment' >&2
@@ -205,21 +281,23 @@ schema_sha=$(bash "$script_dir/schema-fingerprint.sh" "$image")
 [[ "$schema_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
 if [[ "$mode" == init ]]; then
   [[ ! -e deploy-state && ! -e infra-config.sha256 && ! -e schema.sha256 ]] || { echo 'Initialization already recorded' >&2; exit 1; }
-  for service in postgres redis memoia; do
+  for service in redis memoia; do
     [[ -z "$("${compose[@]}" ps -aq "$service")" ]] || { echo 'Existing stack blocks initialization' >&2; exit 1; }
   done
-  for directory in "$root/data/postgres" "$root/data/redis"; do
-    [[ -d "$directory" && ! -L "$directory" && -z "$(find "$directory" -mindepth 1 -print -quit)" ]] || {
-      echo 'First installation requires empty, fixed data directories' >&2; exit 1;
-    }
-  done
+  directory="$root/data/redis"
+  [[ -d "$directory" && ! -L "$directory" && -z "$(find "$directory" -mindepth 1 -print -quit)" ]] || {
+    echo 'First installation requires empty, fixed data directories' >&2; exit 1;
+  }
+  [[ "$(docker exec "$postgres_container" psql -U jianify_app -d memoia -Atc "SELECT count(*) FROM pg_tables WHERE schemaname='public'")" == 0 ]] || {
+    echo 'First installation requires an empty company Memoia database' >&2; exit 1;
+  }
   tunnel_ready || { echo 'Host Tunnel is not connected' >&2; exit 1; }
   bash "$script_dir/infra-fingerprint.sh" "$root" > infra-config.sha256
   printf '%s\n' "$schema_sha" > schema.sha256
   printf '%s %s %s %s\n' "$run_id" "$source_sha" "$image" "$config_sha" > pending-deploy
   systemctl show jianify-cloudflared.service -p MainPID -p ActiveEnterTimestamp > pending-tunnel
   MEMOIA_IMAGE="$image" "${compose[@]}" up -d --no-build
-  for service in postgres redis; do printf '%s %s\n' "$service" "$("${compose[@]}" ps -q "$service")"; done > pending-infra
+  printf 'postgres %s\nredis %s\n' "$postgres_container" "$("${compose[@]}" ps -q redis)" > pending-infra
   echo 'First stack started; business acceptance is required before finalize. Automatic updates remain disabled.'
   exit 0
 fi
@@ -234,26 +312,24 @@ accepted_image=$(cut -d' ' -f3 deploy-state)
 [[ "$accepted_image" =~ ^ghcr\.io/jianify/memoia@sha256:[0-9a-f]{64}$ && "$(docker inspect --format '{{.Config.Image}}' "$old_container")" == "$accepted_image" ]] || {
   echo 'Running API differs from the accepted deployment; review manual changes before switching' >&2; exit 1;
 }
-for service in postgres redis; do
-  container=$("${compose[@]}" ps -q "$service")
-  [[ -n "$container" ]] || { echo "$service is not running" >&2; exit 1; }
-  expected_image=$("${compose[@]}" config --format json | jq -r --arg service "$service" '.services[$service].image')
-  [[ "$(docker inspect --format '{{.Config.Image}}' "$container")" == "$expected_image" ]] || {
-    echo "$service image differs from the recorded infrastructure" >&2
-    exit 1
-  }
-  expected_mount=$("${compose[@]}" config --format json | jq -r --arg service "$service" '.services[$service].volumes[0].source')
-  actual_mount=$(docker inspect "$container" | jq -r --arg service "$service" '.[0].Mounts[] | select(.Destination == (if $service == "postgres" then "/var/lib/postgresql/data" else "/data" end)) | .Source')
-  [[ "$expected_mount" == "$root/data/$service" && "$actual_mount" == "$expected_mount" ]] || {
-    echo "$service data mount differs from the fixed absolute path" >&2
-    exit 1
-  }
-  [[ "$(docker inspect --format '{{.State.Health.Status}}' "$container")" == healthy ]] || {
-    echo "$service is not healthy" >&2
-    exit 1
-  }
-  printf '%s %s\n' "$service" "$container"
-done > pending-infra
+api_database_matches "$old_container" || { echo 'Running API database connection drifted' >&2; exit 1; }
+redis_container=$("${compose[@]}" ps -q redis)
+[[ -n "$redis_container" ]] || { echo 'Redis is not running' >&2; exit 1; }
+expected_image=$(jq -r '.services.redis.image' <<< "$resolved")
+[[ "$(docker inspect --format '{{.Config.Image}}' "$redis_container")" == "$expected_image" ]] || {
+  echo 'Redis image differs from the recorded infrastructure' >&2
+  exit 1
+}
+actual_mount=$(docker inspect "$redis_container" | jq -r '.[0].Mounts[] | select(.Destination == "/data") | .Source')
+[[ "$actual_mount" == "$root/data/redis" ]] || {
+  echo 'Redis data mount differs from the fixed absolute path' >&2
+  exit 1
+}
+[[ "$(docker inspect --format '{{.State.Health.Status}}' "$redis_container")" == healthy ]] || {
+  echo 'Redis is not healthy' >&2
+  exit 1
+}
+printf 'redis %s\npostgres %s\n' "$redis_container" "$postgres_container" > pending-infra
 systemctl show jianify-cloudflared.service -p MainPID -p ActiveEnterTimestamp > pending-tunnel
 printf '%s %s %s %s\n' "$run_id" "$source_sha" "$image" "$config_sha" > pending-deploy
 

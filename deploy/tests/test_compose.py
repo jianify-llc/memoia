@@ -1,5 +1,6 @@
 """只解析真实 Compose，不启动容器；凭据全部为测试生成值。"""
 import json
+import importlib.util
 from pathlib import Path
 import shutil
 import subprocess
@@ -8,6 +9,9 @@ import unittest
 
 
 SOURCE = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location("memoia_recovery", SOURCE / "recovery.py")
+recovery = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(recovery)
 
 
 @unittest.skipUnless(shutil.which("docker"), "Requires Docker Compose CLI")
@@ -21,8 +25,8 @@ class ComposeContract(unittest.TestCase):
             values = {
                 "JIANIFY_ENV": "test", "COMPOSE_PROJECT_NAME": "memoia-test",
                 "MEMOIA_IMAGE": "ghcr.io/jianify/memoia@sha256:" + "a" * 64,
-                "POSTGRES_PASSWORD": "fixture-only", "REDIS_PASSWORD": "fixture-only",
-                "DATABASE_URL": "postgresql://memoia:fixture-only@postgres:5432/memoia",
+                "REDIS_PASSWORD": "fixture-only",
+                "DATABASE_URL": "postgresql://jianify_app:fixture-only@jianify-postgres:5432/memoia",
                 "REDIS_URL": "redis://:fixture-only@redis:6379/0",
                 "ACCESS_TOKEN": "fixture-only", "PROJECT_ID": "fixture",
                 "MEMOBASE_LLM_API_KEY": "fixture-only", "MEMOBASE_EMBEDDING_API_KEY": "fixture-only",
@@ -41,10 +45,11 @@ class ComposeContract(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             config = json.loads(result.stdout)
             self.assertEqual(config["name"], "memoia-test")
-            self.assertEqual(set(config["services"]), {"postgres", "redis", "memoia"})
-            for service in ("postgres", "redis"):
-                self.assertFalse(config["services"][service].get("ports"))
-                self.assertEqual(config["services"][service]["volumes"][0]["source"], "/opt/memoia/data/" + service)
+            self.assertEqual(set(config["services"]), {"redis", "memoia"})
+            self.assertFalse(config["services"]["redis"].get("ports"))
+            self.assertEqual(config["services"]["redis"]["volumes"][0]["source"], "/opt/memoia/data/redis")
+            self.assertEqual(config["networks"]["data"]["name"], "jianify-data")
+            self.assertTrue(config["networks"]["data"]["external"])
             api = config["services"]["memoia"]
             self.assertEqual(api["ports"][0]["host_ip"], "127.0.0.1")
             self.assertEqual(api["ports"][0]["published"], "8000")
@@ -54,6 +59,24 @@ class ComposeContract(unittest.TestCase):
             self.assertFalse(volume["bind"].get("create_host_path", False))
             self.assertNotIn("MEMOBASE_EMBEDDING_MODEL", api["environment"])
             self.assertEqual(api["labels"]["io.jianify.environment"], "test")
+            self.assertIn("data", api["networks"])
+            self.assertIn("ingress", api["networks"])
+            self.assertFalse(config["networks"]["ingress"].get("internal", False))
+            self.assertEqual(api["environment"]["DATABASE_URL"], values["DATABASE_URL"])
+            target = root / "rehearsals/restore-fixture"
+            (target / "api").mkdir(parents=True)
+            (target / "api/config.yaml").write_text("fixture-only")
+            candidate = recovery.isolated_config(
+                config, {"postgres_image": "pgvector/pgvector:pg17@sha256:" + "b" * 64}, target)
+            file = target / "docker-compose.json"
+            file.write_text(json.dumps(candidate))
+            isolated = subprocess.run(["docker", "compose", "--env-file", str(env), "-f", str(file),
+                                       "--project-name", candidate["name"],
+                                       "config", "--format", "json"], capture_output=True, text=True, timeout=30)
+            self.assertEqual(isolated.returncode, 0, isolated.stderr)
+            effective = json.loads(isolated.stdout)
+            recovery.validate_isolation(effective, target, config)
+            self.assertTrue(all(network["internal"] for network in effective["networks"].values()))
             self.assertEqual(env.read_text(), "\n".join(lines) + "\n")
 
 

@@ -48,7 +48,75 @@ class BackupBoundary(unittest.TestCase):
         for results in (["1"], ["0", "fixture-lock"], ["0", "", "fixture-queue"]):
             with self.subTest(results=results), patch.object(recovery, "run", side_effect=results):
                 with self.assertRaises(RuntimeError):
-                    recovery.check_quiet(["docker", "compose"], config)
+                    recovery.check_quiet(["docker", "compose"], config, "company-postgres")
+
+    def test_paired_backup_dumps_only_memoia_database_and_redis_at_one_cutpoint(self):
+        (self.root / "api").mkdir()
+        (self.root / "data/redis").mkdir(parents=True)
+        for name in (".env", "docker-compose.yml"):
+            (self.root / name).write_text("fixture-only")
+        (self.root / "api/config.yaml").write_text("fixture-only")
+        (self.root / "data/redis/dump.rdb").write_bytes(b"redis-snapshot")
+        (self.state / "schema.sha256").write_text("f" * 64)
+        (self.state / "infra-config.sha256").write_text("current-fingerprint")
+        database_url = "postgresql://jianify_app:fixture@jianify-postgres/memoia"
+        config = {"name": "memoia-test", "services": {"redis": {"image": "redis-image"},
+                  "memoia": {"environment": {"PROJECT_ID": "fixture", "DATABASE_URL": database_url}}}}
+        postgres = {"container_id": "company-postgres", "image": "pgvector/pgvector:pg17@sha256:" + "a" * 64,
+                    "fingerprint": "company-fingerprint"}
+        calls = []
+        stopped = False
+
+        def command(args, *, input=None, output=None):
+            nonlocal stopped
+            calls.append(args)
+            if args[-2:] == ["--format", "json"]:
+                return json.dumps(config)
+            if args[0] == "bash":
+                return "current-fingerprint"
+            if args[:3] == ["docker", "exec", "-i"]:
+                if "pg_dump" in args:
+                    output.write(b"pg-dump")
+                    return None
+                if "pg_tables" in args[-1]:
+                    return "users"
+                return "0"
+            if "--scan" in args:
+                return ""
+            if "SET" in args or "SAVE" in args:
+                return "OK"
+            if "ps" in args:
+                return args[-1]
+            if "stop" in args:
+                stopped = True
+                return ""
+            if "up" in args:
+                return ""
+            raise AssertionError(args)
+
+        def live(container):
+            if container == "redis":
+                return {"Config": {"Image": "redis-image"}, "Mounts": [
+                    {"Source": str(self.root / "data/redis"), "Destination": "/data"}]}
+            return {"Config": {"Image": "fixture-image", "Env": ["DATABASE_URL=" + database_url]}, "State": {
+                "Health": {"Status": "healthy"}, "Running": not stopped, "ExitCode": 0}}
+
+        with (patch.object(recovery, "run", side_effect=command), patch.object(recovery, "inspect", side_effect=live),
+              patch.object(recovery, "company_postgres", return_value=postgres),
+              patch.object(recovery, "database_counts", return_value={"users": 1}),
+              patch.object(recovery, "secure_file"), patch.object(recovery, "wait_healthy")):
+            recovery.backup()
+
+        self.assertFalse((self.state / "pending-maintenance").exists())
+        backup = next((self.state / "backups").iterdir())
+        self.assertEqual((backup / "postgres.dump").read_bytes(), b"pg-dump")
+        self.assertEqual((backup / "redis.rdb").read_bytes(), b"redis-snapshot")
+        self.assertEqual(json.loads((backup / "backup.json").read_text())["postgres_image"], postgres["image"])
+        dump = next(args for args in calls if "pg_dump" in args)
+        self.assertEqual(dump[:4], ["docker", "exec", "-i", "company-postgres"])
+        self.assertEqual(dump[-5:], ["-U", "jianify_app", "-d", "memoia", "-Fc"])
+        self.assertLess(next(i for i, args in enumerate(calls) if "stop" in args),
+                        next(i for i, args in enumerate(calls) if "pg_dump" in args))
 
 
 class RestoreBoundary(unittest.TestCase):
@@ -63,16 +131,17 @@ class RestoreBoundary(unittest.TestCase):
             (self.backup / name).write_text("fixture-only")
         hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in self.backup.iterdir()}
         self.manifest = {"image": "fixture-image", "hashes": hashes, "database_counts": {"users": 1},
+                         "postgres_image": "pgvector/pgvector:pg17@sha256:" + "a" * 64,
                          "redis_probe": ["fixture-probe", "fixture-value"]}
         (self.backup / "backup.json").write_text(json.dumps(self.manifest))
         self.source = {
-            "name": "memoia-test", "networks": {"backend": {"name": "memoia-test_backend"}},
+            "name": "memoia-test", "networks": {"backend": {"name": "memoia-test_backend"},
+                                                  "data": {"name": "jianify-data", "external": True}},
             "services": {
-                "postgres": {"volumes": [{"source": str(self.root / "data/postgres"), "target": "/var/lib/postgresql/data"}]},
                 "redis": {"volumes": [{"source": str(self.root / "data/redis"), "target": "/data"}],
                           "command": ["sh", "-c", "exec redis-server --appendonly yes"]},
                 "memoia": {"ports": [{"published": "8000"}], "volumes": [{"source": "config.yaml", "target": "/app/config.yaml"}],
-                           "environment": {"DATABASE_URL": "postgresql://fixture:fixture@postgres/fixture",
+                           "environment": {"DATABASE_URL": "postgresql://jianify_app:fixture@jianify-postgres/memoia",
                                            "REDIS_URL": "redis://:fixture@redis/0"}}
             }}
         self.calls = []
@@ -111,6 +180,8 @@ class RestoreBoundary(unittest.TestCase):
         config = json.loads((self.target / "docker-compose.yml").read_text())
         self.assertEqual(config["name"], "memoia-restore-fixture")
         self.assertNotIn("ports", config["services"]["memoia"])
+        self.assertEqual(config["services"]["postgres"]["networks"]["data"]["aliases"], ["jianify-postgres"])
+        self.assertFalse(any(net.get("external") for net in config["networks"].values()))
         self.assertTrue(all("--project-name" in call for call in self.calls[1:]))
         get = [i for i, call in enumerate(self.calls) if "GET" in call]
         enable = next(i for i, call in enumerate(self.calls) if "CONFIG" in call)
@@ -142,8 +213,14 @@ class RestoreBoundary(unittest.TestCase):
         config["name"] = "memoia-restore-fixture"
         config["services"]["memoia"].pop("ports")
         config["networks"]["backend"]["name"] = "memoia-restore-fixture_backend"
-        for service in ("postgres", "redis"):
-            config["services"][service]["volumes"][0]["source"] = str(self.target / "data" / service)
+        config["networks"]["backend"]["internal"] = True
+        config["networks"]["data"] = {"name": "memoia-restore-fixture_data", "internal": True}
+        config["services"]["redis"]["volumes"][0]["source"] = str(self.target / "data/redis")
+        config["services"]["postgres"] = {
+            "environment": {"POSTGRES_USER": "jianify_app", "POSTGRES_PASSWORD": "fixture", "POSTGRES_DB": "memoia"},
+            "volumes": [{"source": str(self.target / "data/postgres"), "target": "/var/lib/postgresql/data"}],
+            "networks": {"data": {"aliases": ["jianify-postgres"]}},
+        }
         recovery.validate_isolation(config, self.target, self.source)
         for change in ("port", "network", "mount", "connection"):
             bad = copy.deepcopy(config)

@@ -47,6 +47,14 @@ if command == "bash" and os.getenv("FIXTURE_SMOKE_FAIL"):
 
 
 class PublicationContract(unittest.TestCase):
+    def test_deployment_gate_uses_repository_variable_before_environment_start(self):
+        job = yaml.safe_load(WORKFLOW.read_text())["jobs"]["deploy-test"]
+        guide = (WORKFLOW.parents[2] / "deploy/README.md").read_text()
+        self.assertEqual(job["if"], "${{ vars.MEMOIA_TEST_DEPLOY_ENABLED == 'true' }}")
+        self.assertEqual(job["environment"]["name"], "test")
+        self.assertIn("Repository Variable** `MEMOIA_TEST_DEPLOY_ENABLED`", guide)
+        self.assertIn("Settings → Secrets and variables → Actions → Variables", guide)
+
     def test_same_source_publications_are_serialized_without_cancellation(self):
         job = yaml.safe_load(WORKFLOW.read_text())["jobs"]["publish-test"]
         self.assertEqual(job["concurrency"], {

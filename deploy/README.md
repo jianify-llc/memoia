@@ -9,11 +9,13 @@ Agent 操作远端服务器前，必须阅读相邻仓库 `../Jianify-LLC/ops/se
 ├── .env                         宿主机环境与 Tunnel token，Jianify-LLC 管理
 └── server/                      初始化与检查脚本
 
+/opt/postgres/                   Jianify-LLC 管理，共享 PG17/pgvector 与 jianify-data 私有网络
+
 /opt/memoia/                     root:root 0700
 ├── docker-compose.yml           操作员维护，与验收模板匹配
 ├── .env                         root:root 0600
 ├── api/config.yaml              root:root 0600，只读挂载到 /app/config.yaml
-├── data/{postgres,redis}/        固定绝对路径，容器管理数据权限
+├── data/redis/                   固定绝对路径，容器管理数据权限
 └── .deploy/                     root:root 0700，运行记录/候选脚本
 ```
 
@@ -31,29 +33,38 @@ init-config 仅准备 /opt/memoia 下的目录、权限和缺失模板，不启�
 
 test 填 JIANIFY_ENV=test、COMPOSE_PROJECT_NAME=memoia-test、API_HOSTS=https://test-memoia.jianify.dev。online 填对应环境/project/域名，但发布入口仍拒绝 online。两台服务器的数据根均为 /opt/memoia/data。
 
-填写数据库/Redis 密码、ACCESS_TOKEN、固定 PROJECT_ID、LLM/embedding 密钥和连接 URL。URL 使用 postgres/redis 服务名并 URL-encode 密码。provider/endpoint/模型/维度/处理参数放在 api/config.yaml，密钥通过 .env 注入；示例模型仍需实际调用验收。
+填写数据库/Redis 密码、ACCESS_TOKEN、固定 PROJECT_ID、LLM/embedding 密钥和连接 URL。数据库固定为 `postgresql://jianify_app:<URL-encoded password>@jianify-postgres:5432/memoia`，连接公司私有网络中的 `memoia` 数据库；Redis 仍使用本 Compose 的 `redis` 服务名。共享应用登录角色也可连接公司的 `gatus` 数据库，因此这里不宣称按角色隔离两个库；应用只使用自己的数据库名。provider/endpoint/模型/维度/处理参数放在 api/config.yaml，密钥通过 .env 注入；示例模型仍需实际调用验收。
 
-MEMOIA_IMAGE 可填初始候选总 manifest digest，不用 latest；所有应用入口仍要求显式传入 digest，覆盖仅限本次 Compose 进程，不改写 .env。PG/Redis 模板固定 digest，独立维护。真实配置、密钥、备份和私钥不进入 Git/镜像/公开 artifact。
+MEMOIA_IMAGE 可填初始候选总 manifest digest，不用 latest；所有应用入口仍要求显式传入 digest，覆盖仅限本次 Compose 进程，不改写 .env。PG 镜像由公司固定，Redis 模板在本仓库固定 digest。真实配置、密钥、备份和私钥不进入 Git/镜像/公开 artifact。
 
 ## 首次安装边界
 
-Compose 只有 PG+pgvector、Redis、API。PG/Redis 无主机端口；Redis 开 AOF，认证 healthcheck 确认 PONG。API 仅 127.0.0.1:8000；宿主机 Tunnel 连接该地址，应用 Compose 不含 cloudflared。YAML 使用只读 bind，不允许缺失文件被自动建成目录。
+本 Compose 只有 Redis、API；公司 PostgreSQL 在 `/opt/postgres` 独立管理，先部署并通过 `postgresctl.py status` 验证，不允许日常 Memoia 发布重建它。数据库网络 `jianify-data` 为外部私有网络，Redis 无主机端口、开启 AOF，认证 healthcheck 确认 PONG。API 仅 127.0.0.1:8000；宿主机 Tunnel 连接该地址，应用 Compose 不含 cloudflared。YAML 使用只读 bind，不允许缺失文件被自动建成目录。
 
-首次启动由操作员使用 `deploy-memoia.sh init /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256`。init-config 不等于安装或验收。init 必须确认无现有容器、固定数据目录为空、解析后的挂载确实是 /opt/memoia/data，API 连接确实指向同一套 postgres/redis 服务且凭据匹配。启动后保留 pending，不能自动宣称业务通过；分别验证真实模型、embedding、Bearer 正反例、SDK 写入/flush/最终事件 ID/画像与事件/删除、重启持久性、容量和 IPv4/IPv6 无公网旁路，再 finalize。空库用现有初始化，没有可用 Alembic 链，不运行虚构 upgrade head。
+首次启动由操作员使用 `deploy-memoia.sh init /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256`。init-config 不等于安装或验收。init 必须确认无现有应用容器、Redis 数据目录和公司 `memoia` 数据库均为空、解析后的 Redis 挂载与数据库网络正确、公司 PostgreSQL 状态健康。启动后保留 pending，不能自动宣称业务通过；分别验证真实模型、embedding、Bearer 正反例、SDK 写入/flush/最终事件 ID/画像与事件/删除、重启持久性、容量和 IPv4/IPv6 无公网旁路，再 finalize。空库用现有初始化，没有可用 Alembic 链，不运行虚构 upgrade head。
 
-init 记录 infra-config.sha256 和 schema.sha256；后者只读取镜像内 ORM、建表连接层和迁移源码，不导入应用或连接 DB。Memoia 独立管理自己的服务生命周期；是否已有 Luvel 等消费者不作为日常发布资格，不再创建或读取 standalone-mode 标记。
+已有 test 部署迁往公司 PostgreSQL 只做一次真实停写切换，不运行 `init`，也不增加隔离恢复演练。按以下顺序执行：
+
+1. 推送含新部署脚本和 Compose 的 test 提交前，先将 GitHub **Repository Variable** `MEMOIA_TEST_DEPLOY_ENABLED` 设为 `false` 并核对（Settings → Secrets and variables → Actions → Variables）。`deploy-test` 的 job-level `if` 在读取 test Environment 配置之前求值，因此放在 Environment Variables 中不能控制这个门闩。test 推送仍会测试、构建和发布候选镜像；该门闩使 `deploy-test` 跳过。否则工作流会把新脚本传到仍使用旧 Compose 的服务器并调用 `prepare`，在切换前失败。跳过的 job 也不会传输新脚本，因此接纳阶段须单独将已审查的 `deploy-memoia.sh`、`infra-fingerprint.sh`、`schema-fingerprint.sh` 和 `recovery.py` 放入同一受保护的服务器候选目录。
+2. 关闭所有外部写入并保持停写状态，使用**仍匹配旧 Compose 的旧脚本**生成并离机保存配套 PG／Redis 备份；核对旧实例、备份哈希、表行数和迁移期容量。`backup` 成功后会重新启动旧 API，外部写入仍须保持关闭。随后正常停止旧 API 与旧 PG。
+3. 公司 PG 管理员确认目标 `memoia` 库为空，先安装 `vector`；将旧 dump 恢复到该库时使用 `--no-owner --no-acl --no-comments`，避免扩展注释的所有者冲突。核对表行数和扩展，再切换服务器 Compose／`.env`，用 `deploy-state` 中原已验收镜像启动连接新库的 API，验证真实业务读写与实际容量。
+4. 使用新候选脚本执行 `deploy-memoia.sh adopt-external-postgres /opt/memoia IMAGE SOURCE_SHA RUN_ID NEW_COMPOSE_SHA256`；IMAGE、SOURCE_SHA、RUN_ID 必须与切换前的 `deploy-state` 一致，Compose 哈希取服务器新文件。该入口只在当前镜像健康、运行时数据库连接与新配置一致、旧 PG 已停、公司 PostgreSQL 与 Redis 均合格时更新基线，保存旧记录并清除旧基础设施下的 `previous-accepted`。接纳和业务验收完成后再解除写入门闩，并按后续发布需要重新开启自动部署。
+
+普通 `prepare` 不会自动接受基础设施漂移。切换前的 PostgreSQL 数据目录只保留为受保护回退证据，不由 `init-config` 更改或清除；新库发生写入后，不能直接回退旧数据。
+
+init 记录 infra-config.sha256 和 schema.sha256；前者包含公司 PostgreSQL 只读配置指纹、Memoia Redis、外部网络与应用连接契约，后者只读取镜像内 ORM、建表连接层和迁移源码，不导入应用或连接 DB。Memoia 独立管理自己的服务生命周期；是否已有 Luvel 等消费者不作为日常发布资格，不再创建或读取 standalone-mode 标记。
 
 ## 日常发布
 
 deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/run ID/Compose hash，sudo -n 运行，不依赖继承调用者秘密环境。
 
 - 配置只读；MEMOIA_IMAGE 仅临时传入 Compose，不写 .env 或额外 image.env。
-- .deploy 保存锁、pending、成功身份、PG/Redis 容器及宿主机 Tunnel 身份。失败保留待确认记录，后续发布阻断，不盲目清除/重放。
+- .deploy 保存锁、pending、成功身份、公司 PG/本地 Redis 容器及宿主机 Tunnel 身份。失败保留待确认记录，后续发布阻断，不盲目清除/重放。
 - 仅 --no-deps --no-build 更新 API；不重启基础设施，不跑 bootstrap、不调整 Swap。
 - 切换前核对实际 API 镜像与 deploy-state 的已验收 digest；人工替换造成漂移或缺少成功记录时停止，不自动修改记录来接受漂移。prepare 和 restore-api 使用同一检查，init 不要求已有版本。
 - 拉取及 OCI revision/schema 校验在停机前完成；旧 API 停止后必须 exit 0。超时强杀/非正常退出保留 pending，不继续启动候选。队列空或锁不存在不能替代退出判据。
 - 当前只部署 test；旧 run/较新 HEAD/未完成的上次发布或维护/配置变化/Tunnel 未连接仍阻断。日常 prepare 和 restore-api 不查询 processing/failed buffer 或 Redis 锁队列，也不要求调用方先停写。
-- 指纹包含 PG/Redis/挂载/连接及完整 YAML 哈希，同维度的 provider、模型或 endpoint 变化也不能静默发布。配置变更单独维护；仅轮换 .env 中密钥不等于向量迁移。两阶段间配置变化禁止提交成功。
+- 指纹包含公司 PG 脱敏配置指纹、Redis/挂载/连接、外部网络及完整 YAML 哈希，同维度的 provider、模型或 endpoint 变化也不能静默发布。配置变更单独维护；仅轮换 .env 中密钥不等于向量迁移。两阶段间配置或 PG 容器变化禁止提交成功。
 
 .env 的 MEMOIA_IMAGE 是初始人工选择，后续实际版本以 .deploy/deploy-state 为准。不要直接用旧 .env 重建 API；恢复必须指定已验收 digest 并确认 schema/处理状态。finalize 保存 accepted/SHA；切到不同镜像时才更新 previous-accepted。相同版本重验不会覆盖真正的上一版本。
 
@@ -63,13 +74,13 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 
 publish.yaml 沿用分支门禁：普通分支/PR 验证，test 双架构发布并匿名拉取，release/tag 复用成功 test Deployment 的同 SHA 总 digest。同仓库、同 SHA 的候选发布串行执行，不取消正在发布的 job；进入 job 后再次检查已有候选，避免 push 与手动运行同时覆盖候选标签。GHCR 需 Public；服务器没有 GitHub 写权限凭据。
 
-首次安装/业务验收前 MEMOIA_TEST_DEPLOY_ENABLED 保持关闭。test Environment 限 test 分支。GitHub Actions 直接连接服务器公网 SSH，不再经过 Cloudflare Tunnel 或依赖 Access Service Token；业务 HTTPS API 继续使用宿主机 Tunnel。
+首次安装/业务验收前，仓库级 `MEMOIA_TEST_DEPLOY_ENABLED` 保持关闭。test Environment 限 test 分支。GitHub Actions 直接连接服务器公网 SSH，不再经过 Cloudflare Tunnel 或依赖 Access Service Token；业务 HTTPS API 继续使用宿主机 Tunnel。
 
 test Environment 配置：
 
 - Environment Secrets：DEPLOY_HOST 填服务器公网 IPv4 或直接解析到该主机的 DNS hostname；DEPLOY_PORT 填实际 SSH 端口；DEPLOY_USER 填专用 github 账号。三者必须填写，不从 Variables 读取，也不使用公开的端口默认值。
 - 其余 Environment Secrets：DEPLOY_SSH_PRIVATE_KEY、DEPLOY_SSH_KNOWN_HOSTS、MEMOIA_TEST_BEARER_TOKEN。CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET 不再被工作流读取，已有值可由操作员移除。
-- 设置入口为 Settings → Environments → test → Environment secrets。已有同名 Variables 不会被新工作流使用，迁移完成后可移除；MEMOIA_TEST_DEPLOY_ENABLED 仍是非敏感的发布开关 Variable。环境限制继续保留，首次安装与专用密钥/业务验收完成前不得打开。
+- 部署凭据设置入口为 Settings → Environments → test → Environment secrets；非敏感部署门闩 `MEMOIA_TEST_DEPLOY_ENABLED` 的设置入口为 Settings → Secrets and variables → Actions → Variables，必须使用仓库级 Variable。已有与凭据同名的 Variables 不会被新工作流使用，迁移完成后可移除。环境限制继续保留，首次安装与专用密钥/业务验收完成前不得打开门闩。
 - IP 不是认证凭据，但部署目标不必在公开代码或日志中展示。Secrets 避免明文存储目标值并提供日志遮罩；遮罩不能代替权限、可信工作流和防火墙，也不能保证所有变形后的值自动隐藏。具体语义见 [GitHub Secrets 官方说明](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)。
 - 独立部署公钥由操作员配置到 /home/github/.ssh/authorized_keys，github:github 0700/0600；专用私钥不复用 Lightsail PEM 或本机 GitHub 账号私钥。服务运行 token 仍只在 /opt/jianify/.env，与 SSH 部署凭据分离。
 - DEPLOY_SSH_KNOWN_HOSTS 必须匹配新的直连目标：端口 22 使用 `host key-type public-key`，其它端口使用 `[host]:port key-type public-key`。从可信渠道核验主机指纹后配置；不能沿用仅包含 Tunnel hostname 的记录，也不在 CI 中盲目信任 ssh-keyscan 结果。
@@ -89,11 +100,11 @@ reverify-test 用同 digest，只证明部署通道；A→B 更新和 B→A 恢�
 
 `restore-api /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256` 只接受 previous-accepted 中的上一已验收版本，要求当前配置、schema 和持久化处理协议兼容；按同一服务停止/启动流程切换，随后公网验收并 finalize。恢复不会降低 run 高水位，也不恢复旧数据库快照。恢复不是失败后的自动动作。
 
-`backup /opt/memoia` 不依赖 standalone-mode，但仍要求当前已验收、无 pending/处理中或失败 buffer/锁队列。这是配套备份的静止切点要求，不是日常发布门禁。正常停 API、复查静止切点后 pg_dump，再同步 Redis SAVE 并确认 OK；API 停止期间业务写入不可用，不另查消费者身份。配套数据、配置、哈希、表行数与持久 Redis 探针保存在 .deploy/backups/唯一目录。仅切点成功才恢复同一 API；失败保留 pending-maintenance 与停写状态，人工核查，不自动重试。备份含秘密，必须保护并导出服务器外，不能放公开 artifact。
+`backup /opt/memoia` 不依赖 standalone-mode，但仍要求当前已验收、无 pending/处理中或失败 buffer/锁队列。这是配套备份的静止切点要求，不是日常发布门禁。正常停 API、复查静止切点后从公司 PostgreSQL 容器只导出 `memoia` 数据库，再同步 Redis SAVE 并确认 OK；API 停止期间业务写入不可用，不另查消费者身份。配套数据、配置、哈希、表行数、固定 PG 镜像身份与持久 Redis 探针保存在 .deploy/backups/唯一目录。公司实例备份不能代替这份 PG／Redis 配套恢复。仅切点成功才恢复同一 API；失败保留 pending-maintenance 与停写状态，人工核查，不自动重试。备份含秘密，必须保护并导出服务器外，不能放公开 artifact。
 
-`restore-data /opt/memoia BACKUP_DIRECTORY /opt/memoia/rehearsals/restore-UNIQUE` 只接受完整校验通过的本地配套备份及从未存在的目标目录；空但已存在的目录也拒绝。使用独立 project/network/config/data，显式 --project-name 防止 .env 的正式 project 名覆盖隔离身份；不挂 Tunnel，不映射任何主机端口，检查解析后的连接目标及实际挂载。先关闭 AOF 加载 RDB，验证持久探针及 PG 表行数；再启用 AOF、等重写完成、正常停止、按正式 AOF 配置重启后再次验证，最后启动隔离 API 并验证健康。失败保留隔离数据供排查；不覆盖、清空或恢复当前业务库。
+`restore-data /opt/memoia BACKUP_DIRECTORY /opt/memoia/rehearsals/restore-UNIQUE` 只接受完整校验通过的本地配套备份及从未存在的目标目录；空但已存在的目录也拒绝。使用备份记录的 PG 镜像临时启动独立 PostgreSQL，给予它隔离网络内的 `jianify-postgres` 别名，绝不接入正式 `jianify-data`；Redis 和 API 同样使用独立 project/network/config/data，显式 --project-name 防止 .env 的正式 project 名覆盖隔离身份。不挂 Tunnel，不映射任何主机端口，检查解析后的连接目标及实际挂载。先关闭 AOF 加载 RDB，验证持久探针及 PG 表行数；再启用 AOF、等重写完成、正常停止、按正式 AOF 配置重启后再次验证，最后启动隔离 API 并验证健康。失败保留隔离数据供排查；不覆盖、清空或恢复当前业务库。
 
-入口与自动测试不能代替真实验收。首次安装、配套离机备份/隔离恢复、两个不同 digest 的更新与显式恢复、远端 Actions、SDK 业务和容量证据必须分别记录；online 保持关闭。
+入口与自动测试不能代替真实验收。这次测试环境数据库切换记录一次配套备份、迁移后业务读写和实际容量即可；隔离恢复工具保留，不额外重复演练。原有镜像版本更新／恢复与远端 Actions 的验收仍按各自发布规则执行；online 保持关闭。
 
 ## 自动验证
 

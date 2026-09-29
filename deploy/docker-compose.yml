@@ -1,26 +1,6 @@
 name: ${COMPOSE_PROJECT_NAME:?Set COMPOSE_PROJECT_NAME}
 
 services:
-  postgres:
-    image: ${POSTGRES_IMAGE:?Set a pgvector image digest}
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB}
-    volumes:
-      - ${MEMOIA_DATA_ROOT:?Set an absolute data directory}/postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-    logging:
-      options:
-        max-size: 10m
-        max-file: "3"
-    networks: [backend]
-
   redis:
     image: ${REDIS_IMAGE:?Set a Redis image digest}
     restart: unless-stopped
@@ -64,17 +44,18 @@ services:
         bind:
           create_host_path: false
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     logging:
       options:
         max-size: 10m
         max-file: "3"
-    networks: [backend, ingress]
+    networks: [backend, ingress, data]
 
 networks:
   backend:
     internal: true
   ingress:
+  data:
+    external: true
+    name: jianify-data

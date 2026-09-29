@@ -9,10 +9,11 @@ import subprocess
 import sys
 import time
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 
 ROOT = Path("/opt/memoia")
+POSTGRESCTL = "/opt/postgres/postgresctl.py"
 
 
 def run(args, *, input=None, output=None):
@@ -40,15 +41,26 @@ def inspect(container):
     return json.loads(run(["docker", "inspect", container]))[0]
 
 
+def company_postgres():
+    status = json.loads(run(["python3", POSTGRESCTL, "status"]))
+    if (status.get("healthy") is not True or status.get("mount") != "/opt/postgres/data"
+            or status.get("network") != "jianify-data" or not status.get("container_id")):
+        raise RuntimeError("Company PostgreSQL identity or health is invalid")
+    return status
+
+
+def postgres_command(container, *args):
+    return ["docker", "exec", "-i", container, *args]
+
+
 def redis_command(command, *args):
     return command + ["exec", "-T", "redis", "sh", "-c",
                       'REDISCLI_AUTH="$REDIS_PASSWORD" exec redis-cli "$@"', "sh", *args]
 
 
-def check_quiet(command, config):
+def check_quiet(command, config, postgres_container):
     sql = "SELECT count(*) FROM buffer_zones WHERE status IN ('processing','failed')"
-    count = run(command + ["exec", "-T", "postgres", "sh", "-c",
-                         'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "$1"', "sh", sql])
+    count = run(postgres_command(postgres_container, "psql", "-U", "jianify_app", "-d", "memoia", "-Atc", sql))
     if count != "0":
         raise RuntimeError("Processing or failed buffers block maintenance")
     project = config["services"]["memoia"]["environment"]["PROJECT_ID"]
@@ -72,10 +84,9 @@ def wait_healthy(command, service):
     raise RuntimeError(f"{service} is not healthy; isolated stack preserved")
 
 
-def database_counts(command):
+def database_counts(postgres_container):
     sql = "SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename"
-    base = command + ["exec", "-T", "postgres", "sh", "-c",
-                      'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "$1"', "sh"]
+    base = postgres_command(postgres_container, "psql", "-U", "jianify_app", "-d", "memoia", "-Atc")
     tables = run(base + [sql]).splitlines()
     return {table: int(run(base + ['SELECT count(*) FROM "' + table.replace('"', '""') + '"'])) for table in tables}
 
@@ -92,11 +103,19 @@ def validate_isolation(config, target, source_config):
             raise RuntimeError("Restore data mount is not isolated")
         if config["services"][service].get("ports"):
             raise RuntimeError("Restore database ports must not be published")
-    for field, host in (("DATABASE_URL", "postgres"), ("REDIS_URL", "redis")):
+    for field, host in (("DATABASE_URL", "jianify-postgres"), ("REDIS_URL", "redis")):
         if urlsplit(config["services"]["memoia"]["environment"][field]).hostname != host:
             raise RuntimeError("Restore connections must target isolated Compose services")
+    if "jianify-postgres" not in config["services"]["postgres"].get("networks", {}).get("data", {}).get("aliases", []):
+        raise RuntimeError("Isolated PostgreSQL must own the expected database alias")
+    db = urlsplit(config["services"]["memoia"]["environment"]["DATABASE_URL"])
+    pg = config["services"]["postgres"]["environment"]
+    if (db.path != "/memoia" or unquote(db.username or "") != "jianify_app"
+            or pg.get("POSTGRES_DB") != "memoia" or pg.get("POSTGRES_USER") != "jianify_app"
+            or unquote(db.password or "") != pg.get("POSTGRES_PASSWORD")):
+        raise RuntimeError("Isolated PostgreSQL credentials or database differ from the API")
     for network in config.get("networks", {}).values():
-        if network.get("external") or not network.get("name", "").startswith(name + "_"):
+        if network.get("external") or network.get("internal") is not True or not network.get("name", "").startswith(name + "_"):
             raise RuntimeError("Restore cannot reuse an existing network")
 
 
@@ -112,18 +131,22 @@ def backup():
         raise RuntimeError("Online maintenance is disabled")
     for file in (ROOT / ".env", ROOT / "api/config.yaml"):
         secure_file(file)
-    for service, destination in (("postgres", "/var/lib/postgresql/data"), ("redis", "/data")):
-        live = inspect(run(command + ["ps", "-q", service]))
-        mounts = [m["Source"] for m in live["Mounts"] if m["Destination"] == destination]
-        if mounts != [str(ROOT / "data" / service)] or live["Config"]["Image"] != config["services"][service]["image"]:
-            raise RuntimeError("Live infrastructure does not match fixed deployment")
+    postgres = company_postgres()
+    live = inspect(run(command + ["ps", "-q", "redis"]))
+    mounts = [m["Source"] for m in live["Mounts"] if m["Destination"] == "/data"]
+    if mounts != [str(ROOT / "data/redis")] or live["Config"]["Image"] != config["services"]["redis"]["image"]:
+        raise RuntimeError("Live Redis does not match fixed deployment")
     if run(["bash", str(Path(__file__).with_name("infra-fingerprint.sh")), str(ROOT)]) != (state / "infra-config.sha256").read_text().strip():
         raise RuntimeError("Infrastructure configuration changed")
-    check_quiet(command, config)
+    check_quiet(command, config, postgres["container_id"])
     api = run(command + ["ps", "-q", "memoia"])
     live = inspect(api)
     if live["Config"]["Image"] != image or live["State"].get("Health", {}).get("Status") != "healthy":
         raise RuntimeError("Backup requires the accepted healthy API")
+    api_database = [item.removeprefix("DATABASE_URL=") for item in live["Config"]["Env"]
+                    if item.startswith("DATABASE_URL=")]
+    if api_database != [config["services"]["memoia"]["environment"]["DATABASE_URL"]]:
+        raise RuntimeError("Running API database connection differs from the paired backup source")
     identifier = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8]
     directory = state / "backups" / identifier
     directory.mkdir(parents=True, mode=0o700)
@@ -133,15 +156,22 @@ def backup():
     stopped = inspect(api)["State"]
     if stopped.get("Running") or stopped.get("ExitCode") != 0:
         raise RuntimeError("API did not stop gracefully; no backup accepted")
-    check_quiet(command, config)
+    current_postgres = company_postgres()
+    if (current_postgres["container_id"] != postgres["container_id"]
+            or current_postgres["fingerprint"] != postgres["fingerprint"]):
+        raise RuntimeError("Company PostgreSQL changed during the backup cutpoint")
+    check_quiet(command, config, postgres["container_id"])
     # 持久探针不参与业务队列；保证恢复验证的不是过期 TTL 或旧 RDB。
     probe_key, probe_value = "memoia:restore-probe:" + identifier, uuid.uuid4().hex
     if run(redis_command(command, "SET", probe_key, probe_value)) != "OK":
         raise RuntimeError("Redis restore probe failed")
-    counts = database_counts(command)
+    counts = database_counts(postgres["container_id"])
     with (directory / "postgres.dump").open("xb") as output:
-        run(command + ["exec", "-T", "postgres", "sh", "-c",
-                       'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc'], output=output)
+        run(postgres_command(postgres["container_id"], "pg_dump", "-U", "jianify_app", "-d", "memoia", "-Fc"), output=output)
+    current_postgres = company_postgres()
+    if (current_postgres["container_id"] != postgres["container_id"]
+            or current_postgres["fingerprint"] != postgres["fingerprint"]):
+        raise RuntimeError("Company PostgreSQL changed while producing the paired dump")
     # SAVE 是同步屏障；必须拿到本次保存的 OK，不能复制先前 BGSAVE 的旧快照。
     if run(redis_command(command, "SAVE")) != "OK":
         raise RuntimeError("Redis synchronous snapshot failed")
@@ -151,6 +181,7 @@ def backup():
     shutil.copyfile(ROOT / "docker-compose.yml", directory / "docker-compose.yml")
     hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in directory.iterdir() if p.is_file()}
     manifest = {"image": image, "accepted": accepted, "schema": (state / "schema.sha256").read_text().strip(),
+                "postgres_image": postgres["image"], "postgres_fingerprint": postgres["fingerprint"],
                 "hashes": hashes, "database_counts": counts, "redis_probe": [probe_key, probe_value]}
     (directory / "backup.json").write_text(json.dumps(manifest, indent=2) + "\n")
     # 切点成功后才恢复同一个已验收 API；任何失败保留停写和维护标记。
@@ -158,6 +189,36 @@ def backup():
     wait_healthy(command, "memoia")
     pending.unlink()
     print(f"Paired backup complete: {directory}")
+
+
+def isolated_config(source, manifest, target):
+    # 备份目录 config 的相对 YAML 路径不同；所有持久资源改为隔离路径。
+    config = json.loads(json.dumps(source))
+    config["name"] = "memoia-" + target.name
+    for network, values in config["networks"].items():
+        values.pop("external", None)
+        values["name"] = config["name"] + "_" + network
+        values["internal"] = True
+    config["services"]["redis"]["volumes"][0]["source"] = str(target / "data/redis")
+    database = urlsplit(config["services"]["memoia"]["environment"]["DATABASE_URL"])
+    if (database.hostname != "jianify-postgres" or database.path != "/memoia"
+            or unquote(database.username or "") != "jianify_app" or not database.password):
+        raise RuntimeError("Paired backup does not describe the company Memoia database")
+    config["services"]["postgres"] = {
+        "image": manifest["postgres_image"],
+        "environment": {"POSTGRES_USER": "jianify_app", "POSTGRES_PASSWORD": unquote(database.password),
+                        "POSTGRES_DB": "memoia"},
+        "volumes": [{"type": "bind", "source": str(target / "data/postgres"),
+                     "target": "/var/lib/postgresql/data"}],
+        "healthcheck": {"test": ["CMD-SHELL", 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"'],
+                        "interval": "10s", "timeout": "5s", "retries": 12},
+        "networks": {"data": {"aliases": ["jianify-postgres"]}},
+    }
+    config["services"]["memoia"].pop("ports", None)
+    config["services"]["memoia"]["volumes"][0]["source"] = str(target / "api/config.yaml")
+    # 先从 RDB 加载；禁止正式 AOF 配置抢先覆盖 RDB。
+    config["services"]["redis"]["command"][2] = 'exec redis-server --appendonly no --requirepass "$${REDIS_PASSWORD}"'
+    return config
 
 
 def restore(directory, target):
@@ -171,6 +232,8 @@ def restore(directory, target):
     if target.exists() or parent.is_symlink():
         raise RuntimeError("Refusing any existing target, including an empty directory")
     manifest = json.loads((directory / "backup.json").read_text())
+    if "@sha256:" not in manifest["postgres_image"]:
+        raise RuntimeError("Paired backup lacks a pinned PostgreSQL image")
     for name, expected in manifest["hashes"].items():
         if Path(name).name != name or hashlib.sha256((directory / name).read_bytes()).hexdigest() != expected:
             raise RuntimeError("Backup integrity check failed")
@@ -182,20 +245,11 @@ def restore(directory, target):
     shutil.copyfile(directory / ".env", target / ".env")
     shutil.copyfile(directory / "config.yaml", target / "api/config.yaml")
     source = json.loads(run(compose(directory, manifest["image"]) + ["config", "--format", "json"]))
-    # 备份目录 config 的相对 YAML 路径不同，实际恢复显式改为独立只读文件。
-    config = json.loads(json.dumps(source))
-    config["name"] = "memoia-" + target.name
-    for network, values in config["networks"].items():
-        values["name"] = config["name"] + "_" + network
-    for service in ("postgres", "redis"):
-        config["services"][service]["volumes"][0]["source"] = str(target / "data" / service)
-    config["services"]["memoia"].pop("ports", None)
-    config["services"]["memoia"]["volumes"][0]["source"] = str(target / "api/config.yaml")
-    # 先从 RDB 加载；禁止正式 AOF 配置抢先覆盖 RDB。
-    config["services"]["redis"]["command"][2] = 'exec redis-server --appendonly no --requirepass "$${REDIS_PASSWORD}"'
+    config = isolated_config(source, manifest, target)
     validate_isolation(config, target, source)
     file = target / "docker-compose.yml"
     file.write_text(json.dumps(config))
+    file.chmod(0o600)
     command = compose(target, manifest["image"]) + ["--project-name", config["name"]]
     effective = json.loads(run(command + ["config", "--format", "json"]))
     validate_isolation(effective, target, source)
@@ -212,12 +266,13 @@ def restore(directory, target):
             raise RuntimeError("Actual restored mounts or ports violate isolation")
     with (directory / "postgres.dump").open("rb") as input_file:
         result = subprocess.run(command + ["exec", "-T", "postgres", "sh", "-c",
-                                           'exec pg_restore --exit-on-error --no-owner -U "$POSTGRES_USER" -d "$POSTGRES_DB"'],
+                                           'exec pg_restore --exit-on-error --no-owner --no-acl --no-comments -U "$POSTGRES_USER" -d "$POSTGRES_DB"'],
                                 stdin=input_file, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         if result.returncode:
             raise RuntimeError("PostgreSQL restore failed; isolated data preserved")
     key, value = manifest["redis_probe"]
-    if run(redis_command(command, "GET", key)) != value or database_counts(command) != manifest["database_counts"]:
+    postgres_container = run(command + ["ps", "-q", "postgres"])
+    if run(redis_command(command, "GET", key)) != value or database_counts(postgres_container) != manifest["database_counts"]:
         raise RuntimeError("Restored PostgreSQL/RDB verification failed")
     if run(redis_command(command, "CONFIG", "SET", "appendonly", "yes")) != "OK":
         raise RuntimeError("AOF initialization failed")
@@ -241,7 +296,7 @@ def restore(directory, target):
         raise RuntimeError("AOF restart verification failed")
     run(command + ["up", "-d", "--no-deps", "--no-build", "memoia"])
     wait_healthy(command, "memoia")
-    print(f"Isolated PostgreSQL, RDB→AOF and API restart verified: {target}")
+    print(f"Isolated paired PostgreSQL, RDB→AOF and API restart verified: {target}")
 
 
 def main():

@@ -69,3 +69,29 @@ Memoia独立测试部署、自动更新及兼容API恢复已通过；Luvel实际
 - 拟提交树使用 Git index 导出到隔离快照，重新通过 51 项配置/健康测试、13 份 TypeScript 格式检查、env 类型检查、五份配置文档检查，并在该快照执行正常 pre-commit；未跳过 hook，也未临时覆盖或隐藏主工作区其它改动。此前工作区的既有格式问题仍由原改动 owner 处理，未混入本次提交。
 - 混有权益/任务迁移内容的记忆架构说明及未纳入 Git 的迁移交接文件，其余内容留在 Luvel 工作区供原 owner 统一提交；本次提交已独立记录新连接名称及 SDK/历史数据兼容边界。真实 `.env.local` 不纳入 Git。
 - 两个仓库仅做本地提交，不推送、不触发 test 部署，不操作 Luvel 数据库；运行中的 Memoia 镜像仍是候选 B，文档提交不代表新应用镜像或 Worker 发布。
+
+## 候选 C / 独立服务日常发布与画像直读 / 2026-09-27
+
+以下为后续实际执行结果，覆盖上文“尚未推送、自动部署关闭”的历史状态，不回写或扩张早期验收结论。
+
+- 用户明确调整日常发布边界：Memoia 自己正常停止旧 API、启动兼容版本并验收，不以外部消费者、buffer、Redis 队列或 `standalone-mode` 作为普通发布门禁。备份和数据恢复仍需停写一致切点。新部署脚本保留部署锁、已验收镜像漂移检查、旧 run 防覆盖、schema/embedding/基础设施指纹和旧 API exit0 检查；不会强杀后继续切换。
+- 画像 Redis cache 已移除，读取直接进入 PostgreSQL；Luvel 自己的 KV 画像缓存不受本次服务端更改影响。77 项完整服务测试、50 项部署相关验证通过；包括过期画像缓存不影响读取、普通发布不扫描运行任务以及恢复维护仍拒绝未知处理状态。
+- 源码及部署脚本提交 `21951f5f16578b0ba8a633823e8e3bf4e2bdae17` 已推送远端 `test`，包含先前画像改动 `8f232aaa56544749709d41f554ab50b806ef79d4`。构建 Actions [36289692279](https://github.com/jianify/memoia/actions/runs/36289692279) 成功，linux/amd64、linux/arm64 manifest、匿名拉取及源码身份检查通过。
+- 总 manifest：`ghcr.io/jianify/memoia@sha256:530c87475dce7a235db8b1aadafe2387a0f6201292d7775d057dd9d635527b39`。构建成功后启用 `MEMOIA_TEST_DEPLOY_ENABLED=true`；online 仍为 false。
+- `reverify-test` Actions [36290017074](https://github.com/jianify/memoia/actions/runs/36290017074) 成功，复用同一 manifest，没有重新构建；直连 SSH、专用 github 用户、严格 host key、sudo、API 更新、公网健康/鉴权/用户 CRUD、finalize 和 GitHub Deployment 成功记录均通过。Deployment `6687300802` 只声明基础验收，不冒充完整记忆测试。
+- 切换后 PostgreSQL、Redis 的容器完整 ID 和固定数据挂载与切换前逐项相同；Tunnel MainPID=529、启动时间和四条当前活动连接不变。API healthy、OOM=false、RestartCount=0，只映射 `127.0.0.1:8000`。本次未重建或升级数据库、Redis、Tunnel，不再生成 standalone 标记。
+- 额外真实 SDK 验收：小批量显式 flush 15.68 秒，大批量自动处理 17.46 秒，两个最终事件 ID、13 条画像；真实 query embedding 搜索返回两个事件。缺失/错误 Bearer 均被 HTTP401 拒绝。API 正常退出 exit0 后启动同一容器，原事件、画像和 embedding 查询仍通过；随后仅删除本次专用探针事件和用户，确认不可查询，没有重放写入。
+- 后续补齐当前 C 的跨镜像恢复：重新建立专用 SDK 探针，两个最终事件、12 条画像和真实 embedding 查询先在 C 通过，再使用 C 的 `restore-api` 明确恢复上一已验收 B。B 上鉴权及原事件/画像/向量查询通过后 finalize，run 高水位仍为 `36290017074`；未恢复数据库快照。
+- Actions [36290622309](https://github.com/jianify/memoia/actions/runs/36290622309) 随后成功复用 C 原 digest，经 prepare/公网基础验收/finalize 切回 C。原探针的事件、画像和真实 embedding 查询再次通过，最终删除事件和用户并确认不可查询。C→B→C 的 PG/Redis 完整容器 ID、固定挂载、Tunnel 进程均未改变；最终 run 高水位为 `36290622309`，pending 已清除。没有把同镜像重启冒充跨版本恢复。
+- B 读取曾缓存该专用探针的画像；C 删除用户后，仅清理经精确探针 UUID 和既有 key 格式核对的一个遗留画像缓存键，并确认不存在。没有批量清 Redis 或修改业务用户缓存。
+- 本次没有重做配套数据恢复，既有隔离 PG/RDB→AOF 恢复证据保留；未扩大为容量压测或 Luvel Worker 业务验收。
+- Luvel 重跑无数据库 preload 的记忆写入边界 19 项、memory service 60 项以及 Memoia 终态观测 2 项，全部通过；未修改其数据库、提交其他 Agent 的工作区改动或发布 Worker。当前 test Worker 健康接口仍报告 `982f06ba8cc34a7f412fcfd3b90043089d44d562`；本地配置提交与完整业务候选须由 Luvel 发布负责人协调升级。
+- Luvel backend 类型检查首次发现 message repository 缺少任务写入守卫的 import；并行 Agent 随后补齐，再次执行 `bunx tsc --noEmit -p packages/backend/tsconfig.json` 通过。本任务未改该文件。另一个活动任务仍在改造后台执行和迁移协议，当前工作区不能视为冻结的发布候选；不因某次类型检查通过而直接发布其进行中的内容。
+- 后续独立复验真实 PostgreSQL 的 `memory-store-execution.test.ts`，隔离 runner run ID 为 `20260927-memoia-boundary-5e0eb17c`，套件通过。使用本任务本机夹具实例的全新临时库，供应商 SDK 网络被替换；覆盖合法无事件、双连接竞争、未知 flush 阻断、SQL 确认失败保留已知 ID、删除后重建保留新旧 ID。执行后按准确临时库名查询 `pg_database`，计数为零，确认 runner 已回收其数据库。不是共享测试库迁移或真实 Worker 联调证据。
+- 核对并行任务改造后的重试边界：`unknown` 转为终态 `uncertain`，记忆 sync/activate/cleanup 的运行中断不允许租约恢复盲目重放；持久 processing/unconfirmed 记录仍阻断下一次 provider 写入。分别运行 retry-policy、runtime、memory-import 三个独立单元测试进程，合计 19 项通过；现有测试主要覆盖旧协议和通用状态规则，不能据此宣称 v2 全链路或真实 Worker 已验收。
+- 后续运行本机全新临时 Luvel 库 → 真实 Memoia 的 service 探针。真实使用 Luvel 加密、`importEndedDialogMemory`、数据库权益和追踪仓储及未替换的 SDK 网络；仅 Supabase/其他供应商隔离为无效目标，KV 为本机夹具。两个加密合成消息导入耗时 11.636 秒，最终一个 event ID 以 provider=`memobase`、status=`completed` 落库；画像含六项、事件上下文非空。同会话再次导入未增加 insert；本机权益改为 Free 后，仍通过追踪删除历史事件，随后 Luvel 的 Memoia adapter 删除该专用用户。13 个断言通过，准确临时库名在 `pg_database` 中计数为零；受保护回执保留初始 event ID 和删除完成状态。
+- 首次上述探针在最后一步错误地只要求用户查询返回 HTTP404，因现有服务返回 HTTP200/errno404 而失败。只读核查证实旧专用用户已不存在、临时库已回收；修正探针的协议断言后，使用全新专用用户完成上一项验收，没有重放未知写入，也没有为了测试改服务协议。本项不是已部署 Luvel Worker、真实 Cloudflare KV、完整 Supabase 账号注销或共享测试库迁移的验收；这些仍待候选和迁移交接后执行。
+- Luvel review 发现正常导入后的画像 KV 删除仍是 fire-and-forget，而项目缓存规范要求等待删除完成或失败记录。已提出一处 await 加延迟删除行为测试的最小修复，待用户确认；本次未擅自修改该文件。
+- 交接复核：Luvel 远端 test 与实际健康接口仍为 `982f06ba8cc34a7f412fcfd3b90043089d44d562`；负责 Chat/任务改造的活动任务明确尚未改共享数据库或部署，因此不能把它的本机迁移验证当成测试库迁移完成。接入仍需迁移负责人的实际 journal/契约核对结果和经过验收的候选 SHA；本任务不代执行共享数据库迁移，也不发布其他 Agent 仍在改动的工作区。
+
+本节为本地新增验收记录，尚未提交或推送；不会为发布这份记录而隐式触发下一轮 test 应用更新。

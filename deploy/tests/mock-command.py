@@ -9,8 +9,7 @@ command = Path(sys.argv[0]).name
 args = sys.argv[1:]
 fixture = Path(os.environ["MEMOIA_FIXTURE"])
 old_image = "ghcr.io/jianify/memoia@sha256:" + "a" * 64
-images = {"postgres": "pgvector/pgvector:pg17@sha256:" + "b" * 64,
-          "redis": "redis:7.4@sha256:" + "c" * 64,
+images = {"redis": "redis:7.4@sha256:" + "c" * 64,
           "memoia": os.getenv("FIXTURE_CURRENT_IMAGE", (fixture / "image").read_text())}
 
 
@@ -41,13 +40,13 @@ elif command == "docker":
             if "--quiet" in args:
                 sys.exit(0)
             services = {
-                "postgres": {"image": images["postgres"], "environment": {"POSTGRES_DB": "fixture", "POSTGRES_USER": "fixture", "POSTGRES_PASSWORD": "fixture"}, "volumes": [{"source": os.getenv("FIXTURE_DATA_ROOT", "/opt/memoia/data") + "/postgres"}]},
                 "redis": {"image": images["redis"], "environment": {"REDIS_PASSWORD": "fixture"}, "volumes": [{"source": os.getenv("FIXTURE_DATA_ROOT", "/opt/memoia/data") + "/redis"}]},
                 "memoia": {"image": old_image,
                            "labels": {"io.jianify.environment": os.getenv("FIXTURE_ENV", "test")},
-                           "environment": {"PROJECT_ID": "fixture", "DATABASE_URL": os.getenv("FIXTURE_DATABASE_URL", "postgresql://fixture:fixture@postgres/fixture"), "REDIS_URL": "redis://:fixture@redis/0"}},
+                           "environment": {"PROJECT_ID": "fixture", "DATABASE_URL": os.getenv("FIXTURE_DATABASE_URL", "postgresql://jianify_app:fixture@jianify-postgres/memoia"), "REDIS_URL": "redis://:fixture@redis/0"}},
             }
-            output(json.dumps({"name": "memoia-" + os.getenv("FIXTURE_ENV", "test"), "services": services}))
+            output(json.dumps({"name": "memoia-" + os.getenv("FIXTURE_ENV", "test"), "services": services,
+                               "networks": {"data": {"name": "jianify-data", "external": True}}}))
         elif action == "ps":
             if not os.getenv("FIXTURE_EMPTY_STACK"):
                 output(args[-1])
@@ -72,8 +71,21 @@ elif command == "docker":
             else:
                 output("unhealthy" if os.getenv("FIXTURE_UNHEALTHY") and service == "memoia" else "healthy")
         else:
-            destination = "/var/lib/postgresql/data" if service == "postgres" else "/data"
-            output(json.dumps([{"Mounts": [{"Source": "/opt/memoia/data/" + service, "Destination": destination}]}]))
+            if service == "memoia":
+                db_url = os.getenv("FIXTURE_LIVE_DATABASE_URL", os.getenv("FIXTURE_DATABASE_URL", "postgresql://jianify_app:fixture@jianify-postgres/memoia"))
+                output(json.dumps([{"Config": {"Env": ["DATABASE_URL=" + db_url]}, "Mounts": []}]))
+            else:
+                output(json.dumps([{"Mounts": [{"Source": "/opt/memoia/data/" + service, "Destination": "/data"}]}]))
+    elif args[0] == "exec":
+        if os.getenv("FIXTURE_DB_UNAVAILABLE"):
+            sys.exit("Company database query failed")
+        if "pg_extension" in args[-1]:
+            output("1")
+        else:
+            output(os.getenv("FIXTURE_DB_TABLES", "0"))
+    elif args[0] == "ps":
+        if os.getenv("FIXTURE_OLD_POSTGRES_RUNNING"):
+            output("old-postgres")
     elif args[:2] == ["image", "inspect"]:
         output(os.getenv("FIXTURE_REVISION", "d" * 40))
     elif args[0] == "run":

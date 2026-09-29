@@ -22,6 +22,22 @@ class DeploymentBoundary(unittest.TestCase):
     def setUp(self):
         if ROOT.exists():
             self.skipTest("Refusing a pre-existing deployment directory")
+        self.postgres_root = Path("/opt/postgres")
+        if self.postgres_root.exists():
+            self.skipTest("Refusing a pre-existing company PostgreSQL directory")
+        self.postgres_root.mkdir(mode=0o700)
+        (self.postgres_root / "postgresctl.py").write_text('''import json, os, sys
+if sys.argv[1] == "fingerprint":
+    print(os.getenv("FIXTURE_POSTGRES_FINGERPRINT", "a" * 64))
+elif sys.argv[1] == "status":
+    if os.getenv("FIXTURE_DB_UNAVAILABLE"):
+        sys.exit(1)
+    print(json.dumps({"container_id": os.getenv("FIXTURE_PG_CONTAINER_ID", "company-postgres"), "image": "pgvector/pgvector:pg17@sha256:" + "b" * 64,
+                      "mount": "/opt/postgres/data", "network": "jianify-data", "healthy": True,
+                      "fingerprint": os.getenv("FIXTURE_POSTGRES_FINGERPRINT", "a" * 64)}))
+else:
+    sys.exit(2)
+''')
         ROOT.mkdir(parents=True, mode=0o700)
         (ROOT / "api").mkdir(mode=0o700)
         self.managed = {
@@ -53,6 +69,7 @@ class DeploymentBoundary(unittest.TestCase):
     def tearDown(self):
         # setUp 确认不存在后才创建；不接触真实主机或任何现有部署目录。
         shutil.rmtree(ROOT)
+        shutil.rmtree(self.postgres_root)
         self.fixture.cleanup()
 
     def run_command(self, *args):
@@ -60,6 +77,10 @@ class DeploymentBoundary(unittest.TestCase):
 
     def deploy(self, mode="prepare", run="200"):
         return self.run_command("bash", str(SOURCE / "deploy-memoia.sh"), mode, str(ROOT), IMAGE, SHA, run, self.compose_sha)
+
+    def adopt(self):
+        return self.run_command("bash", str(SOURCE / "deploy-memoia.sh"), "adopt-external-postgres",
+                                str(ROOT), OLD_IMAGE, "b" * 40, "100", self.compose_sha)
 
     def assert_configs_unchanged(self):
         for file, content in self.managed.items():
@@ -75,7 +96,7 @@ class DeploymentBoundary(unittest.TestCase):
         result = self.run_command("bash", str(SOURCE / "deploy-memoia.sh"), "init-config", str(ROOT))
         self.assertEqual(result.returncode, 0, result.stderr)
         env = ROOT / ".env"
-        for key in ("JIANIFY_ENV", "MEMOIA_IMAGE", "POSTGRES_PASSWORD", "REDIS_PASSWORD", "ACCESS_TOKEN", "MEMOBASE_LLM_API_KEY"):
+        for key in ("JIANIFY_ENV", "MEMOIA_IMAGE", "DATABASE_URL", "REDIS_PASSWORD", "ACCESS_TOKEN", "MEMOBASE_LLM_API_KEY"):
             self.assertIn(key + "=\n", env.read_text())
         self.assertEqual(env.stat().st_mode & 0o777, 0o600)
         self.assertEqual((ROOT / "api/config.yaml").stat().st_mode & 0o777, 0o600)
@@ -253,7 +274,7 @@ class DeploymentBoundary(unittest.TestCase):
     def test_first_install_is_empty_only_and_does_not_grant_acceptance(self):
         for file in ("infra-config.sha256", "schema.sha256", "deploy-state"):
             (self.state / file).unlink()
-        for service in ("postgres", "redis"):
+        for service in ("redis",):
             (ROOT / "data" / service).mkdir(parents=True)
         self.env["FIXTURE_EMPTY_STACK"] = "1"
         result = self.deploy("init")
@@ -266,9 +287,9 @@ class DeploymentBoundary(unittest.TestCase):
     def test_first_install_refuses_existing_data(self):
         for file in ("infra-config.sha256", "schema.sha256", "deploy-state"):
             (self.state / file).unlink()
-        for service in ("postgres", "redis"):
+        for service in ("redis",):
             (ROOT / "data" / service).mkdir(parents=True)
-        (ROOT / "data/postgres/PG_VERSION").write_text("17")
+        self.env["FIXTURE_DB_TABLES"] = "3"
         self.env["FIXTURE_EMPTY_STACK"] = "1"
         self.assertNotEqual(self.deploy("init").returncode, 0)
         self.assertFalse(any("up" in a["args"] for a in self.actions()))
@@ -284,6 +305,61 @@ class DeploymentBoundary(unittest.TestCase):
         self.env["FIXTURE_DATABASE_URL"] = "postgresql://fixture:fixture@another-project/fixture"
         self.assertNotEqual(self.deploy("init").returncode, 0)
         self.assertEqual(self.actions(), [])
+
+    def test_company_postgres_drift_blocks_routine_publish(self):
+        self.env["FIXTURE_POSTGRES_FINGERPRINT"] = "b" * 64
+        result = self.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Infrastructure configuration changed", result.stderr)
+        self.assertEqual(self.actions(), [])
+
+    def test_company_postgres_unavailable_blocks_before_pull(self):
+        self.env["FIXTURE_DB_UNAVAILABLE"] = "1"
+        self.assertNotEqual(self.deploy().returncode, 0)
+        self.assertEqual(self.actions(), [])
+
+    def test_running_api_database_drift_blocks_switch(self):
+        self.env["FIXTURE_LIVE_DATABASE_URL"] = "postgresql://jianify_app:fixture@another-host/memoia"
+        result = self.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Running API database connection drifted", result.stderr)
+        self.assertFalse((self.state / "pending-deploy").exists())
+
+    def test_postgres_replacement_between_prepare_and_finalize_blocks_acceptance(self):
+        self.assertEqual(self.deploy().returncode, 0)
+        self.env["FIXTURE_PG_CONTAINER_ID"] = "replacement-postgres"
+        result = self.deploy("finalize")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Company PostgreSQL changed", result.stderr)
+        self.assertTrue((self.state / "pending-deploy").exists())
+
+    def test_explicit_adoption_rebaselines_after_migrated_api_verification(self):
+        self.env["FIXTURE_POSTGRES_FINGERPRINT"] = "b" * 64
+        self.env["FIXTURE_DB_TABLES"] = "3"
+        result = self.adopt()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.state / "infra-config.sha256").read_text(),
+                         self.run_command("bash", str(SOURCE / "infra-fingerprint.sh"), str(ROOT)).stdout)
+        self.assertTrue((self.state / "pre-external-postgres").exists())
+        self.assertFalse((self.state / "pending-maintenance").exists())
+        self.assertEqual(self.deploy().returncode, 0)
+
+    def test_adoption_rejects_unverified_database_before_rebaselining(self):
+        self.env["FIXTURE_POSTGRES_FINGERPRINT"] = "b" * 64
+        self.env["FIXTURE_DB_TABLES"] = "0"
+        result = self.adopt()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.state / "deploy-state").read_text().split()[0], "100")
+        self.assertFalse((self.state / "pre-external-postgres").exists())
+
+    def test_adoption_refuses_running_old_postgres(self):
+        self.env["FIXTURE_POSTGRES_FINGERPRINT"] = "b" * 64
+        self.env["FIXTURE_DB_TABLES"] = "3"
+        self.env["FIXTURE_OLD_POSTGRES_RUNNING"] = "1"
+        result = self.adopt()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("old Memoia PostgreSQL", result.stderr)
+        self.assertFalse((self.state / "pre-external-postgres").exists())
 
     def test_healthy_after_oom_cannot_be_accepted(self):
         self.env["FIXTURE_OOM"] = "1"
