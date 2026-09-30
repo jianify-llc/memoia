@@ -30,6 +30,9 @@ elif command == "curl":
     elif args[-1].endswith("/metrics"):
         output("cloudflared_tunnel_ha_connections 4")
     elif "api.github.com" in args[-1]:
+        expected_branch = os.getenv("FIXTURE_EXPECT_BRANCH")
+        if expected_branch and not args[-1].endswith("/heads/" + expected_branch):
+            sys.exit("Deployment checked the wrong release branch")
         output(json.dumps({"object": {"sha": os.getenv("FIXTURE_HEAD", "d" * 40)}}))
     else:
         sys.exit("Unexpected external HTTP call")

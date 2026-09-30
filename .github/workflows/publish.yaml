@@ -1,5 +1,5 @@
 # Modified for Memoia: isolated tests and digest-addressed multi-architecture releases.
-name: Verify and publish Memoia
+name: Memoia · Test
 
 on:
   merge_group:
@@ -12,9 +12,11 @@ on:
         required: true
   push:
     branches:
-      - '**'
-    tags:
-      - 'v*'
+      - main
+      - test
+      - 'feature/**'
+      - 'codex/**'
+      - 'hotfix/**'
   pull_request:
     branches:
       - main
@@ -35,79 +37,12 @@ jobs:
           echo 'Manual test publication must run from the test branch' >&2
           exit 1
 
-  test:
-    name: Tests on ${{ matrix.os }} for ${{ matrix.python-version }}
-    strategy:
-      matrix:
-        python-version: [3.12]
-        os: [ubuntu-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    env:
-      DATABASE_LOCATION: /tmp/memoia-test-${{ github.run_id }}-${{ github.run_attempt }}-postgres
-      REDIS_LOCATION: /tmp/memoia-test-${{ github.run_id }}-${{ github.run_attempt }}-redis
-    permissions: 
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-
-      - name: Set up Python
-        run: uv python install ${{ matrix.python-version }}
-      - name: Install dependencies
-        working-directory: ./src/server/api
-        run: |
-          uv sync --frozen
-          uv lock --check
-          uv run --frozen python -c 'import memoia_server; print(memoia_server.__version__)'
-          test -f LICENSE && test -f NOTICE && test -f Dockerfile
-          ! grep -q 'memobase_server' Dockerfile
-      - name: Validate deployment layout and mocked safety contracts
-        run: |
-          set -euo pipefail
-          shellcheck deploy/*.sh
-          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_compose.py -v
-          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_workflow.py -v
-          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_recovery.py -v
-          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/cutover -p verify_legacy_patch.py -v
-          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_sdk_probe.py -v
-          docker run --rm -e MEMOIA_DEPLOY_TEST_ISOLATED=1 \
-            --mount "type=bind,source=$GITHUB_WORKSPACE/deploy,target=/work/deploy,readonly" \
-            --entrypoint /bin/bash \
-            python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e \
-            -c 'set -e; apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=20 update -qq; apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=20 install -y -qq jq >/dev/null; python -m unittest discover -s /work/deploy/tests -p test_deploy.py -v'
-      - name: Start containers
-        working-directory: ./src/server
-        run: |
-          cp .env.example .env
-          cp api/config.yaml.example api/config.yaml
-          docker compose config --quiet
-          docker compose up -d --wait --wait-timeout 120 memobase-server-db memobase-server-redis
-      - name: Test with pytest
-        working-directory: ./src/server/api
-        run: |
-          cp .env.example .env
-          uv run --frozen -m pytest --junit-xml=junit/test-results-${{ matrix.python-version }}.xml --cov=memoia_server --cov-report=xml:coverage-${{ matrix.python-version }}.xml tests/ -s -v
-      - name: Upload pytest test results and coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: pytest-results-${{ matrix.python-version }}
-          path: |
-            ./src/server/api/junit/test-results-${{ matrix.python-version }}.xml
-            ./src/server/api/coverage-${{ matrix.python-version }}.xml
-        if: ${{ always() }}
-      - name: Stop containers
-        working-directory: ./src/server
-        if: ${{ always() }}
-        run: |
-          docker compose down
+  verify:
+    uses: ./.github/workflows/verify.yaml
 
   build-image:
     if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/test') && !startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch' }}
-    needs: test
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
@@ -129,7 +64,7 @@ jobs:
 
   publish-test:
     if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/test' }}
-    needs: test
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 75
     concurrency:
@@ -296,75 +231,3 @@ jobs:
           status=$(jq -nc '{state:"success",environment_url:"https://test-memoia.jianify.dev",description:"Basic acceptance: API health, auth and user CRUD passed"}')
           gh api "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" --method POST --input - <<< "$status" >/dev/null
           printf 'Accepted test image: %s\nConfig commit: %s\nAcceptance: basic deployment only, not full memory acceptance\n' "$image" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
-
-  verify-release:
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/release') || startsWith(github.ref, 'refs/tags/v') }}
-    needs: test
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      deployments: read
-      packages: read
-    outputs:
-      image: ${{ steps.accepted.outputs.image }}
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - name: Require this exact release SHA to have passed test deployment
-        id: accepted
-        run: |
-          set -euo pipefail
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            [[ "$(git ls-remote origin refs/heads/release | cut -f1)" == "$GITHUB_SHA" ]] || {
-              echo 'Version tag is not at the verified release HEAD' >&2
-              exit 1
-            }
-          fi
-          gh api "repos/$GITHUB_REPOSITORY/deployments?sha=$GITHUB_SHA&environment=test&per_page=100" > "$RUNNER_TEMP/deployments.json"
-          image=''
-          while read -r id candidate; do
-            state=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$id/statuses?per_page=1" --jq '.[0].state')
-            if [[ "$state" == success ]]; then image="$candidate"; break; fi
-          done < <(jq -r '.[] | select(.payload.image != null) | [.id, .payload.image] | @tsv' "$RUNNER_TEMP/deployments.json")
-          [[ "$image" =~ ^ghcr\.io/jianify/memoia@sha256:[0-9a-f]{64}$ ]] || {
-            echo 'No accepted test image for release SHA' >&2
-            exit 1
-          }
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          docker buildx imagetools inspect "$image" >/dev/null
-
-  tag-release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: verify-release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    env:
-      ACCEPTED_IMAGE: ${{ needs.verify-release.outputs.image }}
-    steps:
-      - uses: docker/setup-buildx-action@v3
-      - name: Authenticate only when attaching a version tag
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Tag the accepted manifest without rebuilding
-        run: |
-          set -euo pipefail
-          version="${REGISTRY}/${IMAGE_NAME}:${GITHUB_REF_NAME}"
-          accepted_digest="${ACCEPTED_IMAGE##*@}"
-          if docker buildx imagetools inspect "$version" >/dev/null 2>&1; then
-            # shellcheck disable=SC2016 # Docker template is intentionally literal.
-            existing=$(docker buildx imagetools inspect "$version" --format '{{json .Manifest}}' | jq -r .digest)
-            [[ "$existing" == "$accepted_digest" ]] || { echo 'Version tag already points elsewhere' >&2; exit 1; }
-          else
-            docker buildx imagetools create -t "$version" "$ACCEPTED_IMAGE"
-          fi
-          # shellcheck disable=SC2016
-          actual=$(docker buildx imagetools inspect "$version" --format '{{json .Manifest}}' | jq -r .digest)
-          [[ "$actual" == "$accepted_digest" ]] || { echo 'Version tag did not preserve accepted digest' >&2; exit 1; }
-          printf 'Version %s reuses accepted image %s. Online deployment is disabled.\n' "$GITHUB_REF_NAME" "$ACCEPTED_IMAGE" >> "$GITHUB_STEP_SUMMARY"
