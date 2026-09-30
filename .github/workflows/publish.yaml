@@ -2,7 +2,6 @@
 name: Memoia · Test
 
 on:
-  merge_group:
   workflow_dispatch:
     inputs:
       operation:
@@ -12,16 +11,13 @@ on:
         required: true
   push:
     branches:
-      - main
       - test
       - 'feature/**'
       - 'codex/**'
       - 'hotfix/**'
   pull_request:
     branches:
-      - main
       - test
-      - release
 
 
 env:
