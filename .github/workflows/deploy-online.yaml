@@ -1,6 +1,8 @@
 name: Memoia · Online
 
 on:
+  pull_request:
+    branches: [release]
   push:
     branches: [release]
     tags: ['v*']
@@ -15,6 +17,24 @@ env:
 jobs:
   verify:
     uses: ./.github/workflows/verify.yaml
+
+  build-validation:
+    if: ${{ github.event_name == 'pull_request' }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build without publishing or deployment credentials
+        uses: docker/build-push-action@v6
+        with:
+          context: ./src/server/api
+          platforms: linux/amd64
+          push: false
+          build-args: VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha
 
   publish-release:
     if: ${{ github.ref == 'refs/heads/release' }}
