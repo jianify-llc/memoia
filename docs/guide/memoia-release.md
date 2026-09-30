@@ -47,12 +47,12 @@ previously interrupted flush is safe to replay.
 
 ## Build and record a release
 
-The [workflow](../../.github/workflows/publish.yaml) runs tests before image
-publication. PRs and ordinary branch updates build without publishing; `test`
-updates publish a multi-architecture candidate and deploy the isolated test
-stack. A version tag at an accepted `release` SHA reuses that manifest. The
-online deployment path remains disabled. This does not replace an ARM64 runtime
-test or the full API/SDK acceptance test.
+The [`main` verification workflow](../../.github/workflows/main-verify.yaml)
+runs frozen-dependency tests and a single-architecture image build without
+publishing. The separate `test` and `release` workflows own test deployment and
+online release respectively; neither is triggered by a `main` push. Promoting
+code to `release` and deploying online remain separate decisions. A successful
+build does not replace an ARM64 runtime test or the full API/SDK acceptance test.
 
 A successful publication uploads `release.json` and `manifest.json` and displays
 the digest in the job summary. The release identity includes the exact commit,
