@@ -1,4 +1,4 @@
-# Modified for Memoia: isolated tests and digest-addressed multi-architecture releases.
+# Memoia Test verification, image publication, and deployment.
 name: Memoia · Test
 
 on:

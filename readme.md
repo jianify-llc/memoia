@@ -43,8 +43,8 @@ Memoia-operated services or a promise of upstream support.
     </a>
   </p>
   <p>
-    <a href="https://github.com/jianify/memoia/actions/workflows/publish.yaml">
-      <img src="https://github.com/jianify/memoia/actions/workflows/publish.yaml/badge.svg">
+    <a href="https://github.com/jianify/memoia/actions/workflows/deploy-test.yaml">
+      <img src="https://github.com/jianify/memoia/actions/workflows/deploy-test.yaml/badge.svg">
     </a>
         <a href="https://github.com/jianify/memoia/pkgs/container/memoia">
     <img src="https://img.shields.io/github/v/tag/jianify/memoia">
