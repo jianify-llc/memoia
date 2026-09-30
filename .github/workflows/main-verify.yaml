@@ -1,0 +1,64 @@
+name: Memoia · Main Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DATABASE_LOCATION: /tmp/memoia-main-${{ github.run_id }}-${{ github.run_attempt }}-postgres
+      REDIS_LOCATION: /tmp/memoia-main-${{ github.run_id }}-${{ github.run_attempt }}-redis
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install frozen dependencies and verify package
+        working-directory: src/server/api
+        run: |
+          uv python install 3.12
+          uv sync --frozen
+          uv lock --check
+          uv run --frozen python -c 'import memoia_server; print(memoia_server.__version__)'
+          test -f LICENSE && test -f NOTICE && test -f Dockerfile
+          ! grep -q 'memobase_server' Dockerfile
+      - name: Start disposable dependencies
+        working-directory: src/server
+        run: |
+          cp .env.example .env
+          cp api/config.yaml.example api/config.yaml
+          docker compose config --quiet
+          docker compose up -d --wait --wait-timeout 120 memobase-server-db memobase-server-redis
+      - name: Run service tests
+        working-directory: src/server/api
+        run: |
+          cp .env.example .env
+          uv run --frozen -m pytest tests/ -q
+      - name: Stop disposable dependencies
+        if: always()
+        working-directory: src/server
+        run: docker compose down
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build without publishing
+        uses: docker/build-push-action@v6
+        with:
+          context: src/server/api
+          platforms: linux/amd64
+          push: false
+          build-args: VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha
