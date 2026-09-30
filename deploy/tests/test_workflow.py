@@ -10,7 +10,7 @@ import unittest
 import yaml
 
 
-WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/publish.yaml"
+WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/deploy-test.yaml"
 ONLINE_WORKFLOW = WORKFLOW.with_name("deploy-online.yaml")
 VERIFY_WORKFLOW = WORKFLOW.with_name("verify.yaml")
 SHA = "d" * 40
@@ -55,6 +55,7 @@ class PublicationContract(unittest.TestCase):
         online = yaml.safe_load(ONLINE_WORKFLOW.read_text())
         verify = yaml.safe_load(VERIFY_WORKFLOW.read_text())
         self.assertNotIn("tags", test[True]["push"])
+        self.assertNotIn("main", test[True]["push"]["branches"])
         self.assertNotIn("release", test[True]["push"]["branches"])
         self.assertEqual(online[True]["push"], {"branches": ["release"], "tags": ["v*"]})
         self.assertIn("workflow_call", verify[True])
