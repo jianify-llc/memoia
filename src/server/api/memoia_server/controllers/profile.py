@@ -3,9 +3,9 @@ from pydantic import ValidationError
 from ..models.utils import Promise
 from ..models.database import GeneralBlob, UserProfile
 from ..models.response import CODE, IdData, IdsData, UserProfilesData, ProfileAttributes
-from ..connectors import Session, get_redis_client
+from ..connectors import Session
 from ..utils import get_encoded_tokens
-from ..env import CONFIG, TRACE_LOG
+from ..env import TRACE_LOG
 
 
 async def truncate_profiles(
@@ -74,22 +74,6 @@ async def truncate_profiles(
 
 
 async def get_user_profiles(user_id: str, project_id: str) -> Promise[UserProfilesData]:
-    async with get_redis_client() as redis_client:
-        user_profiles = await redis_client.get(
-            f"user_profiles::{project_id}::{user_id}"
-        )
-        if user_profiles:
-            try:
-                return Promise.resolve(
-                    UserProfilesData.model_validate_json(user_profiles)
-                )
-            except ValidationError as e:
-                TRACE_LOG.error(
-                    project_id,
-                    user_id,
-                    f"Invalid user profiles: {e}",
-                )
-                await redis_client.delete(f"user_profiles::{project_id}::{user_id}")
     with Session() as session:
         user_profiles = (
             session.query(UserProfile)
@@ -108,14 +92,7 @@ async def get_user_profiles(user_id: str, project_id: str) -> Promise[UserProfil
                     "updated_at": up.updated_at,
                 }
             )
-    return_profiles = UserProfilesData(profiles=results)
-    async with get_redis_client() as redis_client:
-        await redis_client.set(
-            f"user_profiles::{project_id}::{user_id}",
-            return_profiles.model_dump_json(),
-            ex=CONFIG.cache_user_profiles_ttl,
-        )
-    return Promise.resolve(return_profiles)
+    return Promise.resolve(UserProfilesData(profiles=results))
 
 
 async def add_user_profiles(
@@ -144,7 +121,6 @@ async def add_user_profiles(
         session.add_all(db_profiles)
         session.commit()
         profile_ids = [profile.id for profile in db_profiles]
-    await refresh_user_profile_cache(user_id, project_id)
     return Promise.resolve(IdsData(ids=profile_ids))
 
 
@@ -181,7 +157,6 @@ async def update_user_profiles(
                 db_profile.attributes = attribute
             db_profiles.append(profile_id)
         session.commit()
-    await refresh_user_profile_cache(user_id, project_id)
     return Promise.resolve(IdsData(ids=db_profiles))
 
 
@@ -200,7 +175,6 @@ async def delete_user_profile(
             )
         session.delete(db_profile)
         session.commit()
-    await refresh_user_profile_cache(user_id, project_id)
     return Promise.resolve(None)
 
 
@@ -214,14 +188,7 @@ async def delete_user_profiles(
             UserProfile.project_id == project_id,
         ).delete(synchronize_session=False)
         session.commit()
-    await refresh_user_profile_cache(user_id, project_id)
     return Promise.resolve(IdsData(ids=profile_ids))
-
-
-async def refresh_user_profile_cache(user_id: str, project_id: str) -> Promise[None]:
-    async with get_redis_client() as redis_client:
-        await redis_client.delete(f"user_profiles::{project_id}::{user_id}")
-    return Promise.resolve(None)
 
 
 async def add_update_delete_user_profiles(
@@ -313,5 +280,4 @@ async def add_update_delete_user_profiles(
                 CODE.SERVER_PARSE_ERROR, f"Error merging user profiles: {e}"
             )
 
-    await refresh_user_profile_cache(user_id, project_id)
     return Promise.resolve(IdsData(ids=add_profile_ids))

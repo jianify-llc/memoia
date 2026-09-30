@@ -5,6 +5,13 @@ workflow**, use [the image-only deployment guide](../../deploy/README.md).
 The instructions below describe a legacy Memobase deployment upgraded in place;
 do not use its old Compose override for a fresh Memoia installation.
 
+Routine compatible releases of the current Lightsail stack use the service-owned
+stop/start flow in that deployment guide. They do not depend on a `standalone-mode`
+marker, external consumers being absent, or buffer/Redis queues being empty.
+The detailed drain below applies to coordinated legacy/incompatible migrations and
+paired data backups, not every ordinary API update. Normal process exit alone does
+not prove that every in-flight caller received its final event IDs.
+
 Memoia is an independently maintained Apache-2.0 fork of
 [Memobase](https://github.com/memodb-io/memobase). Preserve its license, copyright,
 and source history. GitHub fork detachment is a separate administrative operation,

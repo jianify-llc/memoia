@@ -1,0 +1,12 @@
+# init-config 仅在缺失时复制此模板；实际值由人工维护，运行时只读挂载。
+# 密钥通过 .env 的 MEMOBASE_*_API_KEY 注入，不在这里填写示例密钥。
+language: en
+llm_style: openai
+llm_base_url: https://api.openai.com/v1
+best_llm_model: gpt-6-luna
+thinking_llm_model: gpt-6-luna
+enable_event_embedding: true
+embedding_provider: openai
+embedding_base_url: https://api.openai.com/v1
+embedding_model: text-embedding-3-large
+embedding_dim: 1536
