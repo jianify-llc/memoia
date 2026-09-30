@@ -191,11 +191,20 @@ else:
         self.assertEqual(file.stat().st_mode & 0o777, 0o644)
         self.assertEqual(self.actions(), [])
 
-    def test_online_environment_stays_disabled(self):
+    def test_online_release_checks_its_own_branch_and_keeps_infrastructure(self):
+        self.managed[ROOT / ".env"] = "JIANIFY_ENV=online\nACCESS_TOKEN=fixture-only\n"
+        (ROOT / ".env").write_text(self.managed[ROOT / ".env"])
         self.env["FIXTURE_ENV"] = "online"
-        self.assertNotEqual(self.deploy().returncode, 0)
+        self.env["FIXTURE_EXPECT_BRANCH"] = "release"
+        fingerprint = self.run_command("bash", str(SOURCE / "infra-fingerprint.sh"), str(ROOT))
+        self.assertEqual(fingerprint.returncode, 0, fingerprint.stderr)
+        (self.state / "infra-config.sha256").write_text(fingerprint.stdout)
+        result = self.deploy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.deploy("finalize")
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_configs_unchanged()
-        self.assertEqual(self.actions(), [])
+        self.assertEqual(len(self.actions()), 3)
 
     def test_stale_or_unresolved_run_cannot_update_api(self):
         self.assertNotEqual(self.deploy(run="99").returncode, 0)

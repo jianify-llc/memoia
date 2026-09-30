@@ -69,8 +69,12 @@ done
 compose=(docker compose --env-file "$root/.env" -f "$root/docker-compose.yml")
 "${compose[@]}" config --quiet
 resolved=$("${compose[@]}" config --format json)
-[[ "$(jq -r .name <<< "$resolved")" == memoia-test && "$(jq -r '.services.memoia.labels["io.jianify.environment"]' <<< "$resolved")" == test ]] || {
-  echo 'Online deployment is disabled, and test identity must be explicit' >&2; exit 2;
+deployment_env=$(jq -r '.services.memoia.labels["io.jianify.environment"]' <<< "$resolved")
+[[ "$deployment_env" == test || "$deployment_env" == online ]] || {
+  echo 'Memoia deployment environment must be test or online' >&2; exit 2;
+}
+[[ "$(jq -r .name <<< "$resolved")" == "memoia-$deployment_env" ]] || {
+  echo 'Compose project does not match the application environment' >&2; exit 2;
 }
 [[ "$(jq -r '.services.redis.volumes[0].source' <<< "$resolved")" == "$root/data/redis" ]] || {
   echo 'Resolved data mount differs from the canonical absolute path' >&2; exit 1;
@@ -189,6 +193,7 @@ fi
 [[ ! -e pending-maintenance ]] || { echo 'Unresolved maintenance blocks deployment' >&2; exit 1; }
 if [[ "$mode" == adopt-external-postgres ]]; then
   # 只在数据库切换、应用验收之后显式接纳新基础设施基线，普通发布不执行此路径。
+  [[ "$deployment_env" == test ]] || { echo 'PostgreSQL adoption is a test-only migration' >&2; exit 2; }
   [[ -f deploy-state && -f infra-config.sha256 && -f schema.sha256 && ! -e pre-external-postgres &&
      ! -e pending-infra && ! -e pending-tunnel ]] || {
     echo 'Existing accepted deployment and an unused adoption record are required' >&2; exit 1;
@@ -260,9 +265,11 @@ if [[ -f deploy-state && "$mode" != restore-api && "$mode" != adopt-external-pos
   }
 fi
 if [[ "$mode" != restore-api && "$mode" != adopt-external-postgres ]]; then
-head_sha=$(curl -fsSL --max-time 15 https://api.github.com/repos/jianify/memoia/git/ref/heads/test | jq -r .object.sha)
+branch=$deployment_env
+[[ "$deployment_env" != online ]] || branch=release
+head_sha=$(curl -fsSL --max-time 15 "https://api.github.com/repos/jianify/memoia/git/ref/heads/$branch" | jq -r .object.sha)
 [[ "$head_sha" == "$source_sha" ]] || {
-  echo 'A newer test branch head exists; refusing stale deployment' >&2
+  echo "A newer $branch branch head exists; refusing stale deployment" >&2
   exit 1
 }
 else

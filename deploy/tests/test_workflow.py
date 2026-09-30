@@ -11,6 +11,8 @@ import yaml
 
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/publish.yaml"
+ONLINE_WORKFLOW = WORKFLOW.with_name("deploy-online.yaml")
+VERIFY_WORKFLOW = WORKFLOW.with_name("verify.yaml")
 SHA = "d" * 40
 MOCK = r'''
 import json, os, pathlib, sys
@@ -19,8 +21,9 @@ args = sys.argv[1:]
 root = pathlib.Path(os.environ["WORKFLOW_FIXTURE"])
 record = {"command": command, "args": args if command != "bash" else args[:1]}
 if command == "git":
-    assert args == ["ls-remote", "origin", "refs/heads/test"]
-    print(os.environ.get("FIXTURE_HEAD", "d" * 40) + "\trefs/heads/test")
+    branch = os.environ.get("FIXTURE_BRANCH", "test")
+    assert args == ["ls-remote", "origin", "refs/heads/" + branch]
+    print(os.environ.get("FIXTURE_HEAD", "d" * 40) + "\trefs/heads/" + branch)
     sys.exit(0)
 if command == "ssh":
     for flag in ("-i",):
@@ -34,7 +37,7 @@ elif command == "tar":
     assert args == ["-C", "deploy", "-cf", "-", "deploy-memoia.sh", "infra-fingerprint.sh", "schema-fingerprint.sh", "recovery.py"]
     print("fixture-only archive")
 elif command == "bash":
-    assert args == ["deploy/smoke-api.sh", "https://test-memoia.jianify.dev", "fixture-bearer"]
+    assert args == ["deploy/smoke-api.sh", os.environ.get("FIXTURE_API", "https://test-memoia.jianify.dev"), "fixture-bearer"]
 else:
     sys.exit("Unexpected intermediary command")
 with (root / "actions").open("a") as file:
@@ -47,6 +50,24 @@ if command == "bash" and os.getenv("FIXTURE_SMOKE_FAIL"):
 
 
 class PublicationContract(unittest.TestCase):
+    def test_test_and_online_workflows_have_separate_triggers_and_environments(self):
+        test = yaml.safe_load(WORKFLOW.read_text())
+        online = yaml.safe_load(ONLINE_WORKFLOW.read_text())
+        verify = yaml.safe_load(VERIFY_WORKFLOW.read_text())
+        self.assertNotIn("tags", test[True]["push"])
+        self.assertNotIn("release", test[True]["push"]["branches"])
+        self.assertEqual(online[True]["push"], {"branches": ["release"], "tags": ["v*"]})
+        self.assertIn("workflow_call", verify[True])
+        self.assertEqual(test["jobs"]["verify"]["uses"], "./.github/workflows/verify.yaml")
+        self.assertEqual(online["jobs"]["verify"]["uses"], "./.github/workflows/verify.yaml")
+        self.assertEqual(online["jobs"]["publish-release"]["needs"], "verify")
+        self.assertEqual(online["jobs"]["promote-tag"]["needs"], "verify")
+        self.assertEqual(online["jobs"]["deploy-online"]["needs"], "promote-tag")
+        self.assertEqual(online["jobs"]["deploy-online"]["environment"]["name"], "online")
+        for name, job in online["jobs"].items():
+            if name != "deploy-online":
+                self.assertNotIn("environment", job)
+
     def test_deployment_gate_uses_repository_variable_before_environment_start(self):
         job = yaml.safe_load(WORKFLOW.read_text())["jobs"]["deploy-test"]
         guide = (WORKFLOW.parents[2] / "deploy/README.md").read_text()
@@ -190,6 +211,28 @@ class DirectSSHWorkflow(unittest.TestCase):
         self.assertTrue(any(action["command"] == "bash" for action in self.actions()))
         self.assertFalse(any(" finalize " in action["args"][-1] for action in self.actions()))
         self.assert_keys_cleaned()
+
+
+class OnlineDirectSSHWorkflow(unittest.TestCase):
+    def test_online_uses_release_branch_and_independent_hostname(self):
+        fixture = DirectSSHWorkflow(methodName="test_direct_ssh_without_access_preserves_two_phase_release")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        workflow = yaml.safe_load(ONLINE_WORKFLOW.read_text())
+        fixture.job = workflow["jobs"]["deploy-online"]
+        steps = [step for step in fixture.job["steps"] if step.get("name") == "Deploy the approved digest over direct SSH"]
+        self.assertEqual(len(steps), 1)
+        fixture.script = steps[0]["run"]
+        fixture.env["ONLINE_BEARER_TOKEN"] = fixture.env.pop("TEST_BEARER_TOKEN")
+        fixture.env["FIXTURE_BRANCH"] = "release"
+        fixture.env["FIXTURE_API"] = "https://memoia.jianify.dev"
+        result = fixture.run_step()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = [action["args"] for action in fixture.actions() if action["command"] == "ssh"]
+        self.assertEqual(len(calls), 4)
+        self.assertIn(" prepare '/opt/memoia'", calls[2][-1])
+        self.assertIn(" finalize '/opt/memoia'", calls[3][-1])
+        fixture.assert_keys_cleaned()
 
 
 if __name__ == "__main__":

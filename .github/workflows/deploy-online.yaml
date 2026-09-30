@@ -1,0 +1,209 @@
+name: Memoia · Online
+
+on:
+  push:
+    branches: [release]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  verify:
+    uses: ./.github/workflows/verify.yaml
+
+  publish-release:
+    if: ${{ github.ref == 'refs/heads/release' }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    concurrency:
+      group: memoia-publication-${{ github.repository }}-${{ github.sha }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Locate immutable candidate
+        id: existing
+        run: |
+          image="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build Release candidate on AMD64 and ARM64
+        if: ${{ steps.existing.outputs.exists != 'true' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./src/server/api
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          build-args: VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha
+          provenance: mode=max
+      - name: Verify candidate digest, architectures and source
+        run: |
+          set -euo pipefail
+          candidate="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          digest=$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${REGISTRY}/${IMAGE_NAME}@${digest}"
+          docker buildx imagetools inspect "$image" --raw > "$RUNNER_TEMP/manifest.json"
+          anonymous_config=$(mktemp -d)
+          trap 'rm -rf -- "$anonymous_config"' EXIT
+          schema=''
+          for arch in amd64 arm64; do
+            platform_digest=$(jq -er --arg arch "$arch" '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest] | if length == 1 then .[0] else error("Missing or duplicate platform") end' "$RUNNER_TEMP/manifest.json")
+            platform_image="${REGISTRY}/${IMAGE_NAME}@${platform_digest}"
+            DOCKER_CONFIG="$anonymous_config" docker pull --platform "linux/$arch" "$platform_image"
+            docker image inspect "$platform_image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' | grep -Fx "$GITHUB_SHA"
+            docker run --rm --platform "linux/$arch" --entrypoint /app/.venv/bin/python "$platform_image" -c 'import memoia_server; print(memoia_server.__version__)'
+            candidate_schema=$(bash deploy/schema-fingerprint.sh "$platform_image")
+            [[ -z "$schema" || "$schema" == "$candidate_schema" ]] || { echo 'Architecture schema sources differ' >&2; exit 1; }
+            schema="$candidate_schema"
+          done
+          printf 'Release candidate: source=%s image=%s schema=%s\n' "$GITHUB_SHA" "$image" "$schema" >> "$GITHUB_STEP_SUMMARY"
+
+  promote-tag:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.identity.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Require current Release HEAD
+        run: |
+          [[ "$(git ls-remote origin refs/heads/release | cut -f1)" == "$GITHUB_SHA" ]] || {
+            echo 'Version tag is not at the current Release HEAD' >&2; exit 1;
+          }
+      - name: Reuse the Release candidate
+        id: identity
+        run: |
+          set -euo pipefail
+          candidate="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          docker buildx imagetools inspect "$candidate" --raw > "$RUNNER_TEMP/manifest.json"
+          digest=$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          anonymous_config=$(mktemp -d)
+          trap 'rm -rf -- "$anonymous_config"' EXIT
+          for arch in amd64 arm64; do
+            platform_digest=$(jq -er --arg arch "$arch" '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest] | if length == 1 then .[0] else error("Missing or duplicate platform") end' "$RUNNER_TEMP/manifest.json")
+            platform_image="${REGISTRY}/${IMAGE_NAME}@${platform_digest}"
+            DOCKER_CONFIG="$anonymous_config" docker pull --platform "linux/$arch" "$platform_image"
+            docker image inspect "$platform_image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' | grep -Fx "$GITHUB_SHA"
+          done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Attach version tag without rebuilding
+        env:
+          DIGEST: ${{ steps.identity.outputs.digest }}
+        run: |
+          set -euo pipefail
+          version="${REGISTRY}/${IMAGE_NAME}:${GITHUB_REF_NAME}"
+          image="${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+          if docker buildx imagetools inspect "$version" >/dev/null 2>&1; then
+            existing=$(docker buildx imagetools inspect "$version" --format '{{json .Manifest}}' | jq -r .digest)
+            [[ "$existing" == "$DIGEST" ]] || { echo 'Version tag already points elsewhere' >&2; exit 1; }
+          else
+            docker buildx imagetools create -t "$version" "$image"
+          fi
+          actual=$(docker buildx imagetools inspect "$version" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$actual" == "$DIGEST" ]] || exit 1
+
+  deploy-online:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    needs: promote-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: memoia-online-deployment
+      cancel-in-progress: false
+    environment:
+      name: online
+      url: https://memoia.jianify.dev
+      deployment: false
+    permissions:
+      contents: read
+      deployments: write
+    env:
+      SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+      SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      ONLINE_BEARER_TOKEN: ${{ secrets.MEMOIA_ONLINE_BEARER_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      MANIFEST_DIGEST: ${{ needs.promote-tag.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy the approved digest over direct SSH
+        run: |
+          set -euo pipefail
+          for name in SSH_PRIVATE_KEY SSH_KNOWN_HOSTS DEPLOY_HOST DEPLOY_PORT DEPLOY_USER ONLINE_BEARER_TOKEN MANIFEST_DIGEST; do
+            [[ -n "${!name:-}" ]] || { echo "Missing online Environment value: $name" >&2; exit 1; }
+          done
+          [[ "$DEPLOY_USER" == github ]] || { echo 'Online SSH user must be github' >&2; exit 1; }
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || exit 1
+          if [[ ! "$DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$DEPLOY_PORT < 1 || 10#$DEPLOY_PORT > 65535 )); then
+            echo 'Invalid Online SSH port' >&2; exit 1;
+          fi
+          [[ "$MANIFEST_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$(git ls-remote origin refs/heads/release | cut -f1)" == "$GITHUB_SHA" ]] || {
+            echo 'A newer Release commit exists; refusing stale deployment' >&2; exit 1;
+          }
+          image="${REGISTRY}/${IMAGE_NAME}@${MANIFEST_DIGEST}"
+          key=$(mktemp "$RUNNER_TEMP/memoia-online-key.XXXXXX")
+          hosts=''
+          trap 'rm -f -- "$key"; if [[ -n "$hosts" ]]; then rm -f -- "$hosts"; fi' EXIT
+          hosts=$(mktemp "$RUNNER_TEMP/memoia-online-known-hosts.XXXXXX")
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$hosts"
+          chmod 600 "$key" "$hosts"
+          ssh_opts=(-F /dev/null -i "$key" -p "$DEPLOY_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$hosts" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+          root=/opt/memoia
+          compose_sha=$(sha256sum deploy/docker-compose.yml | cut -d' ' -f1)
+          # shellcheck disable=SC2029 # Validated candidate identity expands on the runner.
+          ssh "${ssh_opts[@]}" "$target" "sudo -n test -d '$root' && sudo -n install -d -m 700 '$root/.deploy' '$root/.deploy/candidates' '$root/.deploy/candidates/$GITHUB_SHA'"
+          # shellcheck disable=SC2029
+          tar -C deploy -cf - deploy-memoia.sh infra-fingerprint.sh schema-fingerprint.sh recovery.py | ssh "${ssh_opts[@]}" "$target" "sudo -n tar -C '$root/.deploy/candidates/$GITHUB_SHA' -xf -"
+          # shellcheck disable=SC2029
+          ssh "${ssh_opts[@]}" "$target" "sudo -n bash '$root/.deploy/candidates/$GITHUB_SHA/deploy-memoia.sh' prepare '$root' '$image' '$GITHUB_SHA' '$GITHUB_RUN_ID' '$compose_sha'"
+          bash deploy/smoke-api.sh https://memoia.jianify.dev "$ONLINE_BEARER_TOKEN"
+          # shellcheck disable=SC2029
+          ssh "${ssh_opts[@]}" "$target" "sudo -n bash '$root/.deploy/candidates/$GITHUB_SHA/deploy-memoia.sh' finalize '$root' '$image' '$GITHUB_SHA' '$GITHUB_RUN_ID' '$compose_sha'"
+      - name: Record successful Online deployment
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${IMAGE_NAME}@${MANIFEST_DIGEST}"
+          payload=$(jq -nc --arg ref "$GITHUB_SHA" --arg image "$image" --arg config "$GITHUB_SHA" '{ref:$ref,environment:"online",auto_merge:false,required_contexts:[],payload:{image:$image,config_commit:$config}}')
+          id=$(gh api "repos/$GITHUB_REPOSITORY/deployments" --method POST --input - --jq .id <<< "$payload")
+          status=$(jq -nc '{state:"success",environment_url:"https://memoia.jianify.dev",description:"Basic acceptance: API health, auth and user CRUD passed"}')
+          gh api "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" --method POST --input - <<< "$status" >/dev/null
+          printf 'Online basic acceptance: source=%s image=%s. Full memory acceptance remains separate.\n' "$GITHUB_SHA" "$image" >> "$GITHUB_STEP_SUMMARY"
