@@ -79,7 +79,8 @@ class PublicationContract(unittest.TestCase):
         guide = (WORKFLOW.parents[2] / "deploy/README.md").read_text()
         self.assertEqual(job["if"], "${{ vars.MEMOIA_TEST_DEPLOY_ENABLED == 'true' }}")
         self.assertEqual(job["environment"]["name"], "test")
-        self.assertIn("Repository Variable** `MEMOIA_TEST_DEPLOY_ENABLED`", guide)
+        self.assertIn("`MEMOIA_TEST_DEPLOY_ENABLED` 的设置入口", guide)
+        self.assertIn("必须使用仓库级 Variable", guide)
         self.assertIn("Settings → Secrets and variables → Actions → Variables", guide)
 
     def test_same_source_publications_are_serialized_without_cancellation(self):
