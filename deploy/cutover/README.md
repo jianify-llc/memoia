@@ -1,5 +1,7 @@
 # 旧 PostgreSQL 一次性切换备份
 
+本文件是 2026-09-30 Test 迁库的历史说明，切换和实际业务验收均已完成，不能作为当前发布或再次迁库的操作步骤。现役 API 连接公司 PostgreSQL 的 `memoia` 数据库；日常发布、配套备份和恢复见[部署手册](../README.md)，当次执行证据见[公司监控切换记录](https://github.com/jianify/Jianify-llc/blob/main/ops/monitoring/test-cutover.md)。
+
 这份补丁只应用于线上已验收的 `54c0ba7664261ea2f68b0b3ab6375392d46a13e9` 版部署脚本。它在旧版配套备份入口增加显式 `backup-cutover` 模式：沿用原有运行身份、静止状态、PG／Redis、manifest 和哈希校验，成功后保持旧 API 停止。普通 `backup` 完全沿用原来的重启行为。当前日常脚本已经面向公司 PostgreSQL，不应为了一次迁移增加旧 Compose 兼容路径。
 
 在本机 Memoia 仓库根目录先运行：
@@ -42,4 +44,4 @@ sudo -n bash /opt/memoia/.deploy/candidates/CUTOVER_CANDIDATE/deploy-memoia.sh \
 
 **这里停止的是旧 API，不是先停旧 PostgreSQL。** 在 dump 和 Redis `SAVE` 完成前，旧 PG／Redis 必须继续运行。备份完成后核对容器已停止、127.0.0.1:8000 不再受理请求、旧 PG／Redis 仍健康、备份哈希与表行数，并把配套备份离机保存；随后才停旧 PG。整个窗口禁止手动发布或重启旧 API。若发现任何绕过 API、直连旧 PG／Redis 的写入方，停止切换并另行处理。
 
-旧 PG 数据目录及原始候选保留到新数据库、应用和业务探针验收完成。新 API 接受任何写入后，不能通过恢复旧库快照覆盖新数据；需要回退时先单独制定数据处理方案。旧版 `backup.json` 不能交给新版 `restore-data`，配套回退要使用旧脚本和旧 Compose。完整恢复与接纳步骤见上级 [部署手册](../README.md)。
+旧 PG 数据目录及原始候选保留到新数据库、应用和业务探针验收完成。新 API 接受任何写入后，不能通过恢复旧库快照覆盖新数据；需要回退时先单独制定数据处理方案。旧版 `backup.json` 不能交给新版 `restore-data`，配套回退要使用旧脚本和旧 Compose。当次接纳及验收见上文切换记录；当前发布与恢复规则见上级[部署手册](../README.md)。

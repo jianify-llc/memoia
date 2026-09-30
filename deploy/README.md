@@ -43,35 +43,7 @@ MEMOIA_IMAGE 可填初始候选总 manifest digest，不用 latest；所有应�
 
 首次启动由操作员使用 `deploy-memoia.sh init /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256`。init-config 不等于安装或验收。init 必须确认无现有应用容器、Redis 数据目录和公司 `memoia` 数据库均为空、解析后的 Redis 挂载与数据库网络正确、公司 PostgreSQL 状态健康。启动后保留 pending，不能自动宣称业务通过；分别验证真实模型、embedding、Bearer 正反例、SDK 写入/flush/最终事件 ID/画像与事件/删除、重启持久性、容量和 IPv4/IPv6 无公网旁路，再 finalize。空库用现有初始化，没有可用 Alembic 链，不运行虚构 upgrade head。
 
-已有 test 部署迁往公司 PostgreSQL 只做一次真实停写切换，不运行 `init`，也不增加隔离恢复演练。按以下顺序执行：
-
-1. 推送含新部署脚本和 Compose 的 test 提交前，先将 GitHub **Repository Variable** `MEMOIA_TEST_DEPLOY_ENABLED` 设为 `false` 并核对（Settings → Secrets and variables → Actions → Variables）。`deploy-test` 的 job-level `if` 在读取 test Environment 配置之前求值，因此放在 Environment Variables 中不能控制这个门闩。test 推送仍会测试、构建和发布候选镜像；该门闩使 `deploy-test` 跳过。否则工作流会把新脚本传到仍使用旧 Compose 的服务器并调用 `prepare`，在切换前失败。跳过的 job 也不会传输新脚本，因此接纳阶段须单独将已审查的 `deploy-memoia.sh`、`infra-fingerprint.sh`、`schema-fingerprint.sh` 和 `recovery.py` 放入同一受保护的服务器候选目录。
-2. 停止**旧 API 并保持关闭**作为唯一写入门闩，不需要额外配置 WAF。旧 PostgreSQL 此时必须继续运行，才能产生一致的逻辑 dump；它在备份成功、离机保存及核对后才停止。先核对服务器的旧 Compose、已验收镜像及实际运行脚本与固定源码 `54c0ba7` 一致，再按 [一次性补丁说明](cutover/README.md)生成独立候选，不覆盖旧脚本。使用候选的 `backup-cutover`：它先检查静止的 buffer／Redis 状态，正常停止旧 API，再复核状态、导出配套 PG／Redis、保存原格式清单和哈希，成功时确认旧 API 仍停止，**不会重新启动**。普通 `backup` 行为保持原样，不能用于本次迁库。
-
-   在共享 `codex` 终端核对旧 API 容器已退出且无自动重启、旧 PG／Redis 仍运行，公网 Memoia API 已不能接收写入，所有有效写入方只经此 API；旧 Compose 的 PG／Redis 无公网端口。`MEMOIA_TEST_DEPLOY_ENABLED=false` 继续保持，迁移窗口禁止人工发布或启动旧 API。备份失败时先核对 API 实际状态：前置检查失败可能发生在停机之前，停机后的失败则保留 `pending-maintenance`；两种情况都不得假定已经停写并继续迁移。成功后离机保存完整备份，并核对哈希、逐表行数、旧实例和迁移期容量。旧清单不符合新版 `recovery.py restore-data` 的输入格式，不能交给新版恢复入口；保留旧脚本、旧 Compose、旧 PG 数据目录及配套恢复说明作为回退证据。若发现其他可直连旧库的写入者，停止切换，不能把 API 已停当作完整停写证明。
-3. 公司 PG 管理员确认目标 `memoia` 库为空、`vector` 已安装。正常停止旧 PG，旧数据目录保持不动；Redis 保持运行，供新 API 使用。恢复旧 dump 时使用 `--no-owner --no-acl --no-comments --role=jianify_app`，确保新表及序列归应用账号所有；仅以 `postgres` 连接并加 `--no-owner` 会使新对象归 `postgres`，Memoia 随后无法正常写入。旧备份路径以本次 `backup-cutover` 的实际回执为准，示例命令在共享终端执行，不会输出连接密码：
-
-   ```bash
-   sudo -n sh -c 'docker compose --env-file /opt/postgres/.env -f /opt/postgres/compose.yaml \
-     exec -T postgres pg_restore --exit-on-error --no-owner --no-acl --no-comments \
-     --role=jianify_app -U postgres -d memoia < "$1"' \
-     sh /opt/memoia/.deploy/backups/ACTUAL_BACKUP_ID/postgres.dump
-   ```
-
-   此命令没有使用 `--single-transaction`；如果恢复中途失败，继续保持 API 关闭，检查目标库、通过公司 PostgreSQL 管理入口恢复为空目标库，再从同一份已校验备份重试；不得在部分恢复的库上直接重跑。成功后逐表核对行数与旧备份清单一致、`vector` 存在，并确认 `public` 中表、视图和序列没有非 `jianify_app` 所有者。以下查询必须返回 `0`：
-
-   ```bash
-   sudo -n docker compose --env-file /opt/postgres/.env -f /opt/postgres/compose.yaml \
-     exec -T postgres psql -X -U postgres -d memoia -Atc \
-     "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = 'public' AND c.relkind IN ('r','p','v','m','S')
-        AND pg_get_userbyid(c.relowner) <> 'jianify_app';"
-   ```
-
-   随后切换服务器 Compose／`.env`，用 `deploy-state` 中原已验收镜像启动连接新库的 API，验证真实业务读写、embedding 查询、Redis 持久状态与实际容量。此时重新开放 API 已是**新库的正式写入切点**，不可再用旧库快照覆盖它；不需要为了迁移本身另建 WAF 例外。API 健康检查只验证数据库连接和 Redis ping，启动还可能自动建表，不能替代逐表核对。接纳脚本不会核对旧备份哈希或逐表行数，以上证据须在启动新 API 前人工记录。受控 HTTPS SDK 探针应明确使用新 API，不能在旧 API 上执行。
-4. 使用新候选脚本执行 `deploy-memoia.sh adopt-external-postgres /opt/memoia IMAGE SOURCE_SHA RUN_ID NEW_COMPOSE_SHA256`；IMAGE、SOURCE_SHA、RUN_ID 必须与切换前的 `deploy-state` 一致，Compose 哈希取服务器新文件。该入口只在当前镜像健康、运行时数据库连接与新配置一致、旧 PG 已停、公司 PostgreSQL 与 Redis 均合格时更新基线，保存旧记录并清除旧基础设施下的 `previous-accepted`。接纳和业务验收完成后，按后续发布需要重新开启自动部署。
-
-普通 `prepare` 不会自动接受基础设施漂移。切换前的 PostgreSQL 数据目录只保留为受保护回退证据，不由 `init-config` 更改或清除；新库发生写入后，不能直接回退旧数据。
+2026-09-30，Test 已完成旧独立 PostgreSQL 到公司共享实例 `memoia` 数据库的一次性停写切换；旧 PostgreSQL 已停止，当前 API 连接公司数据库，自动测试发布已重新启用。此后按下文日常发布流程操作，不重跑 `backup-cutover` 或 `adopt-external-postgres`，也不以旧库快照覆盖新写入。一次性候选与旧版补丁见[历史切换说明](cutover/README.md)，实际迁移、数据及业务验收见[公司监控切换记录](https://github.com/jianify/Jianify-llc/blob/main/ops/monitoring/test-cutover.md)。
 
 init 记录 infra-config.sha256 和 schema.sha256；前者包含公司 PostgreSQL 只读配置指纹、Memoia Redis、外部网络与应用连接契约，后者只读取镜像内 ORM、建表连接层和迁移源码，不导入应用或连接 DB。Memoia 独立管理自己的服务生命周期；是否已有 Luvel 等消费者不作为日常发布资格，不再创建或读取 standalone-mode 标记。
 
@@ -113,9 +85,9 @@ Actions 只上传脚本到 .deploy/candidates，不覆盖 Compose/.env/YAML。su
 
 reverify-test 用同 digest，只证明部署通道；A→B 更新和 B→A 恢复需要两个不同兼容 digest，未完成不得宣称通过。
 
-## 恢复及未完成项
+## 恢复与备份
 
-旧嵌套目录 /opt/jianify/memoia 不作为兼容入口，脚本不会自动搬移配置或数据。服务器若有已运行的旧部署，先单独核对停写、在途处理、挂载和记录，再安排路径维护；不能直接启动第二套服务使用同一数据。仅修改源码不能代表服务器路径已切换；Tokyo 测试服务器已单独完成空部署目录移动与宿主机 Tunnel 路径切换，应用仍待配置和启动，详见 Jianify-LLC 的 ops/server/validation/2026-09-26-split-layout.md。
+旧嵌套目录 `/opt/jianify/memoia` 不作为兼容入口，脚本不会从该处自动搬移配置或数据。2026-09-26 的空目录及 Tunnel 路径维护记录只是当时的阶段证据；截至 2026-09-30，Test API 已在 `/opt/memoia` 运行，并完成实际发布和业务探针验收。后续恢复不能启动旧目录中的另一套服务共用当前数据。
 
 首次失败无旧镜像可回滚，保留数据/诊断、停止候选 API。不用旧快照覆盖新数据。兼容 API 恢复沿用正常停止/启动流程，不检查调用方是否停写；不兼容处理协议、schema/embedding 变化和配套数据恢复单独迁移演练。
 
@@ -125,7 +97,7 @@ reverify-test 用同 digest，只证明部署通道；A→B 更新和 B→A 恢�
 
 `restore-data /opt/memoia BACKUP_DIRECTORY /opt/memoia/rehearsals/restore-UNIQUE` 只接受完整校验通过的本地配套备份及从未存在的目标目录；空但已存在的目录也拒绝。使用备份记录的 PG 镜像临时启动独立 PostgreSQL，给予它隔离网络内的 `jianify-postgres` 别名，绝不接入正式 `jianify-data`；Redis 和 API 同样使用独立 project/network/config/data，显式 --project-name 防止 .env 的正式 project 名覆盖隔离身份。不挂 Tunnel，不映射任何主机端口，检查解析后的连接目标及实际挂载。先关闭 AOF 加载 RDB，验证持久探针及 PG 表行数；再启用 AOF、等重写完成、正常停止、按正式 AOF 配置重启后再次验证，最后启动隔离 API 并验证健康。失败保留隔离数据供排查；不覆盖、清空或恢复当前业务库。
 
-入口与自动测试不能代替真实验收。这次测试环境数据库切换记录一次配套备份、迁移后业务读写和实际容量即可；隔离恢复工具保留，不额外重复演练。原有镜像版本更新／恢复与远端 Actions 的验收仍按各自发布规则执行；Online 主机、Secrets、备份与恢复未验收，不能把工作流就绪误写为生产可发布。
+入口与自动测试不能代替真实验收。2026-09-30 测试环境数据库切换已记录配套备份、迁移后业务读写和实际容量；隔离恢复工具保留，不额外重复演练。镜像版本更新／恢复与远端 Actions 的验收仍按各自发布规则执行；Online 主机、Secrets、备份与恢复未验收，不能把工作流就绪误写为生产可发布。
 
 ## 自动验证
 
