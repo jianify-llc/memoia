@@ -70,6 +70,7 @@ jobs:
           uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_compose.py -v
           uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_workflow.py -v
           uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_recovery.py -v
+          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/cutover -p verify_legacy_patch.py -v
           uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_sdk_probe.py -v
           docker run --rm -e MEMOIA_DEPLOY_TEST_ISOLATED=1 \
             --mount "type=bind,source=$GITHUB_WORKSPACE/deploy,target=/work/deploy,readonly" \
