@@ -1,10 +1,7 @@
 name: Memoia · Online
 
 on:
-  pull_request:
-    branches: [release]
   push:
-    branches: [release]
     tags: ['v*']
 
 permissions:
@@ -15,38 +12,36 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  verify:
-    uses: ./.github/workflows/verify.yml
-
-  build-validation:
-    if: ${{ github.event_name == 'pull_request' }}
-    needs: verify
+  validate-tag:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - name: Build without publishing or deployment credentials
-        uses: docker/build-push-action@v6
-        with:
-          context: ./src/server/api
-          platforms: linux/amd64
-          push: false
-          build-args: VCS_REF=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha
+      - name: Require version tag at current Release HEAD
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected a stable vMAJOR.MINOR.PATCH tag' >&2; exit 1; }
+          release_sha=$(git ls-remote origin refs/heads/release | cut -f1)
+          [[ -n "$release_sha" && "$GITHUB_SHA" == "$release_sha" ]] || {
+            echo "Tag SHA $GITHUB_SHA is not the current release HEAD $release_sha" >&2; exit 1;
+          }
 
-  publish-release:
-    if: ${{ github.ref == 'refs/heads/release' }}
+  verify:
+    needs: validate-tag
+    uses: ./.github/workflows/verify.yml
+
+  build-online:
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 75
     concurrency:
-      group: memoia-publication-${{ github.repository }}-${{ github.sha }}
+      group: memoia-online-image-${{ github.ref_name }}
       cancel-in-progress: false
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.identity.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
@@ -56,35 +51,36 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Locate immutable candidate
+      - name: Check whether this immutable version already exists
         id: existing
         run: |
-          image="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
-          if docker buildx imagetools inspect "$image" >/dev/null 2>&1; then
+          set -euo pipefail
+          if docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             echo 'exists=true' >> "$GITHUB_OUTPUT"
           else
             echo 'exists=false' >> "$GITHUB_OUTPUT"
           fi
-      - name: Build Release candidate on AMD64 and ARM64
+      - name: Build the Online image once on AMD64 and ARM64
         if: ${{ steps.existing.outputs.exists != 'true' }}
         uses: docker/build-push-action@v6
         with:
           context: ./src/server/api
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
           build-args: VCS_REF=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha
           provenance: mode=max
-      - name: Verify candidate digest, architectures and source
+      - name: Validate published digest, platforms, source and schema
+        id: identity
         run: |
           set -euo pipefail
-          candidate="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
-          digest=$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -r .digest)
+          version="${REGISTRY}/${IMAGE_NAME}:${GITHUB_REF_NAME}"
+          docker buildx imagetools inspect "$version" --raw > "$RUNNER_TEMP/manifest.json"
+          digest=$(docker buildx imagetools inspect "$version" --format '{{json .Manifest}}' | jq -r .digest)
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           image="${REGISTRY}/${IMAGE_NAME}@${digest}"
-          docker buildx imagetools inspect "$image" --raw > "$RUNNER_TEMP/manifest.json"
           anonymous_config=$(mktemp -d)
           trap 'rm -rf -- "$anonymous_config"' EXIT
           schema=''
@@ -98,67 +94,11 @@ jobs:
             [[ -z "$schema" || "$schema" == "$candidate_schema" ]] || { echo 'Architecture schema sources differ' >&2; exit 1; }
             schema="$candidate_schema"
           done
-          printf 'Release candidate: source=%s image=%s schema=%s\n' "$GITHUB_SHA" "$image" "$schema" >> "$GITHUB_STEP_SUMMARY"
-
-  promote-tag:
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: verify
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      packages: write
-    outputs:
-      digest: ${{ steps.identity.outputs.digest }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - name: Require current Release HEAD
-        run: |
-          [[ "$(git ls-remote origin refs/heads/release | cut -f1)" == "$GITHUB_SHA" ]] || {
-            echo 'Version tag is not at the current Release HEAD' >&2; exit 1;
-          }
-      - name: Reuse the Release candidate
-        id: identity
-        run: |
-          set -euo pipefail
-          candidate="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
-          docker buildx imagetools inspect "$candidate" --raw > "$RUNNER_TEMP/manifest.json"
-          digest=$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -r .digest)
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          anonymous_config=$(mktemp -d)
-          trap 'rm -rf -- "$anonymous_config"' EXIT
-          for arch in amd64 arm64; do
-            platform_digest=$(jq -er --arg arch "$arch" '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest] | if length == 1 then .[0] else error("Missing or duplicate platform") end' "$RUNNER_TEMP/manifest.json")
-            platform_image="${REGISTRY}/${IMAGE_NAME}@${platform_digest}"
-            DOCKER_CONFIG="$anonymous_config" docker pull --platform "linux/$arch" "$platform_image"
-            docker image inspect "$platform_image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' | grep -Fx "$GITHUB_SHA"
-          done
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Attach version tag without rebuilding
-        env:
-          DIGEST: ${{ steps.identity.outputs.digest }}
-        run: |
-          set -euo pipefail
-          version="${REGISTRY}/${IMAGE_NAME}:${GITHUB_REF_NAME}"
-          image="${REGISTRY}/${IMAGE_NAME}@${DIGEST}"
-          if docker buildx imagetools inspect "$version" >/dev/null 2>&1; then
-            existing=$(docker buildx imagetools inspect "$version" --format '{{json .Manifest}}' | jq -r .digest)
-            [[ "$existing" == "$DIGEST" ]] || { echo 'Version tag already points elsewhere' >&2; exit 1; }
-          else
-            docker buildx imagetools create -t "$version" "$image"
-          fi
-          actual=$(docker buildx imagetools inspect "$version" --format '{{json .Manifest}}' | jq -r .digest)
-          [[ "$actual" == "$DIGEST" ]] || exit 1
+          printf 'Online artifact: source=%s image=%s schema=%s\n' "$GITHUB_SHA" "$image" "$schema" >> "$GITHUB_STEP_SUMMARY"
 
   deploy-online:
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: promote-tag
+    needs: build-online
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
@@ -179,7 +119,7 @@ jobs:
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
       ONLINE_BEARER_TOKEN: ${{ secrets.MEMOIA_ONLINE_BEARER_TOKEN }}
       GH_TOKEN: ${{ github.token }}
-      MANIFEST_DIGEST: ${{ needs.promote-tag.outputs.digest }}
+      MANIFEST_DIGEST: ${{ needs.build-online.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
       - name: Deploy the approved digest over direct SSH
