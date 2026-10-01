@@ -16,7 +16,7 @@ env:
 
 jobs:
   verify:
-    uses: ./.github/workflows/verify.yaml
+    uses: ./.github/workflows/verify.yml
 
   build-validation:
     if: ${{ github.event_name == 'pull_request' }}
