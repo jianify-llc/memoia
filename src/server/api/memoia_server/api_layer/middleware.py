@@ -50,7 +50,9 @@ async def global_wrapper_middleware(request: Request, call_next):
         request_id=req_id, project_id=project_id, memobase_version=__version__
     )
 
-    url = get_path_with_query_string(request.scope)
+    private_context = request.url.path.startswith("/api/v1/users/context/")
+    # Existing GET clients may still put private chat text in the query; never log that URL.
+    url = request.url.path if private_context else get_path_with_query_string(request.scope)
     client_host = request.client.host
     client_port = request.client.port
     http_method = request.method
@@ -65,8 +67,9 @@ async def global_wrapper_middleware(request: Request, call_next):
         traceback_str = None
     except Exception as e:
         status_code = 500
-        errmsg = f"Sorry, we have encountered an unknown error: \n{e}\nPlease report this issue to https://github.com/memodb-io/memobase/issues"
-        traceback_str = traceback.format_exc().replace("\n", "<br>")
+        errmsg = ("Context unavailable" if private_context else
+                  f"Sorry, we have encountered an unknown error: \n{e}\nPlease report this issue to https://github.com/memodb-io/memobase/issues")
+        traceback_str = None if private_context else traceback.format_exc().replace("\n", "<br>")
         response = JSONResponse(
             content={
                 "data": None,
@@ -84,7 +87,7 @@ async def global_wrapper_middleware(request: Request, call_next):
         f"""{client_host}:{client_port} - "{http_method} {url} HTTP/{http_version}" {status_code}""",
         extra={
             "http": {
-                "url": str(request.url),
+                "url": request.url.path if private_context else str(request.url),
                 "status_code": status_code,
                 "method": http_method,
                 "version": http_version,

@@ -8,6 +8,45 @@ from ..models.utils import Promise
 from ..models import response as res
 from fastapi import Request
 from fastapi import Path, Query
+from pydantic import BaseModel, ValidationError
+
+
+class UserContextRequest(BaseModel):
+    max_token_size: int = 1000
+    prefer_topics: list[str] | None = None
+    only_topics: list[str] | None = None
+    max_subtopic_size: int | None = None
+    topic_limits_json: str | None = None
+    profile_event_ratio: float = 0.6
+    require_event_summary: bool = False
+    chats_str: str | None = None
+    event_similarity_threshold: float = 0.2
+    time_range_in_days: int = 180
+    customize_context_prompt: str | None = None
+    full_profile_and_only_search_event: bool = True
+    fill_window_with_events: bool = False
+
+
+async def post_user_context(request: Request, user_id: UUID = Path(..., description="The ID of the user")) -> res.UserContextDataResponse:
+    # Parse explicitly so neither JSON syntax nor field-validation exceptions echo private input.
+    try:
+        payload = UserContextRequest.model_validate(await request.json())
+    except (ValueError, TypeError, ValidationError):
+        return Promise.reject(CODE.BAD_REQUEST, "Invalid context request").to_response(
+            res.UserContextDataResponse
+        )
+    try:
+        response = await get_user_context(request, user_id, **payload.model_dump())
+    except Exception:
+        # Provider and template exceptions can contain request values; do not expose them.
+        return Promise.reject(CODE.INTERNAL_SERVER_ERROR, "Context unavailable").to_response(
+            res.UserContextDataResponse
+        )
+    if response.errno != CODE.SUCCESS:
+        return res.UserContextDataResponse(
+            data=None, errno=response.errno, errmsg="Context unavailable"
+        )
+    return response
 
 
 async def get_user_context(
@@ -99,8 +138,8 @@ Unless the user has relevant queries, do not actively mention those memories in 
     try:
         topic_limits = res.StrIntData(data=json.loads(topic_limits_json)).data
         chats = res.MessageData(data=json.loads(chats_str)).data
-    except Exception as e:
-        return Promise.reject(CODE.BAD_REQUEST, f"Invalid JSON: {e}").to_response(
+    except Exception:
+        return Promise.reject(CODE.BAD_REQUEST, "Invalid context request").to_response(
             res.UserContextDataResponse
         )
     p = await controllers.context.get_user_context(
