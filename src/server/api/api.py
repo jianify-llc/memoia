@@ -271,6 +271,11 @@ router.get(
     openapi_extra=API_X_CODE_DOCS["GET /users/context/{user_id}"],
 )(api_layer.context.get_user_context)
 
+router.post(
+    "/users/context/{user_id}",
+    tags=["context"],
+)(api_layer.context.post_user_context)
+
 
 router.post(
     "/users/roleplay/proactive/{user_id}",

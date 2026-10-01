@@ -19,6 +19,12 @@ Agent 操作远端服务器前，必须阅读相邻仓库 `../Jianify-LLC/ops/se
 └── .deploy/                     root:root 0700，运行记录/候选脚本
 ```
 
+## 上下文接口的隐私边界
+
+Luvel 读取上下文使用 `POST /api/v1/users/context/{user_id}`，在 JSON body 传 `chats_str` 和 `customize_context_prompt`，沿用现有 Bearer 鉴权及响应结构。GET 仅供既有其它客户端兼容；Luvel 不能在 POST 失败时回退到把聊天内容放进 URL 的 GET。上线须先发布 Memoia POST，再切 Luvel 调用。验收正常、非法输入、超时和服务端异常时，入口日志、反向代理 URL 及 Trace 不得出现聊天正文或模板。
+
+历史 GET URL 已可能进入 Cloudflare Workers Logs／Traces、Tunnel／代理访问日志或外部日志目的地；POST 切换不会清除这些记录。发布前核对各目的地的访问角色、导出设置及实际保留期限；有定向清理能力才按受影响时间及路径限定清理，否则限制访问并记录到期时间。实际账号和其它日志目的地须现场核实。
+
 ## 准备配置
 
 在主机上使用完整受控的 deploy 目录：

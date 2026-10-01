@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from memoia_server import controllers
 from memoia_server.models.database import DEFAULT_PROJECT_ID
 from memoia_server.models.blob import BlobType
+from memoia_server.models.response import UserContextDataResponse
 import numpy as np
 from memoia_server.env import CONFIG
 
@@ -33,6 +34,54 @@ def test_health_check(client, db_env):
     d = response.json()
     assert response.status_code == 200
     assert d["errno"] == 0
+
+
+def test_context_request_logs_hide_private_query_and_provider_exception(client):
+    secret = "PRIVATE_CONTEXT_SENTINEL"
+    with patch("memoia_server.api_layer.context.get_user_context",
+               new=AsyncMock(return_value=UserContextDataResponse(data=None))) as context_call:
+        accepted = client.post(
+            f"{PREFIX}/users/context/00000000-0000-4000-8000-000000000001",
+            json={"chats_str": secret, "customize_context_prompt": secret},
+        )
+        assert accepted.json()["errno"] == 0
+        assert context_call.await_args.kwargs["chats_str"] == secret
+        assert secret not in str(accepted.request.url)
+    malformed = client.post(
+        f"{PREFIX}/users/context/00000000-0000-4000-8000-000000000001",
+        json={"chats_str": secret, "max_token_size": secret},
+    )
+    assert malformed.json()["errno"] != 0
+    assert secret not in malformed.text
+    with patch("memoia_server.api_layer.middleware.LOG.error") as error_log, \
+         patch("memoia_server.api_layer.middleware.LOG.info") as info_log:
+        invalid = client.get(
+            f"{PREFIX}/users/context/00000000-0000-4000-8000-000000000001",
+            params={"chats_str": secret},
+        )
+        assert invalid.status_code == 200
+        assert secret not in str(error_log.call_args_list)
+        assert secret not in str(info_log.call_args_list)
+    with patch("memoia_server.api_layer.context.get_user_context",
+               new=AsyncMock(side_effect=TimeoutError(secret))):
+        timed_out = client.post(
+            f"{PREFIX}/users/context/00000000-0000-4000-8000-000000000001",
+            json={"chats_str": secret},
+        )
+        assert timed_out.json()["errno"] != 0
+        assert secret not in timed_out.text
+    with patch("memoia_server.controllers.context.get_user_context",
+               new=AsyncMock(side_effect=RuntimeError(secret))), \
+         patch("memoia_server.api_layer.middleware.LOG.error") as error_log, \
+         patch("memoia_server.api_layer.middleware.LOG.info") as info_log:
+        failed = client.post(
+            f"{PREFIX}/users/context/00000000-0000-4000-8000-000000000001",
+            json={"chats_str": secret},
+        )
+        assert failed.json()["errno"] != 0
+        assert secret not in failed.text
+        assert secret not in str(error_log.call_args_list)
+        assert secret not in str(info_log.call_args_list)
 
 
 @pytest.fixture
@@ -276,6 +325,22 @@ async def test_api_user_profile(client, db_env):
     d = response.json()
     assert response.status_code == 200
     assert d["errno"] == 0
+
+    # Private context input must stay in the request body, including validation failures.
+    response = client.post(
+        f"{PREFIX}/users/context/{u_id}",
+        json={"only_topics": ["interest"], "customize_context_prompt": "{profile_section}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["errno"] == 0
+    assert "customize_context_prompt" not in str(response.request.url)
+
+    invalid = client.post(
+        f"{PREFIX}/users/context/{u_id}",
+        json={"chats_str": "PRIVATE_CHAT_BODY", "topic_limits_json": "{"},
+    )
+    assert invalid.json()["errno"] == 400
+    assert "PRIVATE_CHAT_BODY" not in invalid.text
 
     response = client.delete(f"{PREFIX}/users/profile/{u_id}/{id1}")
     d = response.json()
