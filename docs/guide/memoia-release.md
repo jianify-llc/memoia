@@ -40,7 +40,7 @@ previously interrupted flush is safe to replay.
 
 ## Build and record a release
 
-The [`main` verification workflow](../../.github/workflows/main-verify.yaml)
+The [`main` verification workflow](../../.github/workflows/verify.yml)
 runs frozen-dependency tests and a single-architecture image build without
 publishing. The separate `test` and `release` workflows own test deployment and
 online release respectively; neither is triggered by a `main` push. Promoting

@@ -1,0 +1,229 @@
+# Memoia Test verification, image publication, and deployment.
+name: Memoia · Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Test publish or revalidate the existing test candidate
+        type: choice
+        options: [publish-test, reverify-test]
+        required: true
+  push:
+    branches:
+      - test
+      - 'feature/**'
+      - 'codex/**'
+      - 'hotfix/**'
+  pull_request:
+    branches:
+      - test
+
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  validate-dispatch:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/test' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo 'Manual test publication must run from the test branch' >&2
+          exit 1
+
+  verify:
+    uses: ./.github/workflows/verify.yml
+
+  build-image:
+    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/test') && !startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch' }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build only without registry or deployment credentials
+        uses: docker/build-push-action@v6
+        with:
+          platforms: linux/amd64
+          context: ./src/server/api
+          push: false
+          build-args: VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha
+
+  publish-test:
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/test' }}
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    concurrency:
+      group: memoia-publication-${{ github.repository }}-${{ github.sha }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.identity.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Authenticate for publication only
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Find existing candidate
+        id: existing
+        run: |
+          tag="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          if docker buildx imagetools inspect "$tag" >/dev/null 2>&1; then
+            digest=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' | jq -r .digest)
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Require an existing image for re-verification
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'reverify-test' && steps.existing.outputs.exists != 'true' }}
+        run: |
+          echo 'Re-verification cannot create a new image' >&2
+          exit 1
+      - name: Build both architectures exactly once per source SHA
+        if: ${{ steps.existing.outputs.exists != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.operation == 'reverify-test') }}
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./src/server/api
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
+          build-args: VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha
+          provenance: mode=max
+      - name: Verify manifest, source label, and anonymous pull
+        id: identity
+        env:
+          EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          digest="${EXISTING_DIGEST:-$BUILT_DIGEST}"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="${REGISTRY}/${IMAGE_NAME}@${digest}"
+          docker buildx imagetools inspect "$image" --raw > "$RUNNER_TEMP/manifest.json"
+          cp "$RUNNER_TEMP/manifest.json" manifest.json
+          anonymous_config=$(mktemp -d)
+          schema=''
+          for arch in amd64 arm64; do
+            # shellcheck disable=SC2016 # jq variables are resolved by jq, not Bash.
+            platform_digest=$(jq -er --arg arch "$arch" '
+              [.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest]
+              | if length == 1 then .[0] else error("Expected exactly one linux/" + $arch + " manifest") end
+              | select(type == "string")
+              | select(test("^sha256:[0-9a-f]{64}$"))
+            ' "$RUNNER_TEMP/manifest.json")
+            platform_image="${REGISTRY}/${IMAGE_NAME}@${platform_digest}"
+            DOCKER_CONFIG="$anonymous_config" docker pull --platform "linux/$arch" "$platform_image"
+            # shellcheck disable=SC2016 # Docker template is intentionally literal.
+            docker image inspect "$platform_image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' | grep -Fx "$GITHUB_SHA"
+            docker run --rm --platform "linux/$arch" --entrypoint /app/.venv/bin/python "$platform_image" -c 'import memoia_server; print(memoia_server.__version__)'
+            candidate_schema=$(bash deploy/schema-fingerprint.sh "$platform_image")
+            [[ -z "$schema" || "$candidate_schema" == "$schema" ]] || { echo 'Architecture schema sources differ' >&2; exit 1; }
+            schema="$candidate_schema"
+          done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          # shellcheck disable=SC2016 # jq variables are resolved by jq, not Bash.
+          jq -n --arg sha "$GITHUB_SHA" --arg image "$image" --arg config "$GITHUB_SHA" --arg schema "$schema" '{source_commit:$sha,image:$image,config_commit:$config,schema_source_sha256:$schema,platforms:["linux/amd64","linux/arm64"]}' > release.json
+          printf 'Source: %s\nImage: %s\n' "$GITHUB_SHA" "$image" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload candidate identity
+        uses: actions/upload-artifact@v4
+        with:
+          name: memoia-candidate-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            release.json
+            manifest.json
+
+  deploy-test:
+    if: ${{ vars.MEMOIA_TEST_DEPLOY_ENABLED == 'true' }}
+    needs: publish-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: memoia-test-deployment
+      cancel-in-progress: false
+    environment:
+      name: test
+      url: https://test-memoia.jianify.dev
+      deployment: false
+    permissions:
+      contents: read
+      deployments: write
+    env:
+      SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+      SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      TEST_BEARER_TOKEN: ${{ secrets.MEMOIA_TEST_BEARER_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      MANIFEST_DIGEST: ${{ needs.publish-test.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy over direct SSH and smoke test the public API
+        run: |
+          set -euo pipefail
+          for name in SSH_PRIVATE_KEY SSH_KNOWN_HOSTS DEPLOY_HOST DEPLOY_PORT DEPLOY_USER TEST_BEARER_TOKEN; do
+            [[ -n "${!name:-}" ]] || { echo "Missing test Environment value: $name" >&2; exit 1; }
+          done
+          [[ "$DEPLOY_USER" == github ]] || { echo 'Test SSH user must be github' >&2; exit 1; }
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]] || { echo 'DEPLOY_HOST must be an IPv4 address or DNS hostname' >&2; exit 1; }
+          if [[ ! "$DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$DEPLOY_PORT < 1 || 10#$DEPLOY_PORT > 65535 )); then
+            echo 'DEPLOY_PORT must be between 1 and 65535' >&2
+            exit 1
+          fi
+          [[ "$(git ls-remote origin refs/heads/test | cut -f1)" == "$GITHUB_SHA" ]] || {
+            echo 'A newer test commit exists; refusing stale deployment' >&2
+            exit 1
+          }
+          image="${REGISTRY}/${IMAGE_NAME}@${MANIFEST_DIGEST}"
+          key=$(mktemp "$RUNNER_TEMP/memoia-deploy-key.XXXXXX")
+          hosts=''
+          # 无论 SSH、业务验收或 finalize 在何处失败，都清理本次生成的凭据文件。
+          trap 'rm -f -- "$key"; if [[ -n "$hosts" ]]; then rm -f -- "$hosts"; fi' EXIT
+          hosts=$(mktemp "$RUNNER_TEMP/memoia-known-hosts.XXXXXX")
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$hosts"
+          # 不读取 runner 的 SSH 配置；只用专用密钥和已核验 host key，禁止代理或其它身份回退。
+          ssh_opts=(-F /dev/null -i "$key" -p "$DEPLOY_PORT" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$hosts" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+          target="$DEPLOY_USER@$DEPLOY_HOST"
+          root=/opt/memoia
+          compose_sha=$(sha256sum deploy/docker-compose.yml | cut -d' ' -f1)
+          # shellcheck disable=SC2029 # Validated local identity is intentionally sent to the remote host.
+          ssh "${ssh_opts[@]}" "$target" "sudo -n test -d '$root' && sudo -n install -d -m 700 '$root/.deploy' '$root/.deploy/candidates' '$root/.deploy/candidates/$GITHUB_SHA'"
+          # shellcheck disable=SC2029
+          tar -C deploy -cf - deploy-memoia.sh infra-fingerprint.sh schema-fingerprint.sh recovery.py | ssh "${ssh_opts[@]}" "$target" "sudo -n tar -C '$root/.deploy/candidates/$GITHUB_SHA' -xf -"
+          # shellcheck disable=SC2029
+          ssh "${ssh_opts[@]}" "$target" "sudo -n bash '$root/.deploy/candidates/$GITHUB_SHA/deploy-memoia.sh' prepare '$root' '$image' '$GITHUB_SHA' '$GITHUB_RUN_ID' '$compose_sha'"
+          bash deploy/smoke-api.sh https://test-memoia.jianify.dev "$TEST_BEARER_TOKEN"
+          # shellcheck disable=SC2029
+          ssh "${ssh_opts[@]}" "$target" "sudo -n bash '$root/.deploy/candidates/$GITHUB_SHA/deploy-memoia.sh' finalize '$root' '$image' '$GITHUB_SHA' '$GITHUB_RUN_ID' '$compose_sha'"
+      - name: Record successful test deployment
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${IMAGE_NAME}@${MANIFEST_DIGEST}"
+          # shellcheck disable=SC2016 # jq receives these variable names literally.
+          payload=$(jq -nc --arg ref "$GITHUB_SHA" --arg image "$image" --arg config "$GITHUB_SHA" '{ref:$ref,environment:"test",auto_merge:false,required_contexts:[],payload:{image:$image,config_commit:$config}}')
+          id=$(gh api "repos/$GITHUB_REPOSITORY/deployments" --method POST --input - --jq .id <<< "$payload")
+          status=$(jq -nc '{state:"success",environment_url:"https://test-memoia.jianify.dev",description:"Basic acceptance: API health, auth and user CRUD passed"}')
+          gh api "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" --method POST --input - <<< "$status" >/dev/null
+          printf 'Accepted test image: %s\nConfig commit: %s\nAcceptance: basic deployment only, not full memory acceptance\n' "$image" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"

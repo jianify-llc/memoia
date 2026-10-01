@@ -1,6 +1,7 @@
-name: Memoia · Main Verify
+name: Memoia · Verify
 
 on:
+  workflow_call:
   push:
     branches: [main]
   pull_request:
@@ -45,20 +46,3 @@ jobs:
         if: always()
         working-directory: src/server
         run: docker compose down
-
-  build:
-    needs: verify
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - name: Build without publishing
-        uses: docker/build-push-action@v6
-        with:
-          context: src/server/api
-          platforms: linux/amd64
-          push: false
-          build-args: VCS_REF=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha
