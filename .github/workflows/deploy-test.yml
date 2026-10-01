@@ -2,64 +2,18 @@
 name: Memoia · Test
 
 on:
-  workflow_dispatch:
-    inputs:
-      operation:
-        description: Test publish or revalidate the existing test candidate
-        type: choice
-        options: [publish-test, reverify-test]
-        required: true
   push:
-    branches:
-      - test
-      - 'feature/**'
-      - 'codex/**'
-      - 'hotfix/**'
-  pull_request:
-    branches:
-      - test
-
+    branches: [test]
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  validate-dispatch:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/test' }}
-    runs-on: ubuntu-latest
-    steps:
-      - run: |
-          echo 'Manual test publication must run from the test branch' >&2
-          exit 1
-
   verify:
     uses: ./.github/workflows/verify.yml
 
-  build-image:
-    if: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/test') && !startsWith(github.ref, 'refs/tags/v') && github.event_name != 'workflow_dispatch' }}
-    needs: verify
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Build only without registry or deployment credentials
-        uses: docker/build-push-action@v6
-        with:
-          platforms: linux/amd64
-          context: ./src/server/api
-          push: false
-          build-args: VCS_REF=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha
-
   publish-test:
-    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/test' }}
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -81,7 +35,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Find existing candidate
+      - name: Find existing Test image
         id: existing
         run: |
           tag="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
@@ -92,13 +46,8 @@ jobs:
           else
             echo 'exists=false' >> "$GITHUB_OUTPUT"
           fi
-      - name: Require an existing image for re-verification
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'reverify-test' && steps.existing.outputs.exists != 'true' }}
-        run: |
-          echo 'Re-verification cannot create a new image' >&2
-          exit 1
       - name: Build both architectures exactly once per source SHA
-        if: ${{ steps.existing.outputs.exists != 'true' && !(github.event_name == 'workflow_dispatch' && inputs.operation == 'reverify-test') }}
+        if: ${{ steps.existing.outputs.exists != 'true' }}
         id: build
         uses: docker/build-push-action@v6
         with:

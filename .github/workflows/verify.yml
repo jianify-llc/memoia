@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, test, release]
   merge_group:
 
 permissions:
@@ -13,6 +13,7 @@ permissions:
 
 jobs:
   verify:
+    name: verify
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
