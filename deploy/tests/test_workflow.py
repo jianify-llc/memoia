@@ -10,9 +10,9 @@ import unittest
 import yaml
 
 
-WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/deploy-test.yaml"
-ONLINE_WORKFLOW = WORKFLOW.with_name("deploy-online.yaml")
-VERIFY_WORKFLOW = WORKFLOW.with_name("verify.yaml")
+WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/deploy-test.yml"
+ONLINE_WORKFLOW = WORKFLOW.with_name("deploy-online.yml")
+VERIFY_WORKFLOW = WORKFLOW.with_name("verify.yml")
 SHA = "d" * 40
 MOCK = r'''
 import json, os, pathlib, sys
@@ -60,8 +60,14 @@ class PublicationContract(unittest.TestCase):
         self.assertEqual(online[True]["push"], {"branches": ["release"], "tags": ["v*"]})
         self.assertEqual(online[True]["pull_request"], {"branches": ["release"]})
         self.assertIn("workflow_call", verify[True])
-        self.assertEqual(test["jobs"]["verify"]["uses"], "./.github/workflows/verify.yaml")
-        self.assertEqual(online["jobs"]["verify"]["uses"], "./.github/workflows/verify.yaml")
+        self.assertEqual(verify[True]["push"], {"branches": ["main"]})
+        self.assertEqual(verify[True]["pull_request"], {"branches": ["main"]})
+        self.assertIn("merge_group", verify[True])
+        self.assertNotIn("build", verify["jobs"])
+        self.assertNotIn("docker/build-push-action", VERIFY_WORKFLOW.read_text())
+        self.assertFalse(VERIFY_WORKFLOW.with_name("main-verify.yaml").exists())
+        self.assertEqual(test["jobs"]["verify"]["uses"], "./.github/workflows/verify.yml")
+        self.assertEqual(online["jobs"]["verify"]["uses"], "./.github/workflows/verify.yml")
         self.assertEqual(online["jobs"]["publish-release"]["needs"], "verify")
         self.assertEqual(online["jobs"]["build-validation"]["needs"], "verify")
         self.assertEqual(online["jobs"]["build-validation"]["if"], "${{ github.event_name == 'pull_request' }}")

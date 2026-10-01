@@ -47,9 +47,9 @@ previously interrupted flush is safe to replay.
 
 ## Build and record a release
 
-The [`main` verification workflow](../../.github/workflows/main-verify.yaml)
-runs frozen-dependency tests and a single-architecture image build without
-publishing. The separate `test` and `release` workflows own test deployment and
+The shared [`verify` workflow](../../.github/workflows/verify.yml)
+runs frozen-dependency and deployment-contract tests on `main` without building
+a Docker image. The separate `test` and `release` workflows own test deployment and
 online release respectively; neither is triggered by a `main` push. Promoting
 code to `release` and deploying online remain separate decisions. A successful
 build does not replace an ARM64 runtime test or the full API/SDK acceptance test.
