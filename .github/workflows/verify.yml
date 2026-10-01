@@ -5,15 +5,15 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, test, release]
   merge_group:
 
 permissions:
   contents: read
 
 jobs:
-  test:
-    name: Tests on Python 3.12
+  verify:
+    name: verify
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:

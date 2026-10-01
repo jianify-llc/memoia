@@ -71,7 +71,7 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 
 ## GitHub Actions
 
-`verify.yml` 提供共用 CI，也直接验证 `main` push、PR 和 merge queue，不构建 Docker 镜像；`deploy-test.yml` 只处理普通分支/PR 的单架构构建验证，以及 `test` push 的双架构发布、匿名拉取和自动部署；`deploy-online.yml` 对指向 `release` 的 PR 只做测试和单架构构建、不发布镜像，对 `release` push 独立验证并构建候选，在当前 `release` HEAD 的 `v*` 标签上复用该 SHA 的候选 digest，等待 `online` Environment 指定审核人批准后部署。不同 SHA 不宣称 Test 与 Online 是同一镜像。同仓库、同 SHA 的候选发布串行执行，不取消正在发布的 job；进入 job 后再次检查已有候选，避免并发覆盖候选标签。GHCR 需 Public；服务器没有 GitHub 写权限凭据。Online 的 Secrets、主机和恢复路径尚未配置/验收，因此本轮不得批准 Online 部署。
+`verify.yml` 提供共用 CI，也直接验证 `main` push、PR 和 merge queue，不构建 Docker 镜像；`deploy-test.yml` 仅在 `test` push 后执行验证、双架构发布、匿名拉取和自动部署；`release` push 不触发 workflow。只有指向当前 `release` HEAD 的稳定 `v*` 标签才触发 `deploy-online.yml`：先验 Tag 来源，再验证、构建一次双架构版本镜像、核对源码标签和 digest，等待 `online` Environment 审批后只部署同一 digest。不同 SHA 不宣称 Test 与 Online 是同一镜像；既有版本标签若已存在，重跑仅验证并复用，不重新构建。GHCR 需 Public；服务器没有 GitHub 写权限凭据。Online 的 Secrets、主机和恢复路径尚未配置/验收，因此本轮不得批准 Online 部署。
 
 首次安装/业务验收前，仓库级 `MEMOIA_TEST_DEPLOY_ENABLED` 保持关闭；当前测试环境已完成初装，该门闩按实际状态启用。test Environment 限 test 分支，online Environment 限 `v*` 标签并配置 Required Reviewer。GitHub Actions 直接连接服务器公网 SSH，不再经过 Cloudflare Tunnel 或依赖 Access Service Token；业务 HTTPS API 继续使用宿主机 Tunnel。
 
@@ -89,7 +89,7 @@ Actions 只上传脚本到 .deploy/candidates，不覆盖 Compose/.env/YAML。su
 
 日常 smoke 只验收基础部署：健康、Bearer 正反例及探针用户创建/读取/删除。Deployment 状态与 Actions summary 明确记录此范围，不代表完整记忆业务通过。首次部署、修改记忆处理或模型/embedding 配置时，使用已有 verify-sdk.py 工具单独完成核心闭环并记录候选 digest；不在每次普通发布中自动运行全套真实模型探针，也不新增通用排空机制。
 
-reverify-test 用同 digest，只证明部署通道；A→B 更新和 B→A 恢复需要两个不同兼容 digest，未完成不得宣称通过。
+同 digest 重跑只证明部署通道；A→B 更新和 B→A 恢复需要两个不同兼容 digest，未完成不得宣称通过。
 
 ## 恢复与备份
 
