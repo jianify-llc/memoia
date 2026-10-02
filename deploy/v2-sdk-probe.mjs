@@ -76,7 +76,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     evidence.checks.input = true;
     const entry = resolve(sdkEntry);
     const manifest = JSON.parse(await readFile(resolve(dirname(entry), "../package.json"), "utf8"));
-    requireTrue(manifest.name === "@jianify/memoia" && manifest.version === "0.2.1");
+    requireTrue(manifest.name === "@jianify/memoia" && manifest.version === "0.2.2");
     const { MemoiaClient } = await import(pathToFileURL(entry).href);
     client = new MemoiaClient({ baseUrl: origin, apiKey: token, fetch: transport,
       maxAttempts: 1, readTimeoutMs: 15_000, writeTimeoutMs: 90_000 });

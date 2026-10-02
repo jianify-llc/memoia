@@ -63,6 +63,60 @@ describe("fixed source identity and acknowledgement", () => {
     assert.equal(bodies[0], bodies[1]);
   });
 
+  it("preserves recoverable ownership conflicts with one attempt, then resumes the durable operation", async () => {
+    for (const code of ["lease_lost", "write_conflict"]) {
+      const calls = [];
+      const failed = { ...complete, status: "failed", source_id: null, result: null, error: { code, retryable: true } };
+      const api = client(async (url, init) => {
+        calls.push({ path: new URL(url).pathname, method: init.method, body: init.body });
+        if (calls.length === 1) return json({ detail: { code, retryable: true } }, 409);
+        if (init.method === "GET") return json(failed);
+        return json(complete);
+      }, { maxAttempts: 1 });
+      await assert.rejects(api.importSource(user, source), (error) =>
+        error instanceof MemoiaError && error.status === 409 && error.code === code &&
+        error.retryable === true && error.outcome === "rejected");
+      assert.equal(calls.length, 1);
+      const operation = await api.getOperationByKey(user, source.idempotency_key);
+      assert.deepEqual(operation, failed);
+      assert.deepEqual(await api.retryOperation(user, operation.operation_id), complete);
+      assert.deepEqual(calls.map(({ method }) => method), ["POST", "GET", "POST"]);
+      assert.match(calls[1].path, /operations\/by-key\/luvel%3Abatch%3A1$/);
+      assert.match(calls[2].path, /operations\/44444444-4444-4444-8444-444444444444\/retry$/);
+      assert.equal(calls[2].body, undefined);
+    }
+  });
+
+  it("bounds explicitly recoverable 409 retries and preserves the exact accepted identity", async () => {
+    for (const code of ["lease_lost", "write_conflict"]) {
+      const bodies = [];
+      const api = client(async (_url, init) => {
+        bodies.push(init.body);
+        return bodies.length === 1 ? json({ detail: { code, retryable: true } }, 409) : json(complete);
+      }, { maxAttempts: 2 });
+      assert.deepEqual(await api.importSource(user, source), complete);
+      assert.equal(bodies.length, 2);
+      assert.deepEqual(JSON.parse(bodies[0]), source);
+      assert.equal(bodies[0], bodies[1]);
+    }
+  });
+
+  it("does not treat other conflicts or non-retryable ownership failures as replay permission", async () => {
+    for (const detail of [
+      { code: "lease_lost", retryable: false },
+      { code: "write_conflict", retryable: false },
+      { code: "idempotency_conflict", retryable: true },
+      { code: "source_conflict", retryable: true },
+      undefined,
+    ]) {
+      let count = 0;
+      const api = client(async () => { count++; return json(detail === undefined ? {} : { detail }, 409); });
+      await assert.rejects(api.importSource(user, source), (error) =>
+        error instanceof MemoiaError && error.status === 409 && error.retryable === false);
+      assert.equal(count, 1);
+    }
+  });
+
   it("does not retry parameter/auth failures even if the server requests it", async () => {
     for (const status of [400, 401, 403, 409, 422]) {
       let count = 0;

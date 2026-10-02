@@ -229,7 +229,9 @@ export class MemoiaClient {
         // replay. Raw response bodies and credentials never enter error messages.
         const detail = this.errorDetail(payload);
         const unclassifiedWriteFailure = method !== "GET" && response.status >= 500 && detail.code === "HTTP_ERROR";
-        error = new MemoiaError(detail.code, response.status, detail.retryable && [429, 500, 502, 503, 504].includes(response.status), unclassifiedWriteFailure ? "unknown" : "rejected");
+        const recoverableConflict = response.status === 409 && ["write_conflict", "lease_lost"].includes(detail.code);
+        const retryable = detail.retryable && (recoverableConflict || [429, 500, 502, 503, 504].includes(response.status));
+        error = new MemoiaError(detail.code, response.status, retryable, unclassifiedWriteFailure ? "unknown" : "rejected");
       } catch (cause) {
         error = cause instanceof MemoiaError ? cause : new MemoiaError("TRANSPORT_ERROR", null, method === "GET", method === "GET" ? "rejected" : "unknown");
       } finally {

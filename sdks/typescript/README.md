@@ -1,6 +1,6 @@
 # Memoia TypeScript SDK v2
 
-`@jianify/memoia@0.2.1` supports Node.js and Cloudflare Workers. This is a separate v2 client; the upstream v1 SDK is unchanged. Protocol types and runtime validators are generated from `src/server/api/openapi-v2.json`, not a second hand-written contract. The SDK patch version includes license notices for bundled validator helpers; the server protocol remains v2/0.2.0.
+`@jianify/memoia@0.2.2` supports Node.js and Cloudflare Workers. This is a separate v2 client; the upstream v1 SDK is unchanged. Protocol types and runtime validators are generated from `src/server/api/openapi-v2.json`, not a second hand-written contract. This patch preserves the server's recoverable ownership-conflict classification and bundled validator license notices; the server protocol remains v2/0.2.0.
 
 ```ts
 import { MemoiaClient } from "@jianify/memoia";
@@ -16,6 +16,8 @@ const operation = await memoia.importSource(userId, {
 The base URL is an origin, without `/api/v2`. `deadline` is an absolute Unix timestamp in milliseconds; `signal` may also cancel a request. Reads retain a 5-second per-attempt limit, writes a 90-second limit, both bounded by the caller's remaining deadline. The client never generates or replaces an idempotency key.
 
 Completed results are schema-validated, including final event/profile IDs. `processing` is not success. A transport timeout or lost write response throws `MemoiaError` with `outcome === "unknown"`: query `getOperationByKey()` to recover before deciding whether to resend. Only safe reads and explicit retryable server failures receive bounded backoff; there is no implicit replay of a write whose commit is unknown.
+
+HTTP 409 is recoverable only when the server explicitly supplies `detail.retryable: true` with `detail.code: "write_conflict"` or `"lease_lost"`. Other conflicts, including changed idempotent input, are not implicitly replayed. Task consumers can use `maxAttempts: 1` to retain this classification without SDK replay, then query the fixed operation key and call `retryOperation()` on its persisted input. This patch does not change the OpenAPI wire contract or weaken unknown-write handling.
 
 The SDK does not perform message segmentation, profile reconstruction, task scheduling, or provider-specific business decisions.
 

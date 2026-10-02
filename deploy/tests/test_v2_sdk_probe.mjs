@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { runProbe } from "../v2-sdk-probe.mjs";
 
 // These deterministic adapters test the acceptance tool, not Memoia or a model.
-async function fixture(mode = "complete", version = "0.2.1") {
+async function fixture(mode = "complete", version = "0.2.2") {
   const directory = await mkdtemp(join(tmpdir(), "memoia-v2-probe-"));
   const symbol = `memoia-probe-${randomUUID()}`;
   const sourceId = randomUUID(), operationId = randomUUID(), nameId = randomUUID(), foodId = randomUUID(), eventId = randomUUID();
@@ -181,7 +181,7 @@ test("DELETE success without confirming user absence is not accepted cleanup", a
 });
 
 test("wrong SDK version and missing auth isolation stop before any write", async () => {
-  const wrong = await probe("complete", "0.2.0");
+  const wrong = await probe("complete", "0.2.1");
   assert.equal(wrong.result.success, false);
   assert.equal(wrong.counters.calls, 0);
   const bypass = await probe("auth-bypass");

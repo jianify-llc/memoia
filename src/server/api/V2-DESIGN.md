@@ -26,6 +26,8 @@ Luvel 决定消息范围；服务只处理一个完整有界来源，不截断�
 
 `GET operations/by-key/{key}` 用于响应丢失后的确认；`POST operations/{id}/retry` 只使用服务端已受理的输入，不要求调用方重发可能已删除的消息。已完成返回原结果；活跃执行者返回 processing；确认无正式提交的失败或失去执行权的 processing 可经新 lease 与数据库 generation 接管恢复。参数、权限或输入预算错误不重试。模型费用不承诺 exactly-once，正式数据库效果依靠事务和唯一身份去重。
 
+HTTP 409 的 `write_conflict`／`lease_lost` 仅在服务端明确返回 `detail.retryable: true` 时表示当前计算未提交、可恢复；SDK 必须保留该分类，不能仅按 HTTP 状态把它升级成永久失败。其他 409（包括同键不同输入）不授权自动重放。Luvel 仍使用 `maxAttempts: 1`，失败后查询固定操作身份，并通过服务端持久输入恢复；传输超时及未知提交仍不能重发正文。本补丁不改变 OpenAPI 协议、数据库或业务生成算法。
+
 项目的当前 ProfileConfig（语言、画像分类及严格规则、事件标签等）进入来源抽取和汇总提示词，不默认忽略已有项目配置。HTTP 请求体最大 2 MiB，每来源最多 1,000 条完整消息；正文默认上限 16,384 tokens，另校验整个模型提示词和输出预留。超限明确拒绝，调用方需要调整业务范围，不截断后成功。embedding 默认每批 64 条，校验响应索引、条数、维度及有限数值；单条超限也明确拒绝。
 
 v1 和 v2 共用原项目用量／telemetry 记录，采用完成文本的 token 估算，不宣称精确包含供应商 reasoning 用量或金额。小型计费提交被明确归为非记忆事务，不更新用户 memory generation/version；计费异常脱敏报告，不把记忆结果伪装成模型失败，也不留下继承已释放 lease 的 detached 计费 task。
