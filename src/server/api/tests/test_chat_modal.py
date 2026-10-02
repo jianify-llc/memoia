@@ -139,6 +139,7 @@ def mock_event_get_embedding():
 @pytest.mark.asyncio
 async def test_chat_buffer_modal(
     db_env,
+    four_fact_source_model,
     mock_extract_llm_complete,
     mock_merge_llm_complete,
     mock_event_tag_llm_complete,
@@ -232,12 +233,13 @@ async def test_chat_buffer_modal(
     p = await controllers.user.delete_user(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
 
-    mock_extract_llm_complete.assert_awaited_once()
+    four_fact_source_model.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_chat_merge_modal(
     db_env,
+    four_fact_source_model,
     mock_extract_llm_complete,
     mock_merge_llm_complete,
     mock_event_tag_llm_complete,
@@ -300,7 +302,7 @@ async def test_chat_merge_modal(
     await controllers.buffer.flush_buffer(u_id, DEFAULT_PROJECT_ID, BlobType.chat)
 
     p = await controllers.profile.get_user_profiles(u_id, DEFAULT_PROJECT_ID)
-    assert p.ok() and len(p.data().profiles) == len(PROFILES) + 2
+    assert p.ok() and len(p.data().profiles) == len(PROFILES) + 4
     profiles = p.data().profiles
     profiles = sorted(profiles, key=lambda x: x.content)
 
@@ -311,18 +313,19 @@ async def test_chat_merge_modal(
     assert dict_contains(
         profiles[-2].attributes, {"topic": "interest", "sub_topic": "foods"}
     )
-    assert profiles[-2].content == "user likes Chinese and Japanese food"
+    assert profiles[-2].content == "user likes japanese food"
+    assert all(original in [p.content for p in profiles] for original in PROFILES)
 
     p = await controllers.user.delete_user(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
 
-    assert mock_extract_llm_complete.await_count == 1
-    assert mock_merge_llm_complete.await_count == 1
+    four_fact_source_model.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_chat_organize_modal(
     db_env,
+    four_fact_source_model,
     mock_extract_llm_complete,
     mock_merge_llm_complete,
     mock_organize_llm_complete,
@@ -367,6 +370,4 @@ async def test_chat_organize_modal(
 
     p = await controllers.user.delete_user(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
-    assert mock_extract_llm_complete.await_count == 1
-    assert mock_merge_llm_complete.await_count == 1
-    assert mock_organize_llm_complete.await_count == 1
+    four_fact_source_model.assert_awaited_once()

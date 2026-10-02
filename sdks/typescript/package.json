@@ -1,0 +1,24 @@
+{
+  "name": "@jianify/memoia",
+  "version": "0.2.1",
+  "description": "Typed, bounded Memoia v2 client for Node.js and Workers",
+  "license": "Apache-2.0",
+  "type": "module",
+  "files": ["dist", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES", "src/generated/manifest.json"],
+  "exports": {".": {"types": "./dist/index.d.ts", "import": "./dist/index.js"}},
+  "scripts": {
+    "generate": "node scripts/generate.mjs",
+    "check:generated": "node scripts/generate.mjs --check",
+    "build": "tsc -p tsconfig.json",
+    "test": "pnpm build && node --disallow-code-generation-from-strings --test tests/*.test.mjs"
+  },
+  "engines": {"node": ">=22"},
+  "packageManager": "pnpm@10.12.4",
+  "devDependencies": {
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1",
+    "esbuild": "0.25.11",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3"
+  }
+}

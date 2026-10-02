@@ -1,0 +1,10 @@
+Memoia TypeScript SDK v2
+Copyright 2026 Jianify
+
+Memoia is maintained independently from the Apache-2.0 Memobase project.
+Upstream Memobase copyright and source: Copyright 2024 Memobase,
+https://github.com/memodb-io/memobase.
+
+Standalone runtime validators include MIT-licensed helpers from Ajv 8.17.1
+and ajv-formats 3.0.1. Their copyright and license text is included in
+THIRD_PARTY_NOTICES.

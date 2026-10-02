@@ -67,6 +67,11 @@ def check_quiet(command, config, postgres_container):
     for prefix in ("memobase:user_lock", "memobase:user_buffer_queue"):
         if run(redis_command(command, "--scan", "--pattern", f"{prefix}:{project}:*")):
             raise RuntimeError("Redis execution state blocks maintenance")
+    base = postgres_command(postgres_container, "psql", "-U", "jianify_app", "-d", "memoia", "-Atc")
+    for table, predicate in (("memory_operations", "status='processing'"), ("memory_sources", "status='rebuilding'")):
+        if run(base + [f"SELECT to_regclass('public.{table}')"]):
+            if run(base + [f"SELECT count(*) FROM {table} WHERE {predicate}"]) != "0":
+                raise RuntimeError("Unfinished v2 operations block maintenance; resolve without clearing state")
 
 
 def wait_healthy(command, service):
@@ -114,9 +119,17 @@ def validate_isolation(config, target, source_config):
             or pg.get("POSTGRES_DB") != "memoia" or pg.get("POSTGRES_USER") != "jianify_app"
             or unquote(db.password or "") != pg.get("POSTGRES_PASSWORD")):
         raise RuntimeError("Isolated PostgreSQL credentials or database differ from the API")
-    for network in config.get("networks", {}).values():
-        if network.get("external") or network.get("internal") is not True or not network.get("name", "").startswith(name + "_"):
+    networks = config.get("networks", {})
+    if set(networks) != {"backend", "ingress", "data"}:
+        raise RuntimeError("Restore networks must use the explicit isolated topology")
+    for key, network in networks.items():
+        if (network.get("external") or not network.get("name", "").startswith(name + "_")
+                or (key != "ingress" and network.get("internal") is not True)):
             raise RuntimeError("Restore cannot reuse an existing network")
+    expected = {"postgres": {"data"}, "redis": {"backend"}, "memoia": {"backend", "ingress", "data"}}
+    for service, membership in expected.items():
+        if set(config["services"][service].get("networks", [])) != membership:
+            raise RuntimeError("Only the restored API may use the isolated outbound network")
 
 
 def backup():
@@ -195,10 +208,14 @@ def isolated_config(source, manifest, target):
     # 备份目录 config 的相对 YAML 路径不同；所有持久资源改为隔离路径。
     config = json.loads(json.dumps(source))
     config["name"] = "memoia-" + target.name
+    config["networks"].setdefault("ingress", {})
     for network, values in config["networks"].items():
         values.pop("external", None)
         values["name"] = config["name"] + "_" + network
-        values["internal"] = True
+        # Startup validates real model/embedding credentials; only API may egress.
+        values["internal"] = network != "ingress"
+    config["services"]["redis"]["networks"] = {"backend": {}}
+    config["services"]["memoia"]["networks"] = {"backend": {}, "ingress": {}, "data": {}}
     config["services"]["redis"]["volumes"][0]["source"] = str(target / "data/redis")
     database = urlsplit(config["services"]["memoia"]["environment"]["DATABASE_URL"])
     if (database.hostname != "jianify-postgres" or database.path != "/memoia"
@@ -292,10 +309,37 @@ def restore(directory, target):
     file.write_text(json.dumps(config))
     run(command + ["up", "-d", "--no-deps", "--no-build", "redis"])
     wait_healthy(command, "redis")
+    redis_container = run(command + ["ps", "-q", "redis"])
     if run(redis_command(command, "GET", key)) != value:
         raise RuntimeError("AOF restart verification failed")
     run(command + ["up", "-d", "--no-deps", "--no-build", "memoia"])
     wait_healthy(command, "memoia")
+    api_container = run(command + ["ps", "-q", "memoia"])
+    api = inspect(api_container)
+    api_environment = dict(item.split("=", 1) for item in api["Config"]["Env"] if "=" in item)
+    if (api["Config"].get("Image") != manifest["image"] or api["HostConfig"].get("PortBindings")
+            or any(api_environment.get(field) != config["services"]["memoia"]["environment"][field]
+                   for field in ("DATABASE_URL", "REDIS_URL"))):
+        raise RuntimeError("Restored API connections or host ports differ from the isolated configuration")
+    expected_networks = sorted(network["name"] for network in config["networks"].values())
+    for service, container in (("postgres", postgres_container), ("redis", redis_container), ("memoia", api_container)):
+        actual = inspect(container)["NetworkSettings"]["Networks"]
+        membership = {config["networks"][key]["name"] for key in config["services"][service]["networks"]}
+        if set(actual) != membership:
+            raise RuntimeError("Restored container is connected to a non-isolated network")
+    receipt = {"backup_sha256": hashlib.sha256((directory / "backup.json").read_bytes()).hexdigest(),
+               "image": manifest["image"], "database_counts": manifest["database_counts"],
+               "target": str(target), "project": config["name"], "isolated": True,
+               "redis_aof_restart_verified": True, "networks": expected_networks,
+               "compose_sha256": hashlib.sha256(file.read_bytes()).hexdigest(),
+               "connections": {"postgres": {"host": "jianify-postgres", "database": "memoia", "user": "jianify_app",
+                                               "container_id": postgres_container},
+                               "redis": {"host": "redis", "database": "0", "container_id": redis_container},
+                               "api_container_id": api_container},
+               "data_mounts": {service: str(target / "data" / service) for service in ("postgres", "redis")}}
+    receipt_path = target / "restore-verified.json"
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
+    receipt_path.chmod(0o600)
     print(f"Isolated paired PostgreSQL, RDB→AOF and API restart verified: {target}")
 
 

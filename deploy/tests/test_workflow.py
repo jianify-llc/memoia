@@ -34,7 +34,7 @@ if command == "ssh":
     if "sudo -n tar " in args[-1]:
         sys.stdin.read()
 elif command == "tar":
-    assert args == ["-C", "deploy", "-cf", "-", "deploy-memoia.sh", "infra-fingerprint.sh", "schema-fingerprint.sh", "recovery.py"]
+    assert args == ["-C", "deploy", "-cf", "-", "deploy-memoia.sh", "infra-fingerprint.sh", "schema-fingerprint.sh", "recovery.py", "schema-maintenance.py"]
     print("fixture-only archive")
 elif command == "bash":
     assert args == ["deploy/smoke-api.sh", os.environ.get("FIXTURE_API", "https://test-memoia.jianify.dev"), "fixture-bearer"]

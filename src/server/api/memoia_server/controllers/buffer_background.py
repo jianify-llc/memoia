@@ -39,7 +39,7 @@ return {1, redis.call("lpop", KEYS[2])}
 
 
 def get_user_lock_key(user_id: str, project_id: str, scope: str) -> str:
-    return f"memobase:user_lock:{PROJECT_ID}:{scope}:{project_id}:{user_id}"
+    return f"memobase:user_lock:{PROJECT_ID}:memory:{project_id}:{user_id}"
 
 
 def get_user_buffer_queue_key(user_id: str, project_id: str, scope: str) -> str:
@@ -177,6 +177,11 @@ async def flush_buffer_background_running(
             )
 
     heartbeat_task = asyncio.create_task(heartbeat())
+    from .user_lease import UserLease, CURRENT_LEASE
+    lease = UserLease(user_id, project_id)
+    lease.owner = __lock_value
+    lease.lost = lease_lost
+    context_token = CURRENT_LEASE.set(lease)
     try:
         iteration_count = 0
         consecutive_errors = 0
@@ -307,6 +312,8 @@ async def flush_buffer_background_running(
         heartbeat_task.cancel()
         with suppress(asyncio.CancelledError):
             await heartbeat_task
+        CURRENT_LEASE.reset(context_token)
+        lease_lost.set()
         try:
             async with get_redis_client() as redis_client:
                 result = await redis_client.eval(

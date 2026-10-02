@@ -152,7 +152,7 @@ jobs:
           # shellcheck disable=SC2029 # Validated candidate identity expands on the runner.
           ssh "${ssh_opts[@]}" "$target" "sudo -n test -d '$root' && sudo -n install -d -m 700 '$root/.deploy' '$root/.deploy/candidates' '$root/.deploy/candidates/$GITHUB_SHA'"
           # shellcheck disable=SC2029
-          tar -C deploy -cf - deploy-memoia.sh infra-fingerprint.sh schema-fingerprint.sh recovery.py | ssh "${ssh_opts[@]}" "$target" "sudo -n tar -C '$root/.deploy/candidates/$GITHUB_SHA' -xf -"
+          tar -C deploy -cf - deploy-memoia.sh infra-fingerprint.sh schema-fingerprint.sh recovery.py schema-maintenance.py | ssh "${ssh_opts[@]}" "$target" "sudo -n tar -C '$root/.deploy/candidates/$GITHUB_SHA' -xf -"
           # shellcheck disable=SC2029
           ssh "${ssh_opts[@]}" "$target" "sudo -n bash '$root/.deploy/candidates/$GITHUB_SHA/deploy-memoia.sh' prepare '$root' '$image' '$GITHUB_SHA' '$GITHUB_RUN_ID' '$compose_sha'"
           bash deploy/smoke-api.sh https://memoia.jianify.dev "$ONLINE_BEARER_TOKEN"

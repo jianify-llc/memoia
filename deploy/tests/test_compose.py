@@ -76,7 +76,11 @@ class ComposeContract(unittest.TestCase):
             self.assertEqual(isolated.returncode, 0, isolated.stderr)
             effective = json.loads(isolated.stdout)
             recovery.validate_isolation(effective, target, config)
-            self.assertTrue(all(network["internal"] for network in effective["networks"].values()))
+            self.assertTrue(effective["networks"]["backend"]["internal"])
+            self.assertTrue(effective["networks"]["data"]["internal"])
+            self.assertFalse(effective["networks"]["ingress"].get("internal", False))
+            self.assertEqual(set(effective["services"]["redis"]["networks"]), {"backend"})
+            self.assertEqual(set(effective["services"]["postgres"]["networks"]), {"data"})
             self.assertEqual(env.read_text(), "\n".join(lines) + "\n")
 
 

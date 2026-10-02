@@ -7,9 +7,14 @@ Implementation modules below live under `src/server/api/memoia_server/`; the
 ASGI entry point is the sibling `src/server/api/api.py`. Memobase SDK modules
 remain under `src/client/` and are not renamed or republished in this release.
 
+V2 的可靠来源写入、证据撤回、幂等恢复及检索边界以 [V2-DESIGN.md](V2-DESIGN.md)
+为准；协议由 `export-openapi.py openapi-v2.json` 生成，TypeScript SDK 位于
+`sdks/typescript/`。旧 v1 SDK 和 URL 保持兼容，不承诺其具有调用方未提供的幂等身份。
+数据库只能经显式 [Alembic 链](migrations/README) 修改；import 不执行 DDL。
+
 ## Project Overview
 
-Memobase is a user memory system for LLM applications that maintains persistent user context and memory. This guide will help you understand the system architecture and navigate the codebase.
+Memoia is a user memory system derived from Memobase. Sources and evidence are the truth; profiles and events are derived memories. This guide describes the module layout; V2-DESIGN defines the current processing contracts.
 
 ## System Architecture
 
@@ -25,7 +30,7 @@ graph TD
     C --> H[Profile Controller]
     
     E & F & G & H --> I[Database Layer]
-    E & F & G & H --> J[Redis Cache]
+    G --> J[Redis Queue / renewable user lease]
     
     K[LLM Service] --> H
     K --> L[Prompt Templates]
@@ -42,13 +47,14 @@ memoia_server/
 │   ├── response.py          # API response structures
 │   └── utils.py             # Utilities and Promise pattern
 ├── controllers/             # Business Logic
-│   ├── user/               # User management
-│   ├── blob/               # Data blob handling
-│   ├── buffer/             # Memory buffer operations
-│   ├── profile/            # User profile management
+│   ├── user.py             # User management
+│   ├── blob.py             # Data blob handling
+│   ├── buffer.py           # Legacy buffer operations
+│   ├── profile.py          # Direct PostgreSQL profile reads
+│   ├── source.py           # Atomic v2 processing and withdrawal
+│   ├── user_lease.py       # Shared user mutation coordination
 │   └── modal/              # Modal processing
-├── connectors/             # External Services
-│   └── connectors.py       # Database and Redis connections
+├── connectors.py           # Database and Redis connections
 ├── llms/                   # LLM Integration
 │   ├── __init__.py        # LLM service initialization
 │   └── openai.py          # OpenAI implementation
@@ -69,8 +75,10 @@ sequenceDiagram
     Client->>API: Request
     API->>Controller: Process
     Controller->>DB: Query/Update
-    Controller->>Redis: Cache Check
+    Controller->>Redis: Acquire renewable user lease
+    Controller->>DB: Register generation and snapshot; end transaction
     Controller->>LLM: Memory Processing
+    Controller->>DB: CAS and atomic result/receipt commit
     Controller->>API: Response
     API->>Client: Result
 ```
@@ -79,7 +87,7 @@ sequenceDiagram
 
 ### 1. Entry Points
 - FastAPI Server: `api.py`
-- Main Routes: `/api/v1/*`
+- Main Routes: `/api/v1/*` and `/api/v2/*`
 - Health Check: `/api/v1/healthcheck`
 
 ### 2. Core Services
@@ -90,7 +98,7 @@ sequenceDiagram
 
 ### 3. External Dependencies
 - PostgreSQL Database
-- Redis Cache
+- Redis queue/lease coordination (not profile caching)
 - OpenAI/LLM Service
 
 ## Quick Start Routes
@@ -150,9 +158,10 @@ graph LR
 3. Adjust buffer settings
 
 ### 3. Database Changes
-1. Update models in `models/database.py`
-2. Modify controllers
-3. Update response types
+1. Update models and add a forward Alembic revision; never edit an executed migration.
+2. Validate empty installation and non-destructive existing-schema adoption using real PostgreSQL.
+3. Update response types and regenerate OpenAPI/SDK contracts when the HTTP protocol changes.
+4. Changed schema/embedding identity requires separate maintenance, not ordinary API prepare.
 
 ## Testing Routes
 
@@ -180,7 +189,8 @@ curl -X GET http://localhost:8019/api/v1/users/profile/{user_id}
 - Connection: `connectors.py`
 - Queries: Controllers
 
-### 3. Cache Integration
+### 3. Redis Coordination
 - Redis Config: `connectors.py`
-- Buffer System: `controllers/buffer/`
-- Cache Keys: `utils.py`
+- Buffer System: `controllers/buffer_background.py`
+- User lease: `controllers/user_lease.py`
+- Profiles always read PostgreSQL. No Redis profile cache or invalidation layer.

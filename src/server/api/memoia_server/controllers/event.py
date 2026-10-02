@@ -8,7 +8,7 @@ from ..utils import get_encoded_tokens, event_str_repr, event_embedding_str
 
 from ..llms.embeddings import get_embedding
 from datetime import timedelta
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, or_, literal_column
 from sqlalchemy.sql import func
 from ..env import TRACE_LOG, CONFIG
 
@@ -179,6 +179,12 @@ async def delete_user_event(
                 CODE.NOT_FOUND,
                 f"User event {event_id} not found",
             )
+        from ..models.source import memory_sources
+        from sqlalchemy import update
+        session.execute(update(memory_sources).where(
+            memory_sources.c.user_id == user_id, memory_sources.c.project_id == project_id,
+            memory_sources.c.event_id == event_id,
+        ).values(event_deleted=True))
         session.delete(user_event)
         session.commit()
     return Promise.resolve(None)
@@ -196,6 +202,22 @@ async def update_user_event(
         )
     need_to_update = {k: v for k, v in event_data.items() if v is not None}
     with Session() as session:
+        original = session.query(UserEvent).filter_by(user_id=user_id, project_id=project_id, id=event_id).one_or_none()
+        if original is None:
+            return Promise.reject(CODE.NOT_FOUND, "User event not found")
+        previous = dict(original.event_data)
+        previous_updated_at = original.updated_at
+    new_events = {**previous, **need_to_update}
+    content = new_events.get("event_tip") or ""
+    gists = [line.strip().removeprefix("-").strip() for line in content.splitlines() if line.strip()]
+    if CONFIG.enable_event_embedding and content:
+        result = await get_embedding(project_id, [content, *gists])
+        if not result.ok():
+            return result
+        vectors = list(result.data())
+    else:
+        vectors = [None] * (len(gists) + 1)
+    with Session() as session:
         user_event = (
             session.query(UserEvent)
             .filter_by(user_id=user_id, project_id=project_id, id=event_id)
@@ -206,10 +228,14 @@ async def update_user_event(
                 CODE.NOT_FOUND,
                 f"User event {event_id} not found",
             )
-        new_events = dict(user_event.event_data)
-        new_events.update(need_to_update)
-
+        if user_event.updated_at != previous_updated_at:
+            return Promise.reject(CODE.CONFLICT, "Event changed while indexes were calculated")
         user_event.event_data = new_events
+        user_event.embedding = vectors[0]
+        session.query(UserEventGist).filter_by(user_id=user_id, project_id=project_id, event_id=event_id).delete(synchronize_session=False)
+        for gist, vector in zip(gists, vectors[1:], strict=True):
+            session.add(UserEventGist(user_id=user_id, project_id=project_id, event_id=event_id,
+                                     gist_data={"content": gist}, embedding=vector))
         session.commit()
     return Promise.resolve(None)
 
@@ -284,10 +310,46 @@ async def search_user_events(
         TRACE_LOG.info(
             project_id,
             user_id,
-            f"Event Query: {query}",
+            "Event search completed",
         )
 
     return Promise.resolve(user_events_data)
+
+
+async def hybrid_search_user_events(user_id, project_id, query, limit=10):
+    """Fuse independently bounded lexical and vector ranks, not incomparable raw scores."""
+    from ..models.source import SearchEvent, SearchResult
+    candidates = min(500, max(50, limit * 5))
+    document = func.coalesce(UserEvent.event_data["event_tip"].astext, "")
+    vector = func.to_tsvector(literal_column("'simple'"), document)
+    terms = func.websearch_to_tsquery(literal_column("'simple'"), query)
+    lexical_score = func.ts_rank_cd(vector, terms)
+    lexical_statement = select(UserEvent).where(UserEvent.user_id == user_id, UserEvent.project_id == project_id,
+        or_(vector.op("@@")(terms), func.lower(document).contains(query.lower(), autoescape=True)))
+    lexical_statement = lexical_statement.order_by(lexical_score.desc(), UserEvent.created_at.desc(), UserEvent.id).limit(candidates)
+    # No connection is held during the remote embedding request.
+    query_vector = None
+    if CONFIG.enable_event_embedding:
+        embedding = await get_embedding(project_id, [query], phase="query", model=CONFIG.embedding_model)
+        if not embedding.ok():
+            return embedding
+        query_vector = embedding.data()[0]
+    with Session() as session:
+        lexical = session.scalars(lexical_statement).all()
+        semantic = []
+        if query_vector is not None:
+            similarity = 1 - UserEvent.embedding.cosine_distance(query_vector)
+            semantic = session.scalars(select(UserEvent).where(UserEvent.user_id == user_id,
+                UserEvent.project_id == project_id, UserEvent.embedding.isnot(None), similarity > .2)
+                .order_by(similarity.desc(), UserEvent.id).limit(candidates)).all()
+        scores, rows = {}, {}
+        for ranking in (lexical, semantic):
+            for rank, row in enumerate(ranking, 1):
+                rows[row.id] = row
+                scores[row.id] = scores.get(row.id, 0) + 1 / (60 + rank)
+        ordered = sorted(scores, key=lambda key: (-scores[key], str(key)))[:limit]
+        return Promise.resolve(SearchResult(events=[SearchEvent(id=key, content=rows[key].event_data.get("event_tip", ""),
+            source_id=rows[key].event_data.get("source_id"), score=scores[key], occurred_at=rows[key].created_at) for key in ordered]))
 
 
 async def filter_user_events(

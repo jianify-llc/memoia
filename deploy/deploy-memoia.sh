@@ -4,7 +4,7 @@ set -euo pipefail
 # 日常发布配置只读；init-config 仅补缺失模板与权限，绝不覆盖已有值。
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 [[ "$EUID" == 0 ]] || { echo 'Run with sudo -n' >&2; exit 2; }
-mode=${1:?init-config, init, prepare, finalize, restore-api, adopt-external-postgres, backup or restore-data}
+mode=${1:?init-config, init, prepare, finalize, migrate-schema, finalize-schema, restore-api, adopt-external-postgres, backup or restore-data}
 root=${2:?deployment root}
 
 [[ "$root" == /opt/memoia ]] || {
@@ -51,7 +51,7 @@ compose_sha=${6:?compose SHA-256}
 [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || exit 2
 [[ "$run_id" =~ ^[0-9]+$ ]] || exit 2
 [[ "$compose_sha" =~ ^[0-9a-f]{64}$ ]] || exit 2
-[[ "$mode" == init || "$mode" == prepare || "$mode" == finalize || "$mode" == restore-api || "$mode" == adopt-external-postgres ]] || exit 2
+[[ "$mode" == init || "$mode" == prepare || "$mode" == finalize || "$mode" == migrate-schema || "$mode" == finalize-schema || "$mode" == restore-api || "$mode" == adopt-external-postgres ]] || exit 2
 export MEMOIA_IMAGE="$image"
 
 [[ -d "$root" && ! -L "$root" && "$(stat -c '%u:%g:%a' "$root")" == 0:0:700 ]] || exit 2
@@ -76,6 +76,10 @@ deployment_env=$(jq -r '.services.memoia.labels["io.jianify.environment"]' <<< "
 [[ "$(jq -r .name <<< "$resolved")" == "memoia-$deployment_env" ]] || {
   echo 'Compose project does not match the application environment' >&2; exit 2;
 }
+if [[ "$mode" == migrate-schema || "$mode" == finalize-schema ]]; then
+  [[ "$deployment_env" == test ]] || { echo 'Schema maintenance is test-only in this release' >&2; exit 2; }
+  evidence_file=${7:?protected maintenance evidence file}
+fi
 [[ "$(jq -r '.services.redis.volumes[0].source' <<< "$resolved")" == "$root/data/redis" ]] || {
   echo 'Resolved data mount differs from the canonical absolute path' >&2; exit 1;
 }
@@ -140,7 +144,16 @@ api_database_matches() {
   [[ "$(docker inspect "$1" | jq -r '.[0].Config.Env[] | select(startswith("DATABASE_URL=")) | sub("^DATABASE_URL=";"")')" == "$(jq -r '.services.memoia.environment.DATABASE_URL' <<< "$resolved")" ]]
 }
 
-if [[ "$mode" == finalize ]]; then
+if [[ "$mode" == finalize || "$mode" == finalize-schema ]]; then
+  if [[ "$mode" == finalize ]]; then
+    [[ ! -e pending-maintenance ]] || { echo 'Schema maintenance requires finalize-schema, not ordinary finalize' >&2; exit 1; }
+  else
+    python3 "$script_dir/schema-maintenance.py" finalize "$root" "$image" "$source_sha" "$run_id" "$evidence_file"
+    "${compose[@]}" exec -T memoia /app/.venv/bin/python -c 'from memoia_server.schema import check_schema; check_schema()'
+    [[ "$(bash "$script_dir/schema-fingerprint.sh" "$image")" == "$(< pending-schema.sha256)" ]] || {
+      echo 'Candidate schema differs from pending maintenance' >&2; exit 1;
+    }
+  fi
   [[ -f pending-deploy ]] || { echo 'No pending deployment' >&2; exit 1; }
   [[ "$(sed -n '1p' pending-deploy)" == "$run_id $source_sha $image $config_sha" ]] || {
     echo 'Pending deployment identity mismatch' >&2
@@ -175,13 +188,20 @@ if [[ "$mode" == finalize ]]; then
   if [[ -f deploy-state ]]; then
     previous_run=$(cut -d' ' -f1 deploy-state)
     (( previous_run <= high_water )) || high_water=$previous_run
-    if [[ "$(cut -d' ' -f3 deploy-state)" != "$image" ]]; then cp deploy-state previous-accepted; fi
+    if [[ "$mode" != finalize-schema && "$(cut -d' ' -f3 deploy-state)" != "$image" ]]; then cp deploy-state previous-accepted; fi
   fi
   install -d -m 700 accepted
   printf '%s %s %s %s %s\n' "$run_id" "$source_sha" "$image" "$compose_sha" "$config_sha" > "$state_tmp"
   cp "$state_tmp" "accepted/$source_sha"
   printf '%s %s %s %s %s\n' "$high_water" "$source_sha" "$image" "$compose_sha" "$config_sha" > "$state_tmp"
   mv "$state_tmp" deploy-state
+  if [[ "$mode" == finalize-schema ]]; then
+    mv pending-schema.sha256 schema.sha256
+    # 已变更 schema 的旧镜像仅留诊断归档，不再授予普通 API 恢复资格。
+    rm -f previous-accepted
+    cp "$evidence_file" "schema-archives/$run_id/business-accepted.json"
+    rm pending-maintenance
+  fi
   rm pending-deploy pending-infra pending-tunnel
   exit 0
 fi
@@ -303,12 +323,21 @@ if [[ "$mode" == init ]]; then
   printf '%s\n' "$schema_sha" > schema.sha256
   printf '%s %s %s %s\n' "$run_id" "$source_sha" "$image" "$config_sha" > pending-deploy
   systemctl show jianify-cloudflared.service -p MainPID -p ActiveEnterTimestamp > pending-tunnel
-  MEMOIA_IMAGE="$image" "${compose[@]}" up -d --no-build
+  MEMOIA_IMAGE="$image" "${compose[@]}" up -d --no-build redis
+  "${compose[@]}" run --rm --no-deps --entrypoint /app/.venv/bin/python memoia -m alembic upgrade head
+  "${compose[@]}" run --rm --no-deps --entrypoint /app/.venv/bin/python memoia -c 'from memoia_server.schema import check_schema; check_schema()'
+  MEMOIA_IMAGE="$image" "${compose[@]}" up -d --no-deps --no-build memoia
   printf 'postgres %s\nredis %s\n' "$postgres_container" "$("${compose[@]}" ps -q redis)" > pending-infra
   echo 'First stack started; business acceptance is required before finalize. Automatic updates remain disabled.'
   exit 0
 fi
-[[ "$schema_sha" == "$(< schema.sha256)" ]] || { echo 'Schema source changed; migration maintenance is required' >&2; exit 1; }
+if [[ "$mode" == migrate-schema ]]; then
+  [[ "$schema_sha" != "$(< schema.sha256)" ]] || { echo 'Schema is unchanged; use ordinary prepare' >&2; exit 1; }
+  maintenance_record=$(python3 "$script_dir/schema-maintenance.py" preflight "$root" "$image" "$source_sha" "$run_id" "$evidence_file")
+  python3 "$script_dir/schema-maintenance.py" audit "$root" "$image"
+else
+  [[ "$schema_sha" == "$(< schema.sha256)" ]] || { echo 'Schema source changed; migration maintenance is required' >&2; exit 1; }
+fi
 
 # 兼容版本按服务生命周期切换，不要求消费者停写或业务队列为空。
 # 这里只校验发布身份；旧 API 的正常退出在下方确认，不重置业务处理状态。
@@ -339,11 +368,25 @@ actual_mount=$(docker inspect "$redis_container" | jq -r '.[0].Mounts[] | select
 printf 'redis %s\npostgres %s\n' "$redis_container" "$postgres_container" > pending-infra
 systemctl show jianify-cloudflared.service -p MainPID -p ActiveEnterTimestamp > pending-tunnel
 printf '%s %s %s %s\n' "$run_id" "$source_sha" "$image" "$config_sha" > pending-deploy
+if [[ "$mode" == migrate-schema ]]; then
+  install -d -m 700 "schema-archives/$run_id"
+  cp deploy-state "schema-archives/$run_id/previous-deploy-state"
+  cp schema.sha256 "schema-archives/$run_id/previous-schema.sha256"
+  [[ ! -f previous-accepted ]] || cp previous-accepted "schema-archives/$run_id/previous-accepted"
+  printf '%s\n' "$schema_sha" > pending-schema.sha256
+  printf '%s\n' "$maintenance_record" > pending-maintenance
+  cp "$evidence_file" "schema-archives/$run_id/preflight.json"
+fi
 
 "${compose[@]}" stop --timeout 90 memoia
 [[ "$(docker inspect --format '{{.State.ExitCode}}' "$old_container")" == 0 ]] || {
   echo 'API did not exit gracefully; pending result preserved, candidate not started' >&2; exit 1;
 }
+if [[ "$mode" == migrate-schema ]]; then
+  python3 "$script_dir/schema-maintenance.py" audit "$root" "$image"
+  "${compose[@]}" run --rm --no-deps --entrypoint /app/.venv/bin/python memoia -m alembic upgrade head
+  "${compose[@]}" run --rm --no-deps --entrypoint /app/.venv/bin/python memoia -c 'from memoia_server.schema import check_schema; check_schema()'
+fi
 MEMOIA_IMAGE="$image" "${compose[@]}" up -d --no-deps --no-build memoia
 container=$("${compose[@]}" ps -q memoia)
 for _attempt in $(seq 1 36); do

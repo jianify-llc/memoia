@@ -7,6 +7,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, APIRouter
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from memoia_server.connectors import (
     close_connection,
     init_redis_pool,
@@ -21,6 +23,8 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from memoia_server.schema import check_schema
+    check_schema()
     init_redis_pool()
     await check_embedding_sanity()
     await llm_sanity_check()
@@ -32,6 +36,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     lifespan=lifespan,
 )
+from memoia_server.api_layer.source import router as source_router
+app.include_router(source_router)
+from memoia_server.api_layer.project_v2 import router as project_router
+app.include_router(project_router)
+
+
+@app.exception_handler(RequestValidationError)
+async def private_validation_error(request, error):
+    # Pydantic's default error includes the rejected message body; do not echo that input.
+    details = [{key: item[key] for key in ("loc", "type", "msg") if key in item}
+               for item in error.errors()]
+    return JSONResponse(status_code=422, content={"detail": details})
 
 # CORS configuration
 USE_CORS = os.environ.get("USE_CORS", "False").lower() == "true"  # Default to False

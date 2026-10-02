@@ -24,23 +24,19 @@ from .entry_summary import entry_chat_summary
 def truncate_chat_blobs(
     blobs: list[Blob], max_token_size: int
 ) -> tuple[list[str], list[Blob]]:
-    results = []
-    total_token_size = 0
-    for b in blobs[::-1]:
-        ts = len(get_encoded_tokens(get_blob_str(b)))
-        total_token_size += ts
-        if total_token_size <= max_token_size:
-            results.append(b)
-        else:
-            break
-    return results[::-1]
+    if sum(len(get_encoded_tokens(get_blob_str(blob))) for blob in blobs) > max_token_size:
+        raise ValueError("Complete source exceeds processing token limit")
+    return blobs
 
 
 async def process_blobs(
     user_id: str, project_id: str, blobs: list[Blob]
 ) -> Promise[ChatModalResponse]:
     # 1. Extract patch profiles
-    blobs = truncate_chat_blobs(blobs, CONFIG.max_chat_blob_buffer_process_token_size)
+    try:
+        blobs = truncate_chat_blobs(blobs, CONFIG.max_chat_blob_buffer_process_token_size)
+    except ValueError:
+        return Promise.reject(CODE.BAD_REQUEST, "Complete source exceeds processing token limit")
     if len(blobs) == 0:
         return Promise.reject(
             CODE.SERVER_PARSE_ERROR, "No blobs to process after truncating"

@@ -1,0 +1,301 @@
+{
+  "billings": {
+    "columns": {
+      "usage_left": "INTEGER",
+      "next_refill_at": "TIMESTAMP WITH TIME ZONE",
+      "id": "UUID",
+      "created_at": "TIMESTAMP WITH TIME ZONE",
+      "updated_at": "TIMESTAMP WITH TIME ZONE"
+    },
+    "primary_key": [
+      "id"
+    ],
+    "foreign_keys": []
+  },
+  "projects": {
+    "columns": {
+      "project_id": "VARCHAR(64)",
+      "project_secret": "VARCHAR(255)",
+      "profile_config": "TEXT",
+      "status": "VARCHAR(16)",
+      "id": "UUID",
+      "created_at": "TIMESTAMP WITH TIME ZONE",
+      "updated_at": "TIMESTAMP WITH TIME ZONE"
+    },
+    "primary_key": [
+      "project_id"
+    ],
+    "foreign_keys": []
+  },
+  "project_billings": {
+    "columns": {
+      "project_id": "VARCHAR(64)",
+      "billing_id": "UUID",
+      "created_at": "TIMESTAMP WITH TIME ZONE"
+    },
+    "primary_key": [
+      "project_id",
+      "billing_id"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "project_id"
+        ],
+        "table": "projects",
+        "references": [
+          "project_id"
+        ],
+        "ondelete": "CASCADE",
+        "onupdate": "CASCADE"
+      },
+      {
+        "columns": [
+          "billing_id"
+        ],
+        "table": "billings",
+        "references": [
+          "id"
+        ],
+        "ondelete": "CASCADE",
+        "onupdate": "CASCADE"
+      }
+    ]
+  },
+  "users": {
+    "columns": {
+      "additional_fields": "JSONB",
+      "project_id": "VARCHAR(64)",
+      "id": "UUID",
+      "created_at": "TIMESTAMP WITH TIME ZONE",
+      "updated_at": "TIMESTAMP WITH TIME ZONE"
+    },
+    "primary_key": [
+      "id",
+      "project_id"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "project_id"
+        ],
+        "table": "projects",
+        "references": [
+          "project_id"
+        ],
+        "ondelete": "CASCADE",
+        "onupdate": "CASCADE"
+      }
+    ]
+  },
+  "general_blobs": {
+    "columns": {
+      "user_id": "UUID",
+      "blob_type": "VARCHAR(16)",
+      "blob_data": "JSONB",
+      "project_id": "VARCHAR(64)",
+      "additional_fields": "JSONB",
+      "id": "UUID",
+      "created_at": "TIMESTAMP WITH TIME ZONE",
+      "updated_at": "TIMESTAMP WITH TIME ZONE"
+    },
+    "primary_key": [
+      "id",
+      "project_id"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "user_id",
+          "project_id"
+        ],
+        "table": "users",
+        "references": [
+          "id",
+          "project_id"
+        ],
+        "ondelete": "CASCADE",
+        "onupdate": "CASCADE"
+      }
+    ]
+  },
+  "user_events": {
+    "columns": {
+      "event_data": "JSONB",
+      "user_id": "UUID",
+      "project_id": "VARCHAR(64)",
+      "embedding": "VECTOR(1536)",
+      "id": "UUID",
+      "created_at": "TIMESTAMP WITH TIME ZONE",
+      "updated_at": "TIMESTAMP WITH TIME ZONE"
+    },
+    "primary_key": [
+      "id",
+      "project_id"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "user_id",
+          "project_id"
+        ],
+        "table": "users",
+        "references": [
+          "id",
+          "project_id"
+        ],
+        "ondelete": "CASCADE",
+        "onupdate": "CASCADE"
+      }
+    ]
+  },
+  "user_profiles": {
+    "columns": {
+      "content": "TEXT",
+      "user_id": "UUID",
+      "attributes": "JSONB",
+      "project_id": "VARCHAR(64)",
+      "id": "UUID",
+      "created_at": "TIMESTAMP WITH TIME ZONE",
+      "updated_at": "TIMESTAMP WITH TIME ZONE"
+    },
+    "primary_key": [
+      "id",
+      "project_id"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "user_id",
+          "project_id"
+        ],
+        "table": "users",
+        "references": [
+          "id",
+          "project_id"
+        ],
+        "ondelete": "CASCADE",
+        "onupdate": "CASCADE"
+      }
+    ]
+  },
+  "user_statuses": {
+    "columns": {
+      "type": "VARCHAR(32)",
+      "attributes": "JSONB",
+      "user_id": "UUID",
+      "project_id": "VARCHAR(64)",
+      "id": "UUID",
+      "created_at": "TIMESTAMP WITH TIME ZONE",
+      "updated_at": "TIMESTAMP WITH TIME ZONE"
+    },
+    "primary_key": [
+      "id",
+      "project_id"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "user_id",
+          "project_id"
+        ],
+        "table": "users",
+        "references": [
+          "id",
+          "project_id"
+        ],
+        "ondelete": "CASCADE",
+        "onupdate": "CASCADE"
+      }
+    ]
+  },
+  "buffer_zones": {
+    "columns": {
+      "blob_type": "VARCHAR(16)",
+      "token_size": "INTEGER",
+      "user_id": "UUID",
+      "blob_id": "UUID",
+      "status": "VARCHAR(16)",
+      "project_id": "VARCHAR(64)",
+      "id": "UUID",
+      "created_at": "TIMESTAMP WITH TIME ZONE",
+      "updated_at": "TIMESTAMP WITH TIME ZONE"
+    },
+    "primary_key": [
+      "id",
+      "project_id"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "user_id",
+          "project_id"
+        ],
+        "table": "users",
+        "references": [
+          "id",
+          "project_id"
+        ],
+        "ondelete": "CASCADE",
+        "onupdate": "CASCADE"
+      },
+      {
+        "columns": [
+          "blob_id",
+          "project_id"
+        ],
+        "table": "general_blobs",
+        "references": [
+          "id",
+          "project_id"
+        ],
+        "ondelete": "CASCADE",
+        "onupdate": "CASCADE"
+      }
+    ]
+  },
+  "user_event_gists": {
+    "columns": {
+      "gist_data": "JSONB",
+      "event_id": "UUID",
+      "user_id": "UUID",
+      "project_id": "VARCHAR(64)",
+      "embedding": "VECTOR(1536)",
+      "id": "UUID",
+      "created_at": "TIMESTAMP WITH TIME ZONE",
+      "updated_at": "TIMESTAMP WITH TIME ZONE"
+    },
+    "primary_key": [
+      "id",
+      "project_id"
+    ],
+    "foreign_keys": [
+      {
+        "columns": [
+          "event_id",
+          "project_id"
+        ],
+        "table": "user_events",
+        "references": [
+          "id",
+          "project_id"
+        ],
+        "ondelete": "CASCADE",
+        "onupdate": "CASCADE"
+      },
+      {
+        "columns": [
+          "user_id",
+          "project_id"
+        ],
+        "table": "users",
+        "references": [
+          "id",
+          "project_id"
+        ],
+        "ondelete": "CASCADE",
+        "onupdate": "CASCADE"
+      }
+    ]
+  }
+}

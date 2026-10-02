@@ -34,6 +34,8 @@ jobs:
           uv run --frozen python -c 'import memoia_server; print(memoia_server.__version__)'
           test -f LICENSE && test -f NOTICE && test -f Dockerfile
           ! grep -q 'memobase_server' Dockerfile
+          uv run --frozen python export-openapi.py "$RUNNER_TEMP/memoia-openapi-v2.json"
+          cmp openapi-v2.json "$RUNNER_TEMP/memoia-openapi-v2.json"
       - name: Validate deployment layout and mocked safety contracts
         run: |
           set -euo pipefail
@@ -59,7 +61,25 @@ jobs:
         working-directory: ./src/server/api
         run: |
           cp .env.example .env
+          uv run --frozen python -m alembic upgrade head
+          uv run --frozen python -c 'from memoia_server.schema import check_schema; check_schema()'
           uv run --frozen -m pytest --junit-xml=junit/test-results-3.12.xml --cov=memoia_server --cov-report=xml:coverage-3.12.xml tests/ -s -v
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.12.4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: sdks/typescript/pnpm-lock.yaml
+      - name: Verify frozen v2 SDK against the server OpenAPI
+        working-directory: ./sdks/typescript
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm check:generated
+          pnpm test
+      - name: Validate the v2 SDK acceptance tool without an external API
+        run: node --test deploy/tests/test_v2_sdk_probe.mjs
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:

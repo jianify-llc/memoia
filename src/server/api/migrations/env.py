@@ -1,15 +1,22 @@
 # Modified for Memoia: use the renamed internal server package.
 from logging.config import fileConfig
+import os
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
 from alembic import context
 from memoia_server.models.database import REG
+from memoia_server.models.source import SOURCE_TABLES
+from memoia_server.models.project_v2 import project_api_keys
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+database_url = os.environ.get("DATABASE_URL")
+if not database_url:
+    raise RuntimeError("DATABASE_URL is required for explicit migrations")
+config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -66,7 +73,8 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(connection=connection, target_metadata=target_metadata,
+                          version_table_schema=connection.dialect.default_schema_name)
 
         with context.begin_transaction():
             context.run_migrations()

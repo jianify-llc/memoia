@@ -50,7 +50,7 @@ async def global_wrapper_middleware(request: Request, call_next):
         request_id=req_id, project_id=project_id, memobase_version=__version__
     )
 
-    private_context = request.url.path.startswith("/api/v1/users/context/")
+    private_context = request.url.path.startswith("/api/")
     # Existing GET clients may still put private chat text in the query; never log that URL.
     url = request.url.path if private_context else get_path_with_query_string(request.scope)
     client_host = request.client.host
@@ -71,6 +71,7 @@ async def global_wrapper_middleware(request: Request, call_next):
                   f"Sorry, we have encountered an unknown error: \n{e}\nPlease report this issue to https://github.com/memodb-io/memobase/issues")
         traceback_str = None if private_context else traceback.format_exc().replace("\n", "<br>")
         response = JSONResponse(
+            status_code=500 if request.url.path.startswith("/api/v2/") else 200,
             content={
                 "data": None,
                 "errno": 500,
@@ -140,8 +141,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
         is_root = self.is_valid_root(auth_token)
         request.state.is_memobase_root = is_root
         request.state.memobase_project_id = DEFAULT_PROJECT_ID
+        request.state.memoia_scopes = ["admin"]
         if not is_root:
-            p = await self.parse_project_token(auth_token)
+            from ..auth.token import authenticate_scoped_key
+            scoped = authenticate_scoped_key(auth_token) if auth_token.startswith("mka_") else None
+            p = await self.parse_project_token(auth_token) if scoped is None else Promise.resolve(scoped[0])
             if not p.ok():
                 return JSONResponse(
                     status_code=CODE.UNAUTHORIZED.value,
@@ -151,6 +155,24 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     ).model_dump(),
                 )
             request.state.memobase_project_id = p.data()
+            if scoped is not None:
+                request.state.memoia_scopes = scoped[1]
+        read_request = request.method in {"GET", "HEAD", "OPTIONS"} or request.url.path.startswith("/api/v1/users/context/")
+        required = "read" if read_request else "write"
+        if not read_request and request.url.path.startswith("/api/v1/project/"):
+            required = "admin"
+        scopes = request.state.memoia_scopes
+        if "admin" not in scopes and required not in scopes:
+            return JSONResponse(status_code=403, content={"errno": 403, "errmsg": "API key lacks required scope", "data": None})
+
+        if request.method in {"POST", "PUT", "PATCH"}:
+            maximum = 2 * 1024 * 1024
+            body = bytearray()
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > maximum:
+                    return JSONResponse(status_code=413, content={"errno": 413, "errmsg": "Request body exceeds 2 MiB", "data": None})
+                body.extend(chunk)
+            request._body = bytes(body)
         # await capture_int_key(TelemetryKeyName.has_request)
 
         normalized_path = self.normalize_path(request.url.path)
@@ -166,7 +188,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         )
 
         start_time = time.time()
-        response = await call_next(request)
+        response = await self.call_with_user_lease(request, call_next)
 
         telemetry_manager.record_histogram_metric(
             HistogramMetricName.REQUEST_LATENCY_MS,
@@ -179,11 +201,33 @@ class AuthMiddleware(BaseHTTPMiddleware):
         )
         return response
 
+    async def call_with_user_lease(self, request, call_next):
+        # V2 owns its complete operation. All v1 writes share that exact user lease.
+        if request.method not in {"POST", "PUT", "DELETE"} or not request.url.path.startswith("/api/v1/"):
+            return await call_next(request)
+        import re
+        match = re.search(r"/([0-9a-fA-F-]{36})(?:/|$)", request.url.path)
+        if match is None or "/users/context/" in request.url.path:
+            return await call_next(request)
+        from ..controllers.user_lease import UserLease, LeaseUnavailable, LeaseLost
+        from ..controllers.source import _fence_snapshot, SourceError
+        from ..connectors import Session
+        from ..models.database import User
+        try:
+            async with UserLease(match.group(1), request.state.memobase_project_id) as lease:
+                with Session.begin() as session:
+                    if session.get(User, (uuid.UUID(match.group(1)), request.state.memobase_project_id)) is not None:
+                        _fence_snapshot(session, match.group(1), request.state.memobase_project_id, lease)
+                return await call_next(request)
+        except (LeaseUnavailable, LeaseLost, SourceError):
+            return JSONResponse(status_code=409, content={"data": None, "errno": 409, "errmsg": "User memory is being modified; retry later"})
+
     def is_valid_root(self, token: str) -> bool:
         access_token = os.getenv("ACCESS_TOKEN")
-        if access_token is None:
-            return True
-        return token == access_token.strip()
+        from hmac import compare_digest
+        if not access_token or not access_token.strip():
+            return False
+        return compare_digest(token, access_token.strip())
 
     async def parse_project_token(self, token: str) -> Promise[str]:
         p = parse_project_id(token)

@@ -108,6 +108,10 @@ class Config:
     embedding_dim: int = 1536
     embedding_model: str = "text-embedding-3-small"
     embedding_max_token_size: int = 8192
+    embedding_batch_size: int = 64
+    source_max_input_tokens: int = 16384
+    source_context_window_tokens: int = 131072
+    source_output_reserve_tokens: int = 32768
 
     additional_user_profiles: list[dict] = field(default_factory=list)
     overwrite_user_profiles: Optional[list[dict]] = None

@@ -47,7 +47,7 @@ def test_model_configuration_log_omits_keys(monkeypatch):
 def test_persistent_and_monitoring_names_remain_upstream_compatible():
     scope = "flush_buffer_background_chat"
     suffix = f"{PROJECT_ID}:{scope}:project:user"
-    assert get_user_lock_key("user", "project", scope) == f"memobase:user_lock:{suffix}"
+    assert get_user_lock_key("user", "project", scope) == f"memobase:user_lock:{PROJECT_ID}:memory:project:user"
     assert (
         get_user_buffer_queue_key("user", "project", scope)
         == f"memobase:user_buffer_queue:{suffix}"

@@ -24,6 +24,8 @@ async def get_project_billing(project_id: str) -> Promise[BillingData]:
         return await admin_api.get_project_usage(project_id)
 
     with Session() as session:
+        # Billing belongs to the project, not this task's user-memory generation.
+        session.info["memoia_non_memory_commit"] = True
         billing = (
             session.query(ProjectBilling)
             .filter(ProjectBilling.project_id == project_id)
@@ -120,6 +122,7 @@ async def project_cost_token_billing(
             project_id, input_tokens, output_tokens
         )
     with Session() as session:
+        session.info["memoia_non_memory_commit"] = True
         _billing = (
             session.query(ProjectBilling)
             .filter(ProjectBilling.project_id == project_id)

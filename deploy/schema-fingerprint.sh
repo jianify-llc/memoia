@@ -9,6 +9,8 @@ import hashlib
 from pathlib import Path
 root = Path("/app")
 files = [root / "memoia_server/models/database.py", root / "memoia_server/connectors.py"]
+files += [p for p in (root / "memoia_server/models/source.py", root / "memoia_server/models/project_v2.py",
+                      root / "alembic.ini") if p.is_file()]
 migrations = root / "migrations"
 if not migrations.is_dir():
     raise SystemExit("Image does not include migration source")

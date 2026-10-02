@@ -139,6 +139,7 @@ def mock_event_get_embedding():
 @pytest.mark.asyncio
 async def test_summary_buffer_modal(
     db_env,
+    four_fact_source_model,
     mock_extract_llm_complete,
     mock_merge_llm_complete,
     mock_event_tag_llm_complete,
@@ -212,7 +213,4 @@ async def test_summary_buffer_modal(
     p = await controllers.user.delete_user(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
 
-    mock_extract_llm_complete.assert_awaited_once()
-    assert mock_merge_llm_complete.await_count == 1
-    mock_event_tag_llm_complete.assert_awaited_once()
-    assert mock_event_get_embedding.await_count == 2
+    four_fact_source_model.assert_awaited_once()

@@ -29,26 +29,39 @@ def project_status_redis_key(project_id: str) -> str:
 
 
 async def check_project_secret(project_id: str, secret_key: str) -> Promise[bool]:
-    async with get_redis_client() as client:
-        secret = await client.get(token_redis_key(project_id))
-        if secret is None:
-            p = await project.get_project_secret(project_id)
-            if not p.ok():
-                return Promise.reject(CODE.UNAUTHORIZED, "Your project is not exists!")
-            secret = p.data()
-            await client.set(token_redis_key(project_id), secret, ex=None)
-    return Promise.resolve(secret == secret_key)
+    from hmac import compare_digest
+    p = await project.get_project_secret(project_id)
+    if not p.ok():
+        return Promise.reject(CODE.UNAUTHORIZED, "Project unavailable")
+    return Promise.resolve(compare_digest(p.data(), secret_key))
 
 
 async def get_project_status(project_id: str) -> Promise[str]:
-    async with get_redis_client() as client:
-        status = await client.get(project_status_redis_key(project_id))
-        if status is None:
-            p = await project.get_project_status(project_id)
-            if not p.ok():
-                return p
-            status = p.data()
-            await client.set(
-                project_status_redis_key(project_id), status.strip(), ex=60 * 60
-            )
-    return Promise.resolve(status)
+    # Revocation and suspension must affect the very next request.
+    return await project.get_project_status(project_id)
+
+
+def authenticate_scoped_key(token: str):
+    from hmac import compare_digest
+    from uuid import UUID
+    from sqlalchemy import select, or_, func
+    from ..connectors import Session
+    from ..models.database import Project
+    from ..models.project_v2 import project_api_keys as keys
+    try:
+        prefix, key_id, secret = token.split("_", 2)
+        if prefix != "mka" or not secret:
+            return None
+        parsed_id = UUID(key_id)
+    except (ValueError, AttributeError):
+        return None
+    with Session() as session:
+        row = session.execute(select(keys, Project.status.label("project_status"))
+            .join(Project, Project.project_id == keys.c.project_id)
+            .where(keys.c.id == parsed_id, keys.c.revoked_at.is_(None),
+                   or_(keys.c.expires_at.is_(None), keys.c.expires_at > func.now()))).mappings().one_or_none()
+        if row is None or row["project_status"] == "suspended":
+            return None
+        if not compare_digest(row["token_hash"], sha256(token.encode()).hexdigest()):
+            return None
+        return row["project_id"], row["scopes"]

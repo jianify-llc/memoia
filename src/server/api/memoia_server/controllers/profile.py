@@ -8,6 +8,14 @@ from ..utils import get_encoded_tokens
 from ..env import TRACE_LOG
 
 
+def _profile_attributes(supplied, previous=None):
+    reserved = {"memoia_v2", "fact_ids", "source_ids"}
+    attributes = {key: value for key, value in supplied.items() if key not in reserved}
+    if previous and previous.get("memoia_v2"):
+        attributes.update({key: previous[key] for key in reserved if key in previous})
+    return attributes
+
+
 async def truncate_profiles(
     profiles: UserProfilesData,
     prefer_topics: list[str] = None,
@@ -74,15 +82,23 @@ async def truncate_profiles(
 
 
 async def get_user_profiles(user_id: str, project_id: str) -> Promise[UserProfilesData]:
+    from sqlalchemy import select
+    from ..models.source import memory_facts
     with Session() as session:
+        valid_facts = {str(fid) for fid in session.scalars(select(memory_facts.c.id).where(
+            memory_facts.c.user_id == user_id, memory_facts.c.project_id == project_id))}
         user_profiles = (
             session.query(UserProfile)
             .filter_by(user_id=user_id, project_id=project_id)
-            .order_by(UserProfile.updated_at.desc())
+            .order_by(UserProfile.updated_at.desc(), UserProfile.id)
             .all()
         )
         results = []
         for up in user_profiles:
+            if (up.attributes or {}).get("memoia_v2"):
+                support = set(up.attributes.get("fact_ids", []))
+                if not support or not support.issubset(valid_facts):
+                    continue
             results.append(
                 {
                     "id": up.id,
@@ -114,7 +130,7 @@ async def add_user_profiles(
     with Session() as session:
         db_profiles = [
             UserProfile(
-                user_id=user_id, project_id=project_id, content=content, attributes=attr
+                user_id=user_id, project_id=project_id, content=content, attributes=_profile_attributes(attr)
             )
             for content, attr in zip(profiles, attributes)
         ]
@@ -154,7 +170,8 @@ async def update_user_profiles(
                 continue
             db_profile.content = content
             if attribute is not None:
-                db_profile.attributes = attribute
+                # Client edits cannot strip the evidence needed by a later withdrawal.
+                db_profile.attributes = _profile_attributes(attribute, db_profile.attributes)
             db_profiles.append(profile_id)
         session.commit()
     return Promise.resolve(IdsData(ids=db_profiles))
@@ -231,7 +248,7 @@ async def add_update_delete_user_profiles(
                         user_id=user_id,
                         project_id=project_id,
                         content=content,
-                        attributes=attr,
+                        attributes=_profile_attributes(attr),
                     )
                     for content, attr in zip(add_profiles, add_attributes)
                 ]
@@ -258,7 +275,7 @@ async def add_update_delete_user_profiles(
                     continue
                 db_profile.content = content
                 if attribute is not None:
-                    db_profile.attributes = attribute
+                    db_profile.attributes = _profile_attributes(attribute, db_profile.attributes)
                 update_db_profiles.append(profile_id)
 
             # 3. delete profiles

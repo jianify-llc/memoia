@@ -1,5 +1,4 @@
 # Modified for Memoia: relocated from the upstream memobase_server package.
-import asyncio
 import time
 from ..prompts.utils import convert_response_to_json
 from ..utils import get_encoded_tokens
@@ -43,8 +42,8 @@ async def llm_complete(
         )
         latency = (time.time() - start_time) * 1000
     except Exception as e:
-        LOG.error(f"Error in llm_complete: {e}")
-        return Promise.reject(CODE.SERVICE_UNAVAILABLE, f"Error in llm_complete: {e}")
+        LOG.error("LLM completion failed", error_type=type(e).__name__)
+        return Promise.reject(CODE.SERVICE_UNAVAILABLE, "LLM completion failed")
 
     in_tokens = len(
         get_encoded_tokens(
@@ -55,8 +54,26 @@ async def llm_complete(
     )
     out_tokens = len(get_encoded_tokens(results))
 
-    # await project_cost_token_billing(project_id, in_tokens, out_tokens)
-    asyncio.create_task(project_cost_token_billing(project_id, in_tokens, out_tokens))
+    await record_completion_usage(project_id, in_tokens, out_tokens, latency)
+
+    if not json_mode:
+        return Promise.resolve(results)
+    parse_dict = convert_response_to_json(results)
+    if parse_dict is not None:
+        return Promise.resolve(parse_dict)
+    else:
+        return Promise.reject(
+            CODE.UNPROCESSABLE_ENTITY, "Failed to parse JSON response"
+        )
+
+
+async def record_completion_usage(project_id, in_tokens, out_tokens, latency):
+    # Await the small accounting write; it must not inherit a memory-write fence or
+    # escape as a detached task after the request's lease and process have ended.
+    try:
+        await project_cost_token_billing(project_id, in_tokens, out_tokens)
+    except Exception as error:
+        LOG.error("Completion accounting failed", error_type=type(error).__name__)
 
     telemetry_manager.increment_counter_metric(
         CounterMetricName.LLM_TOKENS_INPUT,
@@ -78,17 +95,6 @@ async def llm_complete(
         latency,
         {"project_id": project_id},
     )
-
-    if not json_mode:
-        return Promise.resolve(results)
-    parse_dict = convert_response_to_json(results)
-    if parse_dict is not None:
-        return Promise.resolve(parse_dict)
-    else:
-        return Promise.reject(
-            CODE.UNPROCESSABLE_ENTITY, "Failed to parse JSON response"
-        )
-
 
 async def llm_sanity_check():
     r = await llm_complete(

@@ -4,6 +4,7 @@ import asyncio
 import redis.exceptions as redis_exceptions
 import redis.asyncio as redis
 from sqlalchemy import create_engine, text
+from sqlalchemy import event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import OperationalError
 from uuid import uuid4
@@ -24,17 +25,46 @@ LOG.info(f"Project ID: {PROJECT_ID}")
 # Create an engine
 DB_ENGINE = create_engine(
     DATABASE_URL,
-    pool_size=75,  # Increased from 50 to handle more concurrent operations
-    max_overflow=50,  # Increased from 30 to provide more buffer
-    pool_recycle=300,  # Reduced from 600 to recycle connections more frequently
-    pool_pre_ping=True,  # Verify connections before using
-    pool_timeout=45,  # Increased from 30 seconds for better handling under load
-    pool_reset_on_return="commit",  # Ensure clean state when connections are returned
+    pool_size=int(os.getenv("DATABASE_POOL_SIZE", "8")),
+    max_overflow=int(os.getenv("DATABASE_POOL_OVERFLOW", "4")),
+    pool_recycle=300,
+    pool_pre_ping=True,
+    pool_timeout=15,
+    pool_reset_on_return="rollback",
     echo_pool=False,  # Set to True for debugging pool issues
+    hide_parameters=True,
 )
 REDIS_POOL = None
 
 Session = sessionmaker(bind=DB_ENGINE)
+
+
+@event.listens_for(Session, "after_commit")
+def acknowledge_memory_version(session):
+    version = session.info.pop("memoia_committed_version", None)
+    if version is not None:
+        lease, committed_version = version
+        lease.version = committed_version
+
+
+@event.listens_for(Session, "after_rollback")
+def discard_uncommitted_memory_version(session):
+    session.info.pop("memoia_committed_version", None)
+
+
+@event.listens_for(Session, "before_commit")
+def fence_legacy_commit(session):
+    from .controllers.user_lease import CURRENT_LEASE
+    lease = CURRENT_LEASE.get()
+    if lease is None or session.info.get("memoia_non_memory_commit") or session.info.pop("memoia_fence_done", False):
+        return
+    lease.assert_owned()
+    if lease.generation is not None:
+        from .controllers.source import fence_commit
+        # Fence before flushing a User DELETE that cascades away its state row.
+        with session.no_autoflush:
+            fence_commit(session, lease.identity[0], lease.identity[1], lease)
+        session.info.pop("memoia_fence_done", None)
 
 
 def create_pgvector_extension():
@@ -58,7 +88,8 @@ def create_tables():
     LOG.info("Database tables created successfully")
 
 
-create_tables()
+# Imports must be usable for OpenAPI and unit tests without touching a database.
+# Schema installation/upgrades are an explicit Alembic maintenance operation.
 
 
 def db_health_check() -> bool:

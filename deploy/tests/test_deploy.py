@@ -75,8 +75,54 @@ else:
     def run_command(self, *args):
         return subprocess.run(args, text=True, capture_output=True, env=self.env, timeout=20)
 
-    def deploy(self, mode="prepare", run="200"):
-        return self.run_command("bash", str(SOURCE / "deploy-memoia.sh"), mode, str(ROOT), IMAGE, SHA, run, self.compose_sha)
+    def deploy(self, mode="prepare", run="200", evidence=None):
+        args = ["bash", str(SOURCE / "deploy-memoia.sh"), mode, str(ROOT), IMAGE, SHA, run, self.compose_sha]
+        return self.run_command(*args, *([str(evidence)] if evidence else []))
+
+    def schema_evidence(self):
+        backup = self.state / "backups/fixture"
+        backup.mkdir(parents=True, mode=0o700)
+        restored = ROOT / "rehearsals/restore-fixture"
+        restored.mkdir(parents=True, mode=0o700)
+        for name, source in {".env": ROOT / ".env", "config.yaml": ROOT / "api/config.yaml",
+                             "docker-compose.yml": ROOT / "docker-compose.yml"}.items():
+            shutil.copyfile(source, backup / name)
+        for name in ("postgres.dump", "redis.rdb"):
+            (backup / name).write_bytes(b"fixture-snapshot")
+        manifest = {"image": OLD_IMAGE, "accepted": (self.state / "deploy-state").read_text().split(),
+                    "schema": (self.state / "schema.sha256").read_text().strip(), "database_counts": {"users": 1},
+                    "hashes": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in backup.iterdir()}}
+        (backup / "backup.json").write_text(json.dumps(manifest))
+        project = "memoia-restore-fixture"
+        (restored / "docker-compose.yml").write_text(json.dumps({"name": project}))
+        receipt = {"backup_sha256": hashlib.sha256((backup / "backup.json").read_bytes()).hexdigest(),
+                   "image": OLD_IMAGE, "database_counts": manifest["database_counts"], "target": str(restored),
+                   "project": project, "isolated": True, "redis_aof_restart_verified": True,
+                   "networks": [project + "_backend", project + "_data"],
+                   "compose_sha256": hashlib.sha256((restored / "docker-compose.yml").read_bytes()).hexdigest(),
+                   "data_mounts": {service: str(restored / "data" / service) for service in ("postgres", "redis")},
+                   "connections": {"postgres": {"host": "jianify-postgres", "database": "memoia", "user": "jianify_app", "container_id": "restored-postgres"},
+                                   "redis": {"host": "redis", "database": "0", "container_id": "restored-redis"}, "api_container_id": "restored-api"}}
+        (restored / "restore-verified.json").write_text(json.dumps(receipt))
+        evidence = self.state / "schema-preflight.json"
+        evidence.write_text(json.dumps({"image": IMAGE, "source_sha": SHA, "run_id": "200",
+                                       "writers_paused": True, "unknown_results_resolved": True,
+                                       "backup_directory": str(backup), "restore_directory": str(restored)}))
+        for file in (*backup.iterdir(), *restored.iterdir(), evidence):
+            file.chmod(0o600)
+        self.env["FIXTURE_SCHEMA"] = "a" * 64
+        return evidence
+
+    def schema_business_evidence(self):
+        trace = self.state / "schema-validation.json"
+        trace.write_text(json.dumps({"fixture": "business evidence, not a real model invocation"}))
+        trace.chmod(0o600)
+        evidence = self.state / "schema-business.json"
+        evidence.write_text(json.dumps({"image": IMAGE, "source_sha": SHA, "run_id": "200",
+                                       "checks": {name: True for name in ("authentication", "source_replay", "retract", "profile_history", "model", "embedding")},
+                                       "evidence_files": [{"path": str(trace), "sha256": hashlib.sha256(trace.read_bytes()).hexdigest()}]}))
+        evidence.chmod(0o600)
+        return evidence
 
     def adopt(self):
         return self.run_command("bash", str(SOURCE / "deploy-memoia.sh"), "adopt-external-postgres",
@@ -292,6 +338,98 @@ else:
         self.assertFalse((self.state / "deploy-state").exists())
         self.assertFalse((self.state / "standalone-mode").exists())
         self.assert_configs_unchanged()
+        actions = self.actions()
+        migration = next(i for i, action in enumerate(actions) if "alembic" in action["args"])
+        api_start = next(i for i, action in enumerate(actions) if "up" in action["args"] and action["args"][-1] == "memoia")
+        self.assertLess(migration, api_start)
+        self.assertEqual(sum("run" in action["args"] for action in actions), 2)
+
+    def test_failed_initial_migration_never_starts_api(self):
+        for file in ("infra-config.sha256", "schema.sha256", "deploy-state"):
+            (self.state / file).unlink()
+        (ROOT / "data/redis").mkdir(parents=True)
+        self.env.update(FIXTURE_EMPTY_STACK="1", FIXTURE_MIGRATION_FAIL="1")
+        self.assertNotEqual(self.deploy("init").returncode, 0)
+        self.assertTrue((self.state / "pending-deploy").exists())
+        self.assertFalse(any("up" in a["args"] and a["args"][-1] == "memoia" for a in self.actions()))
+
+    def test_schema_maintenance_requires_verified_restore_before_stop(self):
+        evidence = self.schema_evidence()
+        (ROOT / "rehearsals/restore-fixture/restore-verified.json").unlink()
+        result = self.deploy("migrate-schema", evidence=evidence)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.state / "pending-deploy").exists())
+        self.assertFalse(any("stop" in a["args"] for a in self.actions()))
+
+    def test_schema_maintenance_success_archives_old_schema_and_only_updates_api(self):
+        preflight = self.schema_evidence()
+        (self.state / "previous-accepted").write_text("older-accepted-fixture")
+        result = self.deploy("migrate-schema", evidence=preflight)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.state / "pending-maintenance").exists())
+        self.assertEqual((self.state / "schema.sha256").read_text().strip(), "f" * 64)
+        self.assertEqual((self.state / "deploy-state").read_text().split()[2], OLD_IMAGE)
+        result = self.deploy("finalize-schema", evidence=self.schema_business_evidence())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.state / "schema.sha256").read_text().strip(), "a" * 64)
+        self.assertEqual((self.state / "deploy-state").read_text().split()[2], IMAGE)
+        self.assertFalse((self.state / "previous-accepted").exists())
+        self.assertEqual((self.state / "schema-archives/200/previous-schema.sha256").read_text().strip(), "f" * 64)
+        self.assertFalse((self.state / "pending-maintenance").exists())
+        actions = self.actions()
+        self.assertEqual(sum("run" in a["args"] for a in actions), 2)
+        self.assertTrue(all(a["args"][-1] == "memoia" for a in actions if "stop" in a["args"] or "up" in a["args"]))
+        self.assertNotEqual(self.deploy("restore-api", run="100").returncode, 0)
+        self.assert_configs_unchanged()
+
+    def test_failed_schema_migration_preserves_old_acceptance_and_diagnostics(self):
+        evidence = self.schema_evidence()
+        self.env["FIXTURE_MIGRATION_FAIL"] = "1"
+        self.assertNotEqual(self.deploy("migrate-schema", evidence=evidence).returncode, 0)
+        self.assertTrue((self.state / "pending-maintenance").exists())
+        self.assertTrue((self.state / "pending-schema.sha256").exists())
+        self.assertEqual((self.state / "deploy-state").read_text().split()[2], OLD_IMAGE)
+        self.assertFalse(any("up" in a["args"] for a in self.actions()))
+        self.assertNotEqual(self.deploy("finalize").returncode, 0)
+        self.assertNotEqual(self.deploy().returncode, 0)
+
+    def test_unknown_v2_operation_blocks_schema_maintenance_without_clearing_state(self):
+        evidence = self.schema_evidence()
+        self.env.update(FIXTURE_V2_TABLES="1", FIXTURE_V2_UNFINISHED="1")
+        self.assertNotEqual(self.deploy("migrate-schema", evidence=evidence).returncode, 0)
+        self.assertFalse((self.state / "pending-deploy").exists())
+        self.assertFalse(any("stop" in a["args"] for a in self.actions()))
+
+    def test_new_unfinished_work_after_stop_blocks_migration_and_candidate(self):
+        evidence = self.schema_evidence()
+        self.env["FIXTURE_ACTIVE_BUFFER_AFTER_STOP"] = "1"
+        self.assertNotEqual(self.deploy("migrate-schema", evidence=evidence).returncode, 0)
+        self.assertTrue((self.state / "pending-maintenance").exists())
+        self.assertTrue(any("stop" in a["args"] for a in self.actions()))
+        self.assertFalse(any("run" in a["args"] or "up" in a["args"] for a in self.actions()))
+
+    def test_ordinary_finalize_cannot_clear_schema_maintenance(self):
+        evidence = self.schema_evidence()
+        self.assertEqual(self.deploy("migrate-schema", evidence=evidence).returncode, 0)
+        self.assertNotEqual(self.deploy("finalize").returncode, 0)
+        self.assertTrue((self.state / "pending-maintenance").exists())
+        self.assertEqual((self.state / "deploy-state").read_text().split()[2], OLD_IMAGE)
+
+    def test_schema_finalize_needs_business_evidence_not_only_health(self):
+        evidence = self.schema_evidence()
+        self.assertEqual(self.deploy("migrate-schema", evidence=evidence).returncode, 0)
+        business = self.schema_business_evidence()
+        trace = self.state / "schema-validation.json"
+        trace.write_text("changed evidence")
+        self.assertNotEqual(self.deploy("finalize-schema", evidence=business).returncode, 0)
+        self.assertTrue((self.state / "pending-maintenance").exists())
+        self.assertEqual((self.state / "schema.sha256").read_text().strip(), "f" * 64)
+
+    def test_schema_maintenance_is_test_only(self):
+        evidence = self.schema_evidence()
+        self.env["FIXTURE_ENV"] = "online"
+        self.assertNotEqual(self.deploy("migrate-schema", evidence=evidence).returncode, 0)
+        self.assertEqual(self.actions(), [])
 
     def test_first_install_refuses_existing_data(self):
         for file in ("infra-config.sha256", "schema.sha256", "deploy-state"):

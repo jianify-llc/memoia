@@ -23,6 +23,7 @@ COPY ./memoia_server /app/memoia_server
 COPY ./api.py /app
 COPY ./LICENSE ./NOTICE /app/
 COPY ./migrations /app/migrations
+COPY ./alembic.ini /app/alembic.ini
 
 
 

@@ -50,6 +50,14 @@ class BackupBoundary(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     recovery.check_quiet(["docker", "compose"], config, "company-postgres")
 
+    def test_v2_unknown_operation_or_hidden_rebuild_blocks_backup(self):
+        config = {"services": {"memoia": {"environment": {"PROJECT_ID": "fixture"}}}}
+        for results in (["0", "", "", "memory_operations", "1"],
+                        ["0", "", "", "memory_operations", "0", "memory_sources", "1"]):
+            with self.subTest(results=results), patch.object(recovery, "run", side_effect=results):
+                with self.assertRaisesRegex(RuntimeError, "Unfinished v2"):
+                    recovery.check_quiet(["docker", "compose"], config, "company-postgres")
+
     def test_paired_backup_dumps_only_memoia_database_and_redis_at_one_cutpoint(self):
         (self.root / "api").mkdir()
         (self.root / "data/redis").mkdir(parents=True)
@@ -172,8 +180,12 @@ class RestoreBoundary(unittest.TestCase):
         return ""
 
     def inspect(self, container):
+        environment = self.source["services"]["memoia"]["environment"]
+        networks = {"postgres": ["data"], "redis": ["backend"], "memoia": ["backend", "data", "ingress"]}
         return {"State": {"Health": {"Status": "healthy"}, "ExitCode": 0}, "HostConfig": {"PortBindings": {}},
-                "Mounts": [{"Source": str(self.target / "data" / container)}]}
+                "Mounts": [{"Source": str(self.target / "data" / container)}],
+                "Config": {"Image": "fixture-image", "Env": [f"{key}={value}" for key, value in environment.items()]},
+                "NetworkSettings": {"Networks": {"memoia-restore-fixture_" + key: {} for key in networks[container]}}}
 
     def test_restore_is_isolated_and_verifies_rdb_then_aof_restart(self):
         recovery.restore(self.backup, self.target)
@@ -182,6 +194,9 @@ class RestoreBoundary(unittest.TestCase):
         self.assertNotIn("ports", config["services"]["memoia"])
         self.assertEqual(config["services"]["postgres"]["networks"]["data"]["aliases"], ["jianify-postgres"])
         self.assertFalse(any(net.get("external") for net in config["networks"].values()))
+        self.assertFalse(config["networks"]["ingress"]["internal"])
+        self.assertEqual(set(config["services"]["redis"]["networks"]), {"backend"})
+        self.assertEqual(set(config["services"]["postgres"]["networks"]), {"data"})
         self.assertTrue(all("--project-name" in call for call in self.calls[1:]))
         get = [i for i, call in enumerate(self.calls) if "GET" in call]
         enable = next(i for i, call in enumerate(self.calls) if "CONFIG" in call)
@@ -192,6 +207,33 @@ class RestoreBoundary(unittest.TestCase):
         self.assertLess(stop, get[1])
         self.assertIn("--appendonly yes", config["services"]["redis"]["command"][2])
         self.assertEqual((self.target / "data/redis/dump.rdb").read_text(), "fixture-only")
+        receipt = json.loads((self.target / "restore-verified.json").read_text())
+        self.assertEqual(receipt["backup_sha256"], hashlib.sha256((self.backup / "backup.json").read_bytes()).hexdigest())
+        self.assertEqual(receipt["compose_sha256"], hashlib.sha256((self.target / "docker-compose.yml").read_bytes()).hexdigest())
+        self.assertEqual(receipt["connections"]["postgres"]["database"], "memoia")
+        self.assertTrue(receipt["redis_aof_restart_verified"])
+        self.assertEqual((self.target / "restore-verified.json").stat().st_mode & 0o777, 0o600)
+
+    def test_failed_api_or_aof_verification_never_writes_success_receipt(self):
+        def unhealthy(command, service):
+            if service == "memoia":
+                raise RuntimeError("API not healthy")
+        with patch.object(recovery, "wait_healthy", side_effect=unhealthy):
+            with self.assertRaisesRegex(RuntimeError, "API not healthy"):
+                recovery.restore(self.backup, self.target)
+        self.assertFalse((self.target / "restore-verified.json").exists())
+
+    def test_actual_formal_network_blocks_restore_receipt(self):
+        original = self.inspect
+        def wrong_network(container):
+            result = original(container)
+            if container == "memoia":
+                result["NetworkSettings"]["Networks"] = {"jianify-data": {}}
+            return result
+        with patch.object(recovery, "inspect", side_effect=wrong_network):
+            with self.assertRaisesRegex(RuntimeError, "non-isolated network"):
+                recovery.restore(self.backup, self.target)
+        self.assertFalse((self.target / "restore-verified.json").exists())
 
     def test_existing_even_empty_target_is_rejected(self):
         self.target.mkdir(parents=True)
@@ -215,6 +257,9 @@ class RestoreBoundary(unittest.TestCase):
         config["networks"]["backend"]["name"] = "memoia-restore-fixture_backend"
         config["networks"]["backend"]["internal"] = True
         config["networks"]["data"] = {"name": "memoia-restore-fixture_data", "internal": True}
+        config["networks"]["ingress"] = {"name": "memoia-restore-fixture_ingress", "internal": False}
+        config["services"]["redis"]["networks"] = {"backend": {}}
+        config["services"]["memoia"]["networks"] = {"backend": {}, "ingress": {}, "data": {}}
         config["services"]["redis"]["volumes"][0]["source"] = str(self.target / "data/redis")
         config["services"]["postgres"] = {
             "environment": {"POSTGRES_USER": "jianify_app", "POSTGRES_PASSWORD": "fixture", "POSTGRES_DB": "memoia"},
@@ -222,12 +267,13 @@ class RestoreBoundary(unittest.TestCase):
             "networks": {"data": {"aliases": ["jianify-postgres"]}},
         }
         recovery.validate_isolation(config, self.target, self.source)
-        for change in ("port", "network", "mount", "connection"):
+        for change in ("port", "network", "mount", "connection", "redis-egress"):
             bad = copy.deepcopy(config)
             if change == "port": bad["services"]["memoia"]["ports"] = ["8000:8000"]
             if change == "network": bad["networks"]["backend"]["name"] = "memoia-test_backend"
             if change == "mount": bad["services"]["redis"]["volumes"][0]["source"] = str(self.root / "data/redis")
             if change == "connection": bad["services"]["memoia"]["environment"]["DATABASE_URL"] = "postgresql://external-host/db"
+            if change == "redis-egress": bad["services"]["redis"]["networks"]["ingress"] = {}
             with self.subTest(change=change), self.assertRaises(RuntimeError):
                 recovery.validate_isolation(bad, self.target, self.source)
 

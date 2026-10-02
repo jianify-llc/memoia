@@ -199,7 +199,7 @@ async def test_empty_json_is_rejected_by_real_parser(openai_transport, content):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("content", ["", " \n\t"])
-async def test_empty_summary_flush_succeeds_without_event(
+async def test_empty_structured_content_flush_fails_without_event(
     openai_transport, monkeypatch, content
 ):
     state, client = openai_transport
@@ -218,18 +218,36 @@ async def test_empty_summary_flush_succeeds_without_event(
             },
         )
         assert inserted.json()["errno"] == 0
-        # 不 mock 摘要函数：执行真实 HTTP → summary → SDK → adapter → 业务空摘要分支。
+        # Adapter 允许合法空文本，但结构化提取必须由 parser 拒绝空 JSON。
         flushed = api_client.post(f"/api/v1/users/buffer/{user_id}/chat?wait_process=true")
-        assert flushed.json()["errno"] == 0
-        assert flushed.json()["data"] == [
-            {"event_id": None, "add_profiles": [], "update_profiles": [], "delete_profiles": []}
-        ]
+        assert flushed.json()["errno"] != 0
         assert api_client.get(f"/api/v1/users/event/{user_id}").json()["data"]["events"] == []
         assert len(state["requests"]) == 1
     finally:
         api_client.delete(f"/api/v1/users/{user_id}")
         api_client.close()
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_complete_structured_empty_facts_flush_succeeds_without_event(openai_transport):
+    state, model_client = openai_transport
+    state["content"] = '{"facts": [], "event_tags": []}'
+    client = TestClient(app, headers={"Authorization": f"Bearer {os.environ['ACCESS_TOKEN']}"})
+    uid = client.post("/api/v1/users", json={}).json()["data"]["id"]
+    try:
+        inserted = client.post(f"/api/v1/blobs/insert/{uid}", json={"blob_type": "chat",
+            "blob_data": {"messages": [{"role": "user", "content": "Hello"}]}})
+        assert inserted.json()["errno"] == 0
+        flushed = client.post(f"/api/v1/users/buffer/{uid}/chat?wait_process=true").json()
+        assert flushed["errno"] == 0 and len(flushed["data"]) == 1 and flushed["data"][0]["event_id"] is None
+        assert client.get(f"/api/v1/users/event/{uid}").json()["data"]["events"] == []
+        assert len(state["requests"]) == 1
+        assert state["requests"][0]["response_format"]["json_schema"]["strict"]
+    finally:
+        client.delete(f"/api/v1/users/{uid}")
+        client.close()
+        await model_client.close()
 
 
 @pytest.mark.asyncio

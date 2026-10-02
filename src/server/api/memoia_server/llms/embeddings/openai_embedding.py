@@ -19,4 +19,12 @@ async def openai_embedding(
     prompt_tokens = getattr(response.usage, "prompt_tokens", None)
     total_tokens = getattr(response.usage, "total_tokens", None)
     LOG.info(f"OpenAI embedding, {model}, {phase}, {prompt_tokens}/{total_tokens}")
-    return np.array([dp.embedding for dp in response.data])
+    if len(response.data) != len(texts):
+        raise ValueError("Embedding response count mismatch")
+    indices = [dp.index for dp in response.data]
+    if sorted(indices) != list(range(len(texts))):
+        raise ValueError("Embedding response indices are incomplete or duplicated")
+    vectors = np.asarray([dp.embedding for dp in sorted(response.data, key=lambda dp: dp.index)], dtype=float)
+    if vectors.shape != (len(texts), CONFIG.embedding_dim) or not np.isfinite(vectors).all():
+        raise ValueError("Embedding response has invalid dimensions or non-finite values")
+    return vectors

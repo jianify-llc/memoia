@@ -33,4 +33,46 @@ async def db_env():
     if response.status_code == 200 and d["errno"] == 0:
         yield
     else:
-        pytest.skip("Database not available")
+        pytest.fail("Database not available: integration tests must not silently skip")
+
+
+@pytest.fixture
+def bounded_source_model(monkeypatch):
+    """Mock the current extraction contract, not the retired text-parser call graph."""
+    from uuid import uuid4
+    from unittest.mock import AsyncMock
+    import numpy as np
+    from memoia_server.controllers import source
+    from memoia_server.models.utils import Promise
+
+    async def extract(body, **kwargs):
+        message = next(m for m in body.messages if m.role == "user")
+        return source.ExtractedSource([{"id": uuid4(), "content": "Gus", "topic": "basic_info", "sub_topic": "name",
+                 "support_groups": [[message.message_id]], "occurred_at": message.occurred_at}], [{"tag": "emotion", "value": "happy"}])
+
+    async def reconcile(facts, **kwargs):
+        return source.Reconciliation(decisions=[source.FactDecision(fact_id=f["id"], include=True) for f in facts],
+            profiles=[source.DerivedProfile(content=f["content"], topic=f["topic"], sub_topic=f["sub_topic"], fact_ids=[f["id"]]) for f in facts])
+
+    async def embedding(_, texts, **kwargs):
+        return Promise.resolve(np.full((len(texts), CONFIG.embedding_dim), .1))
+
+    extraction = AsyncMock(side_effect=extract)
+    monkeypatch.setattr(source, "extract_source", extraction)
+    monkeypatch.setattr(source, "reconcile_facts", AsyncMock(side_effect=reconcile))
+    monkeypatch.setattr(source, "get_embedding", AsyncMock(side_effect=embedding))
+    return extraction
+
+
+@pytest.fixture
+def four_fact_source_model(bounded_source_model):
+    from uuid import uuid4
+    from memoia_server.controllers import source
+    async def extract(body, **kwargs):
+        message = next(m for m in body.messages if m.role == "user")
+        return source.ExtractedSource([{"id": uuid4(), "content": content, "topic": topic, "sub_topic": sub,
+                 "support_groups": [[message.message_id]], "occurred_at": message.occurred_at}
+                for topic, sub, content in [("basic_info", "name", "Gus"), ("interest", "foods", "Chinese food"),
+                                           ("education", "level", "High School"), ("psychological", "emotional_state", "Feels bored with high school")]], [])
+    bounded_source_model.side_effect = extract
+    return bounded_source_model

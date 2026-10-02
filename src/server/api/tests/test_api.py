@@ -125,7 +125,7 @@ def mock_event_summary_llm_complete():
 
 
 @pytest.fixture
-def mock_entry_summary_llm_complete():
+def mock_entry_summary_llm_complete(bounded_source_model):
     with patch(
         "memoia_server.controllers.modal.chat.entry_summary.llm_complete"
     ) as mock_llm:
@@ -553,7 +553,7 @@ async def test_api_user_event(
     assert len(d["data"]["events"]) == 1
 
     print(d["data"]["events"])
-    assert d["data"]["events"][0]["event_data"]["event_tip"] == "Melina is a happy girl"
+    assert d["data"]["events"][0]["event_data"]["event_tip"] == "- Gus"
     assert d["data"]["events"][0]["event_data"]["event_tags"] == [
         {"tag": "emotion", "value": "happy"}
     ]
@@ -566,11 +566,14 @@ async def test_api_user_event(
 
 
 def test_synchronous_flush_without_extracted_memory(
-    client, db_env, mock_entry_summary_llm_complete
+    client, db_env, mock_entry_summary_llm_complete, bounded_source_model
 ):
     from memoia_server.models.utils import Promise
 
     mock_entry_summary_llm_complete.side_effect = [Promise.resolve("")]
+    bounded_source_model.side_effect = None
+    from memoia_server.controllers.source import ExtractedSource
+    bounded_source_model.return_value = ExtractedSource([], [])
     user_id = client.post(f"{PREFIX}/users", json={}).json()["data"]["id"]
     try:
         inserted = client.post(

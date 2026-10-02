@@ -188,7 +188,37 @@ async def flush_buffer_by_ids(
         # Pack blobs from the joined data
 
         # Process blobs first (moved outside the session)
-        p = await BLOBS_PROCESS[blob_type](user_id, project_id, blobs)
+        # The accepted blob IDs give this flush a stable internal identity, not a body hash.
+        # A second insertion of identical text has new blob IDs and remains a new operation.
+        from uuid import uuid5, NAMESPACE_URL
+        from datetime import datetime, timezone
+        from ..models.source import ImportSource, SourceMessage
+        from .source import import_source, SourceError
+        identity = str(uuid5(NAMESPACE_URL, f"{project_id}:{user_id}:" + ":".join(str(i) for i in blob_ids)))
+        messages = []
+        for row, blob in zip(buffer_blob_data, blobs, strict=True):
+            entries = blob.messages if blob_type == BlobType.chat else [
+                type("SummaryMessage", (), {"role": "user", "content": blob.summary, "created_at": None})()
+            ]
+            for index, message in enumerate(entries):
+                occurred_at = row.created_at
+                if message.created_at:
+                    occurred_at = datetime.fromisoformat(message.created_at)
+                    if occurred_at.tzinfo is None:
+                        occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+                messages.append(SourceMessage(message_id=f"{row.blob_id}:{index}", role=message.role,
+                                              content=message.content, occurred_at=occurred_at))
+        try:
+            result = await import_source(user_id, project_id, ImportSource(
+                idempotency_key=f"v1-flush:{identity}", external_id=f"v1-flush:{identity}", messages=messages,
+            ), legacy_buffers=(process_buffer_ids, blob_ids))
+        except SourceError as error:
+            p = Promise.reject(CODE(error.status) if error.status in CODE else CODE.BAD_REQUEST, error.message)
+        else:
+            if result.status != "completed":
+                return Promise.reject(CODE.CONFLICT, "Flush is processing; query/recover the accepted operation")
+            p = Promise.resolve(ChatModalResponse(event_id=result.result.event_ids[0] if result.result.event_ids else None,
+                                                 add_profiles=result.result.profile_ids, update_profiles=[], delete_profiles=[]))
         if not p.ok():
             # Rollback buffer status to failed if the process failed
             with Session() as session:

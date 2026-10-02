@@ -1,1 +1,35 @@
-Generic single-database configuration.
+Memoia 显式数据库迁移
+====================
+
+应用 import 不创建或更新表。运行 API 前需以候选镜像执行 Alembic，随后调用
+memoia_server.schema.check_schema() 校验 revision 和 embedding 维度、初始化根项目。
+连接来自受保护运行配置中的 DATABASE_URL，不从 alembic.ini 固定连接串读取。
+
+版本链：
+  0001_v1_baseline      冻结 v1 的表、约束、索引；空库创建，既有库严格核对后接纳。
+  0002_sources_v2       用户 generation/version、来源、证据事实及持久操作回执。
+  0003_profile_history  画像版本、差异及来源关联。
+  0004_key_scopes_search 撤销/到期/权限 key 与 PostgreSQL 词法检索索引。
+
+0001 不重建、清空或改写既有表。仅当 v1 表集合完整，字段/类型/非空/now() 默认值、
+主键、外键及关联 schema/级联行为和必需索引均符合冻结契约时接纳；部分表、漂移列、
+不同 embedding 维度或额外插件列会失败。失败须调查并交付明确的前向修复，不先 stamp
+绕过检查。已有库需 vector 扩展，空库才在基线内创建扩展。版本表绑定当前物理 schema。
+
+本地空库或一次性隔离库：
+  python -m alembic upgrade head
+  python -c 'from memoia_server.schema import check_schema; check_schema()'
+
+真实 Test 升级必须走 deploy/deploy-memoia.sh migrate-schema / finalize-schema。
+先暂停外部写入并确认未知结果、备份 PostgreSQL/Redis 同一静止切点、导出离机副本、
+用独立 Compose project/network/config/data 恢复并验证，再停旧 API、复查在途状态、
+从候选镜像 upgrade head。不能在 import/startup 自动迁移，也不能用手工 schema.sha256
+跳过 schema 维护。具体受保护证据字段及验收见 deploy/README.md。
+
+版本脚本是发布事实，不修改已执行迁移；必要变更新增前向版本。所有 downgrade 均拒绝
+删除业务表。schema 升级后旧 accepted API 仅归档；旧 snapshot 不覆盖产生新数据的当前
+数据库。需要退回时先明确 schema 兼容性或新增前向修复，在隔离环境验证恢复，不承诺
+通过切回旧 API 镜像即可撤销数据库升级。
+
+模型声明用于下一版本的 review/autogenerate 辅助，不把自动生成 diff 直接当安全迁移；
+手工检查表达式索引、冻结 baseline、约束及数据兼容性后再运行真实 PostgreSQL 测试。

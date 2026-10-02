@@ -38,7 +38,7 @@ elif command == "curl":
         sys.exit("Unexpected external HTTP call")
 elif command == "docker":
     if args[0] == "compose":
-        action = next(item for item in args if item in ("config", "ps", "exec", "pull", "stop", "up"))
+        action = next(item for item in args if item in ("config", "ps", "exec", "pull", "stop", "up", "run"))
         if action == "config":
             if "--quiet" in args:
                 sys.exit(0)
@@ -56,12 +56,15 @@ elif command == "docker":
         elif action == "exec":
             if os.getenv("FIXTURE_NO_DRAIN_PROBES"):
                 sys.exit("Routine release must not probe buffer or Redis execution state")
-            output("0")
-        elif action in ("pull", "stop", "up"):
+            output("" if "--scan" in args else "0")
+        elif action in ("pull", "stop", "up", "run"):
             with (fixture / "actions").open("a") as file:
                 file.write(json.dumps({"args": args, "image": os.getenv("MEMOIA_IMAGE")}) + "\n")
             if action == "up":
-                (fixture / "image").write_text(os.environ["MEMOIA_IMAGE"])
+                if args[-1] == "memoia":
+                    (fixture / "image").write_text(os.environ["MEMOIA_IMAGE"])
+            elif action == "run" and os.getenv("FIXTURE_MIGRATION_FAIL"):
+                sys.exit("Migration failed")
     elif args[0] == "inspect":
         service = args[-1]
         if "--format" in args:
@@ -82,7 +85,15 @@ elif command == "docker":
     elif args[0] == "exec":
         if os.getenv("FIXTURE_DB_UNAVAILABLE"):
             sys.exit("Company database query failed")
-        if "pg_extension" in args[-1]:
+        if "to_regclass" in args[-1]:
+            output("memory_table" if os.getenv("FIXTURE_V2_TABLES") else "")
+        elif "buffer_zones" in args[-1]:
+            actions = (fixture / "actions").read_text() if (fixture / "actions").exists() else ""
+            stopped = '"stop"' in actions
+            output(os.getenv("FIXTURE_ACTIVE_BUFFER_AFTER_STOP", "0") if stopped else os.getenv("FIXTURE_ACTIVE_BUFFER", "0"))
+        elif "memory_operations" in args[-1] or "memory_sources" in args[-1]:
+            output(os.getenv("FIXTURE_V2_UNFINISHED", "0"))
+        elif "pg_extension" in args[-1]:
             output("1")
         else:
             output(os.getenv("FIXTURE_DB_TABLES", "0"))
