@@ -42,7 +42,7 @@ async def llm_complete(
         )
         latency = (time.time() - start_time) * 1000
     except Exception as e:
-        LOG.error("LLM completion failed", error_type=type(e).__name__)
+        LOG.error("LLM completion failed (%s)", type(e).__name__)
         return Promise.reject(CODE.SERVICE_UNAVAILABLE, "LLM completion failed")
 
     in_tokens = len(
@@ -73,7 +73,7 @@ async def record_completion_usage(project_id, in_tokens, out_tokens, latency):
     try:
         await project_cost_token_billing(project_id, in_tokens, out_tokens)
     except Exception as error:
-        LOG.error("Completion accounting failed", error_type=type(error).__name__)
+        LOG.error("Completion accounting failed (%s)", type(error).__name__)
 
     telemetry_manager.increment_counter_metric(
         CounterMetricName.LLM_TOKENS_INPUT,

@@ -64,10 +64,10 @@ async def get_embedding(
         results = np.concatenate(batches, axis=0)
         latency_ms = (time.time() - start_time) * 1000
     except (BadRequestError, AuthenticationError, PermissionDeniedError, NotFoundError) as e:
-        LOG.error("Embedding configuration rejected", error_type=type(e).__name__)
+        LOG.error("Embedding configuration rejected (%s)", type(e).__name__)
         return Promise.reject(CODE.UNPROCESSABLE_ENTITY, "Embedding configuration rejected")
     except Exception as e:
-        LOG.error("Embedding generation failed", error_type=type(e).__name__)
+        LOG.error("Embedding generation failed (%s)", type(e).__name__)
         return Promise.reject(CODE.SERVICE_UNAVAILABLE, "Embedding generation failed")
     embedding_tokens = len(get_encoded_tokens("\n".join(texts)))
     telemetry_manager.increment_counter_metric(
