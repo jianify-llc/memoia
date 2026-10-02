@@ -12,6 +12,10 @@ const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 const requireTrue = (condition) => { if (!condition) throw new Error("Probe check failed"); };
 const terminal = (operation) => operation.status === "completed" || operation.status === "failed";
 const historyProfiles = (history) => history.entries.flatMap((entry) => [...entry.profiles, ...entry.added, ...entry.removed]);
+const ids = (rows, field = "id") => rows.map((row) => row[field]).sort();
+const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+const profileState = (rows) => rows.map((profile) => [profile.id, profile.content, profile.topic,
+  profile.sub_topic, [...profile.source_ids].sort()]).sort(([left], [right]) => left.localeCompare(right));
 
 export async function runProbe(input, sdkEntry, { transport = fetch, pollIntervalMs = 1000 } = {}) {
   const evidence = { success: false, outcome_unknown: false,
@@ -103,8 +107,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     evidence.checks.first_import = true;
     const queried = await client.getOperationByKey(uid, body.idempotency_key, options());
     const byId = await client.getOperation(uid, imported.operation_id, options());
-    requireTrue(JSON.stringify(queried) === JSON.stringify(imported) && JSON.stringify(byId) === JSON.stringify(imported));
-    evidence.checks.operation_replay = true;
+    requireTrue(same(queried, imported) && same(byId, imported));
     const stored = await client.getSourceByExternalId(uid, body.external_id, options());
     requireTrue(stored.source_id === imported.source_id && stored.status === "active" && stored.evidence.length > 0);
     requireTrue(["name", "food"].every((id) => stored.evidence.some((fact) =>
@@ -123,6 +126,44 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     requireTrue(history.entries.some((r) => r.operation_id === imported.operation_id) && historyProfiles(history).length > 0);
     evidence.counts.history_before = history.entries.length;
     evidence.checks.history = true;
+    const sourcesBefore = await client.listSources(uid, { ...options(), limit: 100 });
+    const events = async () => {
+      // This fresh owned user has only this import; an unfiltered v1 list counts all its events.
+      const response = await raw("GET", `/api/v1/users/event/${uid}?topk=100`);
+      requireTrue(response.ok);
+      const result = await response.json();
+      requireTrue(result.errno === 0 && Array.isArray(result.data?.events));
+      return result.data.events;
+    };
+    const eventsBefore = await events();
+    requireTrue(same(ids(sourcesBefore.sources, "source_id"), [imported.source_id]) &&
+      same(ids(eventsBefore), [...imported.result.event_ids].sort()));
+    evidence.counts.sources_before_replay = sourcesBefore.sources.length;
+    evidence.counts.events_before_replay = eventsBefore.length;
+    // Deliberate replay is allowed only after this exact import has confirmed completion.
+    // Its own lost acknowledgement remains unknown: never send a third POST or clean it away.
+    mutationUnknown = true;
+    let replayed;
+    try { replayed = await client.importSource(uid, body, options()); }
+    catch (error) {
+      if (error.outcome !== "unknown") mutationUnknown = false;
+      throw error;
+    }
+    if (terminal(replayed)) mutationUnknown = false;
+    requireTrue(replayed.status === "completed" && same(replayed, imported));
+    const sourcesAfter = await client.listSources(uid, { ...options(), limit: 100 });
+    const profilesAfter = await client.getProfiles(uid, options());
+    const eventsAfter = await events();
+    evidence.counts.sources_after_replay = sourcesAfter.sources.length;
+    evidence.counts.profiles_after_replay = profilesAfter.profiles.length;
+    evidence.counts.events_after_replay = eventsAfter.length;
+    requireTrue(same(ids(sourcesAfter.sources, "source_id"), ids(sourcesBefore.sources, "source_id")) &&
+      same(profileState(profilesAfter.profiles), profileState(profiles.profiles)) && same(ids(eventsAfter), ids(eventsBefore)));
+    const replaySource = sourcesAfter.sources[0];
+    requireTrue(replaySource.external_id === body.external_id && replaySource.status === "active" &&
+      same(replaySource.message_ids, stored.message_ids) &&
+      same(ids(replaySource.evidence, "fact_id"), ids(stored.evidence, "fact_id")));
+    evidence.checks.operation_replay = true;
     const withdrawn = new Set(stored.evidence.filter((f) =>
       f.support_groups.every((group) => group.includes("name"))).map((f) => f.fact_id));
     const partial = await complete(evidence.ids.partial_retract_key, () => client.retractMessages(uid, imported.source_id,
