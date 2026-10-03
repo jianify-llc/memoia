@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // Real, bounded SDK acceptance. Only this invocation's random user may be deleted.
 import { randomUUID } from "node:crypto";
+import { fstatSync, fsyncSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const names = ["input", "sdk_version", "authentication", "user_absent", "first_import",
   "operation_replay", "source_evidence", "profiles", "embedding_search", "history",
-  "partial_retract", "retract", "profile_history", "cleanup"];
+  "partial_retract", "retract", "profile_history", "forget_user", "forget_repeat", "late_import_rejected", "cleanup"];
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 const requireTrue = (condition) => { if (!condition) throw new Error("Probe check failed"); };
 const terminal = (operation) => operation.status === "completed" || operation.status === "failed";
@@ -17,11 +18,11 @@ const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 const profileState = (rows) => rows.map((profile) => [profile.id, profile.content, profile.topic,
   profile.sub_topic, [...profile.source_ids].sort()]).sort(([left], [right]) => left.localeCompare(right));
 
-export async function runProbe(input, sdkEntry, { transport = fetch, pollIntervalMs = 1000 } = {}) {
+export async function runProbe(input, sdkEntry, { transport = fetch, pollIntervalMs = 1000, checkpoint = async () => {} } = {}) {
   const evidence = { success: false, outcome_unknown: false,
     checks: Object.fromEntries(names.map((name) => [name, false])), ids: {}, counts: {} };
-  let origin, token, deadline, client;
-  let ownedUser = false, mutationUnknown = false;
+  let origin, token, deadline, client, MemoiaError;
+  let ownedUser = false, mutationUnknown = false, forgetStarted = false, checkpointFailed = false;
   const remaining = () => Math.max(0, deadline - Date.now());
   const options = () => ({ deadline });
   const raw = (method, path, key = token, budget = remaining()) => {
@@ -32,31 +33,56 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
   };
   const absent = async (response) => response.status === 404 ||
     (response.ok && (await response.json()).errno === 404);
-  const complete = async (key, post) => {
+  const record = async (stage, unknown = mutationUnknown) => {
+    requireTrue(!checkpointFailed);
+    try {
+      // 传递独立的脱敏快照；必须等待持久化，不能让后续写入越过失败的检查点。
+      await checkpoint({ ...structuredClone(evidence), kind: "boundary", stage, outcome_unknown: unknown });
+    } catch (error) { checkpointFailed = true; throw error; }
+  };
+  const remember = (operation) => {
+    if (!operation) return;
+    if (!evidence.ids.operation_ids.includes(operation.operation_id)) evidence.ids.operation_ids.push(operation.operation_id);
+    if (operation.source_id) {
+      evidence.ids.source_id ??= operation.source_id;
+      if (!evidence.ids.source_ids.includes(operation.source_id)) evidence.ids.source_ids.push(operation.source_id);
+    }
+    for (const kind of ["event_ids", "profile_ids"]) {
+      for (const id of operation.result?.[kind] ?? []) {
+        if (!evidence.ids[kind].includes(id)) evidence.ids[kind].push(id);
+      }
+    }
+  };
+  const complete = async (stage, key, post) => {
     // Mark the boundary before the one POST. A lost acknowledgement is not a rejection.
+    await record(`${stage}.before`, true);
     mutationUnknown = true;
     let operation;
-    const remember = () => {
-      if (!operation) return;
-      if (!evidence.ids.operation_ids.includes(operation.operation_id)) evidence.ids.operation_ids.push(operation.operation_id);
-      if (operation.source_id) evidence.ids.source_id = operation.source_id;
-      for (const id of operation.result?.event_ids ?? []) {
-        if (!evidence.ids.event_ids.includes(id)) evidence.ids.event_ids.push(id);
-      }
-    };
     try { operation = await post(); } catch (error) {
       if (error.outcome !== "unknown") {
         mutationUnknown = false;
+        await record(`${stage}.rejected`);
         throw error;
       }
+      await record(`${stage}.unknown`);
     }
-    remember();
+    remember(operation);
+    if (operation) {
+      mutationUnknown = !terminal(operation);
+      await record(`${stage}.receipt`);
+    }
     while (!operation || !terminal(operation)) {
       requireTrue(remaining() > 0);
       await delay(Math.min(pollIntervalMs, remaining()));
-      try { operation = await client.getOperationByKey(evidence.ids.user_id, key, options()); remember(); }
+      try {
+        operation = await client.getOperationByKey(evidence.ids.user_id, key, options());
+        remember(operation);
+        mutationUnknown = !terminal(operation);
+        await record(`${stage}.receipt`);
+      }
       catch (error) {
         // Receipt lookup is read-only; neither 404 nor a temporary error permits a POST replay.
+        if (checkpointFailed) throw error;
         if (![null, 404, 429, 500, 502, 503, 504].includes(error.status)) throw error;
       }
     }
@@ -70,6 +96,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
       ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname))) && !url.username && !url.password &&
       !url.search && !url.hash && url.pathname === "/");
     requireTrue(typeof input.token === "string" && input.token.trim().length > 0);
+    requireTrue(typeof checkpoint === "function");
     const budget = input.deadline_ms ?? 360_000;
     requireTrue(Number.isSafeInteger(budget) && budget >= 1000 && budget <= 900_000);
     origin = url.origin; token = input.token; deadline = Date.now() + budget;
@@ -77,12 +104,16 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     const entry = resolve(sdkEntry);
     const manifest = JSON.parse(await readFile(resolve(dirname(entry), "../package.json"), "utf8"));
     requireTrue(manifest.name === "@jianify/memoia" && manifest.version === "0.2.4");
-    const { MemoiaClient } = await import(pathToFileURL(entry).href);
+    const sdk = await import(pathToFileURL(entry).href);
+    const { MemoiaClient } = sdk;
+    MemoiaError = sdk.MemoiaError;
+    requireTrue(typeof MemoiaError === "function");
     client = new MemoiaClient({ baseUrl: origin, apiKey: token, fetch: transport,
       maxAttempts: 1, readTimeoutMs: 15_000, writeTimeoutMs: 90_000 });
     evidence.checks.sdk_version = true;
     evidence.ids = { user_id: randomUUID(), external_id: randomUUID(), import_key: randomUUID(),
-      partial_retract_key: randomUUID(), retract_key: randomUUID(), operation_ids: [], event_ids: [] };
+      partial_retract_key: randomUUID(), retract_key: randomUUID(), late_import_key: randomUUID(), late_external_id: randomUUID(),
+      operation_ids: [], source_ids: [], event_ids: [], profile_ids: [] };
     const uid = evidence.ids.user_id;
     const profilePath = `/api/v2/users/${uid}/profiles`;
     for (const credential of [null, `invalid-${randomUUID()}`]) {
@@ -101,7 +132,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
         { message_id: "name", role: "user", content: "My real name is Renata Calder. Please remember my name.", occurred_at: occurredAt },
         { message_id: "food", role: "user", content: "My favourite food is lemon risotto, and it has been my favourite for years.", occurred_at: occurredAt },
       ] };
-    const imported = await complete(body.idempotency_key, () => client.importSource(uid, body, options()));
+    const imported = await complete("first_import", body.idempotency_key, () => client.importSource(uid, body, options()));
     evidence.ids.source_id = imported.source_id;
     evidence.ids.import_operation_id = imported.operation_id;
     evidence.checks.first_import = true;
@@ -142,14 +173,18 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     evidence.counts.events_before_replay = eventsBefore.length;
     // Deliberate replay is allowed only after this exact import has confirmed completion.
     // Its own lost acknowledgement remains unknown: never send a third POST or clean it away.
+    await record("operation_replay.before", true);
     mutationUnknown = true;
     let replayed;
     try { replayed = await client.importSource(uid, body, options()); }
     catch (error) {
       if (error.outcome !== "unknown") mutationUnknown = false;
+      await record(mutationUnknown ? "operation_replay.unknown" : "operation_replay.rejected");
       throw error;
     }
+    remember(replayed);
     if (terminal(replayed)) mutationUnknown = false;
+    await record("operation_replay.receipt");
     requireTrue(replayed.status === "completed" && same(replayed, imported));
     const sourcesAfter = await client.listSources(uid, { ...options(), limit: 100 });
     const profilesAfter = await client.getProfiles(uid, options());
@@ -166,7 +201,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     evidence.checks.operation_replay = true;
     const withdrawn = new Set(stored.evidence.filter((f) =>
       f.support_groups.every((group) => group.includes("name"))).map((f) => f.fact_id));
-    const partial = await complete(evidence.ids.partial_retract_key, () => client.retractMessages(uid, imported.source_id,
+    const partial = await complete("partial_retract", evidence.ids.partial_retract_key, () => client.retractMessages(uid, imported.source_id,
       { idempotency_key: evidence.ids.partial_retract_key, message_ids: ["name"] }, options()));
     evidence.ids.partial_operation_id = partial.operation_id;
     const remainingSource = await client.getSource(uid, imported.source_id, options());
@@ -179,7 +214,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     requireTrue(historyProfiles(remainingHistory).every((p) => p.fact_ids.every((id) => !withdrawn.has(id))));
     evidence.counts.profiles_after_partial = remainingProfiles.profiles.length;
     evidence.checks.partial_retract = true;
-    const retracted = await complete(evidence.ids.retract_key, () => client.retractMessages(uid, imported.source_id,
+    const retracted = await complete("retract", evidence.ids.retract_key, () => client.retractMessages(uid, imported.source_id,
       { idempotency_key: evidence.ids.retract_key, message_ids: ["food"] }, options()));
     evidence.ids.retract_operation_id = retracted.operation_id;
     const finalSource = await client.getSource(uid, imported.source_id, options());
@@ -194,38 +229,95 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     evidence.counts.history_profiles_after = historyProfiles(finalHistory).length;
     evidence.counts.events_after = finalSearch.events.length;
     evidence.checks.profile_history = true;
+    const forget = async (check, receiptId) => {
+      // 每次 DELETE 的边界先登记；未知回执不自动重发，也不退回普通删除掩盖失败。
+      forgetStarted = true;
+      await record(`${check}.before`, true);
+      mutationUnknown = true;
+      let receipt;
+      try { receipt = await client.forgetUser(uid, options()); }
+      catch (error) {
+        if (error instanceof MemoiaError && error.outcome === "rejected") mutationUnknown = false;
+        await record(mutationUnknown ? `${check}.unknown` : `${check}.rejected`);
+        throw error;
+      }
+      requireTrue(receipt?.user_id === uid && receipt.forgotten === true && Object.keys(receipt).length === 2);
+      evidence.ids[receiptId] = receipt.user_id;
+      mutationUnknown = false;
+      evidence.checks[check] = true;
+      await record(`${check}.receipt`);
+    };
+    await forget("forget_user", "forget_user_id");
+    // 仅首次严格提交回执确认后，明确重复同一 UUID 的遗忘，验证幂等契约。
+    await forget("forget_repeat", "forget_repeat_user_id");
+    await record("late_import.before", true);
+    mutationUnknown = true;
+    try {
+      const late = await client.importSource(uid, { idempotency_key: evidence.ids.late_import_key,
+        external_id: evidence.ids.late_external_id, metadata: { sdk_probe: true }, messages: [
+          { message_id: "late", role: "user", content: "This is a late write from the forgotten probe user.", occurred_at: occurredAt },
+        ] }, options());
+      // 意外接纳同样保留全部已知身份，不能清理后把迟到写入误报为已拒绝。
+      remember(late);
+      evidence.ids.late_operation_id = late.operation_id;
+      if (late.source_id) evidence.ids.late_source_id = late.source_id;
+      mutationUnknown = !terminal(late);
+      await record("late_import.receipt");
+      requireTrue(false);
+    } catch (error) {
+      if (!(error instanceof MemoiaError) || error.outcome !== "rejected") {
+        if (mutationUnknown && !checkpointFailed) await record("late_import.unknown");
+        throw error;
+      }
+      mutationUnknown = false;
+      const forgotten = error.status === 410 && error.code === "user_forgotten" && error.retryable === false;
+      evidence.checks.late_import_rejected = forgotten;
+      await record("late_import.rejected");
+      requireTrue(forgotten);
+    }
   } catch {
     // No exception text: SDK/provider/validation failures may contain protected values.
   } finally {
-    evidence.outcome_unknown = mutationUnknown;
-    if (ownedUser && !mutationUnknown) {
+    if (ownedUser && !mutationUnknown && !checkpointFailed) {
       const path = `/api/v1/users/${evidence.ids.user_id}`;
       // Cleanup has its own small read-back budget, never another mutation replay.
       try {
         const current = await raw("GET", path, token, 15_000);
         if (await absent(current)) evidence.checks.cleanup = true;
-        else {
+        else if (!forgetStarted) {
           requireTrue(current.ok);
+          await record("cleanup.before", true);
+          mutationUnknown = true;
           await raw("DELETE", path, token, 15_000).catch(() => undefined);
           evidence.checks.cleanup = await absent(await raw("GET", path, token, 15_000));
+          if (evidence.checks.cleanup) mutationUnknown = false;
         }
+        if (evidence.checks.cleanup) await record("cleanup.confirmed");
       } catch { /* Keep the owned UUID visible for explicit investigation. */ }
     }
+    evidence.outcome_unknown = mutationUnknown;
   }
-  evidence.success = Object.values(evidence.checks).every(Boolean) && !evidence.outcome_unknown;
+  evidence.success = Object.values(evidence.checks).every(Boolean) && !evidence.outcome_unknown && !checkpointFailed;
   return evidence;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   let input = "";
   let result;
+  const output = async (value) => {
+    await new Promise((resolve, reject) => process.stdout.write(`${JSON.stringify(value)}\n`, (error) => error ? reject(error) : resolve()));
+    // 普通文件使用 fsync 保证先留证据后发请求；管道只能证明本进程写入完成。
+    if (fstatSync(1).isFile()) fsyncSync(1);
+  };
+  process.stdout.on("error", () => { process.exitCode = 1; });
   try {
     for await (const chunk of process.stdin) { input += chunk; requireTrue(input.length <= 16_384); }
     requireTrue(process.argv.length === 3);
-    result = await runProbe(JSON.parse(input), process.argv[2]);
+    result = await runProbe(JSON.parse(input), process.argv[2], { checkpoint: output });
   } catch {
     result = { success: false, outcome_unknown: false, checks: { input: false }, ids: {}, counts: {} };
   }
-  process.stdout.write(`${JSON.stringify(result)}\n`);
   process.exitCode = result.success ? 0 : 1;
+  try { await output({ ...result, kind: "result" }); }
+  catch { process.exitCode = 1; }
 }

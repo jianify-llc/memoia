@@ -145,25 +145,31 @@ ShellCheck/actionlint/Bash 语法仅静态验证。test_workflow.py 解析真实
 
 `v2-sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.2.4 已构建产物，不安装依赖、不构建源码、不重新打 SDK 包。stdin 是一个 JSON 对象：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 为整体等待预算，默认 360000、上限 900000；地址和 token 不放 argv 或日志。输入与输出都应保存为 root:root 0600 的受保护文件，不进入公开 artifact。
 
-探针使用随机 UUID 的专用新用户，分别验证缺失／错误 Bearer、首次导入隐式创建用户、固定幂等键和 operation ID 的结果查询、来源证据、非空画像、事件搜索、真实画像历史。只有首次导入已明确 completed 后，才进行一次显式幂等重放：以完全相同正文和 key 再 POST，必须立即返回同一已完成操作及 source/event IDs，重新读取来源、画像和专用用户的完整事件列表，确认身份和数量不增长。随后撤回一条消息验证剩余证据，撤回另一条验证画像／来源证据／历史内容／事件不再返回失效内容。历史审计行可以保留，但其失效画像内容不能返回。除这次已完成导入的明确测试外，每个 mutation 最多发送一次；仍 processing 或丢失 ACK 未确认时只按固定 key 查询，绝不重发正文、自动调用 retryOperation 或重置身份。显式重放本身若结果未知，同样失败并保留用户及已知 ID，不再 POST 或自动清理。
+探针使用随机 UUID 的专用新用户，分别验证缺失／错误 Bearer、首次导入隐式创建用户、固定幂等键和 operation ID 的结果查询、来源证据、非空画像、事件搜索、真实画像历史。只有首次导入已明确 completed 后，才进行一次显式幂等重放：以完全相同正文和 key 再 POST，必须立即返回同一已完成操作及 source/event IDs，重新读取来源、画像和专用用户的完整事件列表，确认身份和数量不增长。随后撤回一条消息验证剩余证据，撤回另一条验证画像／来源证据／历史内容／事件不再返回失效内容。历史审计行可以保留，但其失效画像内容不能返回。原有业务检查全部通过后，调用 v2 `forgetUser`，严格确认同 UUID／`forgotten: true` 提交回执；只有这次回执确认后，才明确重复一次同 UUID 的 DELETE 验证幂等。随后使用预先记录的新 key／external ID 单次尝试迟到导入，必须是 SDK `MemoiaError` 的 HTTP 410／`user_forgotten`／`retryable: false`／`outcome: rejected`，普通 404、鉴权失败或意外接纳均不通过。
 
-正常结束时通过 v1 普通删除清理本次随机用户，并读取确认不存在；这不是 v2 永久遗忘证明。账号永久遗忘须另验 `forgetUser` 的同 UUID／`forgotten: true` 回执及迟到导入的 `410 user_forgotten`。未确认的 mutation 不自动清理。stdout 仅为布尔检查、UUID／幂等键及计数的单个证据 JSON，不包含 token 或正文。任一业务检查失败、结果未知或清理无法确认，进程均退出非零；保留输出中的 user_id、import_key 和已知 operation/source ID 供核查，不通过重跑新用户替代核查。若进程被强制终止、没有输出，需从服务端操作记录和日志核查，不能宣称已经清理。
+除已确认完成的导入回放和已确认提交的遗忘重复这两项明确测试外，每个 mutation 最多发送一次。导入仍 processing 或丢失 ACK 未确认时只按固定 key 查询，绝不重发正文、自动调用 retryOperation 或重置身份；遗忘、遗忘重复或迟到导入的未知结果直接失败，不发送后续 mutation，也不自动清理。迟到导入若意外返回 operation，保留全部已知 operation/source/event/profile IDs，不因为它已 completed 或 failed 就把验收记为通过。
 
-可复用已验收的 Inspector Node 镜像执行，只读挂载脚本与已解包 SDK，凭据仍仅走 stdin。例如操作员确认下面的实际路径和 digest 后运行：
+正常路径已永久遗忘本次随机用户，最后仅通过读取确认不存在；进入遗忘阶段后绝不退回 v1 普通 DELETE 掩盖失败。遗忘前的已知失败仍可用原有 v1 普通删除清理探针用户，但不构成永久遗忘证明。CLI stdout 是逐行 JSON：每个写入前的 `kind: boundary`／`stage: *.before` 记录先保存 UUID、固定 key 和累积已知票据；收到回执后再追加 `*.receipt`、`*.rejected` 或 `*.unknown` 检查点，最后一条 `kind: result` 是最终结果。内容仅含布尔检查、UUID／幂等键、阶段和计数，不包含 token、URL 或正文。`runProbe` 的可选异步 `checkpoint` 回调默认无操作，返回对象不变；提供回调时必须等待保存完成，回调拒绝就停止后续写入，包括失败清理。
+
+真实验收应把 CLI stdout 直接追加到已创建的受保护普通文件；CLI 等待每行写完，并仅在 stdout FD 确为普通文件时执行 fsync，再越过写入边界。管道、终端或 Docker stdout 转发只能证明本进程完成流写入，不证明接收端已持久化，不用于进程退出保护验收。不要用 `>` 覆盖旧失败证据。最终验收读取最后一个 `kind: result`，不把中间 `success: false` 的 boundary 当作最终结果；只有 `*.before` 没有确认回执时，保守视为未知，不自动重放。任一业务检查失败、结果未知、检查点保存失败或清理无法确认，进程均退出非零；保留 user_id、import_key、late_import_key 和所有已知 ID 供核查，不通过重跑新用户替代核查。若进程在首个边界前退出、没有输出，需从服务端操作记录和日志核查，不能宣称已经清理。独立加载修订探针时应记录脚本 SHA 与固定 SDK 包 SHA；不把尚未进入镜像的探针修订宣称为该镜像源码的一部分。
+
+可使用本机受支持 Node，或复用已验收的 Inspector Node 镜像执行。容器必须把 stdout 重定向到单独挂载的证据普通文件，而不是依赖 Docker stdout 转发；脚本与 SDK 仍只读，凭据仅走 stdin。例如操作员确认下面的实际唯一路径和 digest 后运行：
 
 ```bash
 sudo -n sh -c '
   umask 077
+  mkdir -m 700 /opt/memoia/.deploy/v2-probe-UNIQUE
+  : > /opt/memoia/.deploy/v2-probe-UNIQUE/evidence.ndjson
   exec docker run --rm -i --read-only --user 0:0 --network host \
     --mount type=bind,source=/opt/memoia/.deploy/candidates/RUN_ID/v2-sdk-probe.mjs,target=/probe.mjs,readonly \
     --mount type=bind,source=/opt/memoia/.deploy/candidates/RUN_ID/sdk/package,target=/sdk,readonly \
-    --entrypoint node ghcr.io/jianify/memoia-inspector@sha256:已验收的镜像digest \
-    /probe.mjs /sdk/dist/index.js \
-    < /opt/memoia/.deploy/v2-probe-input.json \
-    > /opt/memoia/.deploy/v2-sdk-evidence.json
+    --mount type=bind,source=/opt/memoia/.deploy/v2-probe-UNIQUE/evidence.ndjson,target=/receipt.ndjson \
+    --entrypoint sh ghcr.io/jianify/memoia-inspector@sha256:已验收的镜像digest \
+    -c "exec node /probe.mjs /sdk/dist/index.js >> /receipt.ndjson" \
+    < /opt/memoia/.deploy/v2-probe-input.json
 '
 ```
 
-只有真实服务未使用模型 mock、实际配置启用事件 embedding 且供应商调用证据吻合时，才能把导入／搜索成功记为模型与 embedding 通过；单独 `embedding_search=true` 不证明服务启用了向量调用。脚本级测试 `node --test deploy/tests/test_v2_sdk_probe.mjs` 使用假 SDK／HTTP 边界，只验证探针自己的重放、deadline、过滤、清理和脱敏行为，不是业务验收。原 v1 SDK 探针继续保留，v2 不替代旧契约回归。
+只有真实服务未使用模型 mock、实际配置启用事件 embedding 且供应商调用证据吻合时，才能把导入／搜索成功记为模型与 embedding 通过；单独 `embedding_search=true` 不证明服务启用了向量调用。脚本级测试 `node --test deploy/tests/test_v2_sdk_probe.mjs` 使用假 SDK／本机 HTTP 边界，验证探针自己的重放、deadline、过滤、清理、脱敏、检查点拒绝停写和进程退出留证行为，不是业务验收。原 v1 SDK 探针继续保留，v2 不替代旧契约回归。
 
 2026-09-27 首次真实验收发现人工 .env 的数据根误写成 dat，备份的实际挂载检查正确阻断；已通过单独停写备份和目录维护校正，SDK 原事件仍可读。必须核验解析和运行时挂载，不能只核验模板或预建空目录；日常发布不能自动搬数据。详见 validation 记录。

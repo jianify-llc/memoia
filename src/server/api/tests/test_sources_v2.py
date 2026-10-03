@@ -405,9 +405,10 @@ event_tags: []
         data = json.loads(prompt)
         seen.append(data)
         assert data["configuration"]["language"] == "zh"
-        assert data["configuration"]["strict_mode"] is True
         if model is source.Extraction:
+            assert set(data["configuration"]) == {"language", "profile_topics", "event_tag_definitions"}
             return source.Extraction(facts=[source.ExtractedFact(content="Tokyo", topic="custom", sub_topic="city", support_groups=[["1"]])], event_tags=[])
+        assert data["configuration"]["strict_mode"] is True
         fid = data["facts"][0]["fact_id"]
         return source.Reconciliation(decisions=[source.FactDecision(fact_id=fid, include=True)],
             profiles=[source.DerivedProfile(content="Tokyo", topic="custom", sub_topic="city", fact_ids=[fid])])
@@ -418,7 +419,7 @@ event_tags: []
         assert inserted.status == "completed" and len(seen) == 2
         with pytest.raises(source.SourceError, match="strict slots"):
             source._validate_profile_slots(source.Reconciliation(decisions=[], profiles=[source.DerivedProfile(
-                content="Bad", topic="unconfigured", sub_topic="city", fact_ids=[uuid4()])]), seen[0]["configuration"])
+                content="Bad", topic="unconfigured", sub_topic="city", fact_ids=[uuid4()])]), seen[1]["configuration"])
     finally:
         with Session.begin() as session:
             session.query(Project).filter_by(project_id="__root__").update({"profile_config": old})

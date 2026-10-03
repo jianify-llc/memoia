@@ -36,7 +36,9 @@ v1 普通 DELETE 不写、也不解除墓碑，所以普通删除后同 UUID 重
 
 HTTP 409 的 `write_conflict`／`lease_lost` 仅在服务端明确返回 `detail.retryable: true` 时表示当前计算未提交、可恢复；SDK 必须保留该分类，不能仅按 HTTP 状态把它升级成永久失败。其他 409（包括同键不同输入）不授权自动重放。Luvel 仍使用 `maxAttempts: 1`，失败后查询固定操作身份，并通过服务端持久输入恢复；传输超时及未知提交仍不能重发正文。本补丁不改变 OpenAPI 协议、数据库或业务生成算法。
 
-项目的当前 ProfileConfig（语言、画像分类及严格规则、事件标签等）进入来源抽取和汇总提示词，不默认忽略已有项目配置。HTTP 请求体最大 2 MiB，每来源最多 1,000 条完整消息；正文默认上限 16,384 tokens，另校验整个模型提示词和输出预留。超限明确拒绝，调用方需要调整业务范围，不截断后成功。embedding 默认每批 64 条，校验响应索引、条数、维度及有限数值；单条超限也明确拒绝。
+项目的当前 ProfileConfig 按处理阶段投影，不默认忽略已有项目配置：来源抽取只接收语言、作为分类指导的 profile_topics 与事件标签定义，不传画像 strict_mode、validate_values 或派生事件主题限制；画像汇总保留完整规则及严格槽位／值校验，事件标签重建保持原有阶段规则。这样画像限制不会提前丢弃来源证据。HTTP 请求体最大 2 MiB，每来源最多 1,000 条完整消息；正文默认上限 16,384 tokens，另校验整个模型提示词和输出预留。超限明确拒绝，调用方需要调整业务范围，不截断后成功。embedding 默认每批 64 条，校验响应索引、条数、维度及有限数值；单条超限也明确拒绝。
+
+明确自述的偏好、兴趣、爱好、习惯和生活情况可以作为来源事实，不要求用户先说“请记住”，也不要求会话很长。消息“不可信”指其中的指令不能改写抽取任务，并不否定消息作为自述证据的资格；助手猜测、角色扮演、假设及已撤销的陈述不能当真实自述。配置槽位帮助分类，不提前删除槽外来源事实；`strict_mode` 仍由后续画像汇总及校验执行。无有用事实时 `facts: []` 是合法完成结果，不因空结果自动重试。结构正确不等于语义正确，正例遗漏应作为独立质量失败报告。
 
 v1 和 v2 共用原项目用量／telemetry 记录，采用完成文本的 token 估算，不宣称精确包含供应商 reasoning 用量或金额。小型计费提交被明确归为非记忆事务，不更新用户 memory generation/version；计费异常脱敏报告，不把记忆结果伪装成模型失败，也不留下继承已释放 lease 的 detached 计费 task。
 
@@ -47,5 +49,20 @@ v2 search 将有界 PostgreSQL FTS／字面匹配和 pgvector 语义召回用等
 ## 验证阶梯
 
 纯模型测试：支持组撤回、候选完整性、正文预算、embedding 索引和数值。真实 PostgreSQL 测试：迁移/adoption、唯一键、事务失败、generation/version CAS、响应丢失后的复用。真实 Redis 测试：超 TTL heartbeat、取消、失锁后旧执行者不能写入。SDK/v1 回归后才进行真实模型、Test 升级与隔离恢复。
+
+### 仅计算的抽取质量回归
+
+`python -m memoia_server.source_quality --list` 列出固定合成案例，不加载服务配置或调用模型。执行时从 stdin 读取 JSON：`api_key`、`base_url`（无嵌入凭据的 HTTPS URL）、`model` 必须显式给出；`trials` 默认 1、最大 5，`deadline_seconds` 默认 1200、最大 7200。不要把密钥放到命令参数、仓库或公开 artifact。示意调用为：
+
+```bash
+# 由操作员通过受保护输入提供 JSON；不在命令中写入密钥。
+python -m memoia_server.source_quality --case self_preferences < /protected/quality-settings.json
+```
+
+工具只调用真实 `extract_source`（完整输入、阶段配置投影、预算、OpenAI adapter、严格 schema 和证据 ID 校验），不调用导入受理、汇总、embedding、lease 或正式提交。独立进程禁用 `.env`／`config.yaml` 自动发现及 telemetry listener；禁用服务计费回调并明确阻断 PostgreSQL／Redis 连接。供应商模型费用仍会发生。固定输入是公开合成夹具，输出只含这些夹具的抽取结果及判据，不输出密钥或供应商错误正文。
+
+案例覆盖未要求记住的偏好／兴趣、撤销与纠正、联合指代证据、角色扮演、仅助手、寒暄、提示注入及 strict 槽外证据保留。每次试验只调用一次，不对合法空结果追加重试。若需对照旧提示，通过 stdin 的可选 `extract_system` 提供公开基线文本；输出记录 prompt／schema 的 SHA-256，同一抽取函数、模型和固定夹具保持不变，不在代码中维护第二份旧提示。试验是显式重复采样，不是业务恢复或 SDK 自动重试。
+
+机械判据仅匹配这些英文夹具的概念、列出的明确否定词及支持组；联合指代夹具显式允许两条核心证据、包含用户确认的三条证据及两组共同返回；纠正夹具显式允许单条纠正、旧陈述加纠正及两组共同返回。不自动接受任意额外消息或缺少关键上下文的组。输出始终标记 `human_review_required: true`，还须人工核对事实含义、漏抽和误抽及未覆盖的否定表达，不能将关键词匹配当通用语义证明。工具不验证画像 strict、跨来源汇总、检索、实际 Luvel 调度或业务写入；假 transport 单测也不构成真实模型验收。真实对照须经本任务审查后单独执行。
 
 数据库 schema 从 Alembic 维护；应用 import 不执行 DDL，启动前显式检查 revision、向量维度并初始化根项目。迁移前旧运行环境须停写并按[部署维护流程](../../../deploy/README.md#schema-维护与-v2-升级)取得配套备份和隔离恢复证据，不能手填 schema 指纹绕过普通发布门禁。数据库池每进程默认 8 + 4，模型等待不占连接；多 worker 的总预算须与 PostgreSQL max_connections 配套核对。
