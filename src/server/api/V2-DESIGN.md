@@ -6,6 +6,10 @@ Luvel 决定消息范围；服务只处理一个完整有界来源，不截断�
 
 同一用户所有生成、修改、撤回使用 Redis 的 owner lease。续租使用 compare-and-expire，释放使用 compare-and-delete。模型等待不占数据库连接。新 owner 在数据库登记 generation；提交同时比较 generation 和读快照的 version，CAS 失败整个事务回滚，禁止仅重试 INSERT。
 
+v1 `wait_process=false` 只确认后台任务已被接受，不确认记忆完成。BackgroundTasks 必须清除继承的请求 lease ContextVar，独立取得同一用户／项目的真实 UserLease 后才把 idle buffer 标为 processing；请求 owner 尚未退出或 v2 正在处理时，在本次处理时间预算内等待，超时／等待取消保留 idle 状态。runner 与处理核心复用这个真实 owner，不伪造 lease、不另建队列锁身份，也不维护重复 heartbeat；generation 仍由 import_source 在计算快照前登记。续租、取消及 compare-and-delete 释放均归 UserLease；compare-and-pop 校验同一 owner，失锁停止获取后续 batch，已进行的计算仍由 SQL fence 拒绝过期提交。
+
+后台拒绝／异常不能记为完成；取消模型等待也不能推断供应商未执行或记忆未提交。在途取消保留 processing 回执及未完成 buffer，按既有固定操作身份查询／恢复，不盲目重新写入。后台 Queue 与 SQL 不是新的事务 Outbox，本次不增加跨进程任务平台或承诺进程退出后后台工作自行恢复；真实验收须用独立用户只发送一次异步 flush，然后只读轮询已接受来源、buffer、事件与画像，不能用同步探针代替异步交接验收。
+
 注册、快照、正式提交与永久遗忘使用同一项目／UUID 的 PostgreSQL `pg_advisory_xact_lock`，稳定 SHA-256 的长度安全 JSON 键归一 UUID；不使用 Python 随机 hash 或 session lock。lease 关联的 SQL Session 在 after_begin 通过已开始事务的 Connection 先取得锁，避免旧 v1 行锁与遗忘形成反向锁序。锁只属于短 SQL 事务，commit／rollback／close 结束后释放，不能跨模型 await；非记忆计费事务明确跳过。Redis 负责协调长计算，SQL 锁与 generation/version 负责所有正式数据提交的串行正确性，不再维护第二个长期锁 owner。
 
 导入先登记可查询的 processing 操作，随后计算。来源、事实、证据、派生结果和 completed 回执在同一个事务提交。调用响应丢失可以查询原结果；模型失败且已确认事务未提交可以用同一个键恢复。取消或数据库结果未知时不写 failed。来源和操作唯一约束是最终去重依据。
@@ -48,7 +52,7 @@ v2 search 将有界 PostgreSQL FTS／字面匹配和 pgvector 语义召回用等
 
 ## 验证阶梯
 
-纯模型测试：支持组撤回、候选完整性、正文预算、embedding 索引和数值。真实 PostgreSQL 测试：迁移/adoption、唯一键、事务失败、generation/version CAS、响应丢失后的复用。真实 Redis 测试：超 TTL heartbeat、取消、失锁后旧执行者不能写入。SDK/v1 回归后才进行真实模型、Test 升级与隔离恢复。
+纯模型测试：支持组撤回、候选完整性、正文预算、embedding 索引和数值。真实 PostgreSQL 测试：迁移/adoption、唯一键、事务失败、generation/version CAS、响应丢失后的复用。真实 Redis 测试：超 TTL heartbeat、取消、失锁后旧执行者不能写入。真实 ASGI 反例覆盖请求 owner 先退出再执行 v1 异步后台的合法调度顺序，以及后台／v2 竞争和持久状态；这仍使用合成模型结果，不代替真实模型验收。SDK/v1 回归后才进行真实模型、Test 升级与隔离恢复。
 
 ### 仅计算的抽取质量回归
 

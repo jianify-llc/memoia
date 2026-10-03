@@ -1,34 +1,13 @@
 # Modified for Memoia: relocated package and renewable background user leases.
-import uuid
 import asyncio
-import traceback
-from contextlib import suppress
-from sqlalchemy import func
-from pydantic import BaseModel
-from ..env import CONFIG, BufferStatus, TRACE_LOG
-from ..models.utils import Promise
-from ..models.response import CODE, ChatModalResponse, IdsData, UUID
-from ..models.database import BufferZone, GeneralBlob
-from ..models.blob import BlobType, Blob
+from contextlib import asynccontextmanager
+from ..env import BufferStatus, TRACE_LOG
+from ..models.database import BufferZone
+from ..models.blob import BlobType
 from ..connectors import Session, PROJECT_ID, get_redis_client
 from .modal import BLOBS_PROCESS
 from .buffer import flush_buffer_by_ids
-
-REDIS_LUA_CHECK_AND_DELETE_LOCK = """
-if redis.call("get", KEYS[1]) == ARGV[1] then
-    return redis.call("del", KEYS[1])
-else
-    return 0
-end
-"""
-
-REDIS_LUA_CHECK_AND_EXPIRE_LOCK = """
-if redis.call("get", KEYS[1]) == ARGV[1] then
-    return redis.call("pexpire", KEYS[1], ARGV[2])
-else
-    return 0
-end
-"""
+from .user_lease import CURRENT_LEASE, UserLease, LeaseUnavailable, LeaseLost
 
 REDIS_LUA_CHECK_AND_POP_BATCH = """
 if redis.call("get", KEYS[1]) ~= ARGV[1] then
@@ -54,15 +33,54 @@ def unpack_ids_from_str(ids_str: str) -> list[str]:
     return [i.strip() for i in ids_str.split("::") if i.strip()]
 
 
+@asynccontextmanager
+async def _background_user_lease(user_id: str, project_id: str, deadline: float):
+    # BackgroundTasks 复制请求 ContextVar，但请求 owner 不属于后台执行者。
+    context_token = CURRENT_LEASE.set(None)
+    try:
+        while True:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise LeaseUnavailable()
+            lease = UserLease(str(user_id), project_id)
+            try:
+                await lease.__aenter__()
+                break
+            except LeaseUnavailable:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise
+                await asyncio.sleep(min(0.1, remaining))
+        try:
+            yield lease
+        finally:
+            await lease.__aexit__(None, None, None)
+    finally:
+        CURRENT_LEASE.reset(context_token)
+
+
 async def flush_buffer_by_ids_in_background(
-    user_id: str, project_id: str, blob_type: BlobType, buffer_ids: list[str]
+    user_id: str, project_id: str, blob_type: BlobType, buffer_ids: list[str],
+    *, max_processing_time_s: float = 60 * 15,
 ) -> None:
     if not len(buffer_ids):
         return
     if blob_type not in BLOBS_PROCESS:
         return
+    if max_processing_time_s <= 0:
+        raise ValueError("Background processing budget must be positive")
 
-    # 1. mark buffer as processing
+    deadline = asyncio.get_running_loop().time() + max_processing_time_s
+    try:
+        async with _background_user_lease(user_id, project_id, deadline):
+            await _enqueue_and_flush(user_id, project_id, blob_type, buffer_ids, deadline)
+    except Exception as error:
+        TRACE_LOG.error(project_id, user_id,
+                        f"[background] Flush stopped ({type(error).__name__}); not completed")
+        raise
+
+
+async def _enqueue_and_flush(user_id, project_id, blob_type, buffer_ids, deadline):
+    # 取得独立 owner 后才改状态；等待超时或取消不会把 idle 标成 processing。
     with Session() as session:
         buffer_blob_data = (
             session.query(BufferZone.id)
@@ -94,25 +112,22 @@ async def flush_buffer_by_ids_in_background(
     )
     buffer_ids_str = pack_ids_to_str(actual_buffer_ids)
 
-    try:
-        async with get_redis_client() as redis_client:
-            await redis_client.rpush(buffer_queue_key, buffer_ids_str)
+    async with get_redis_client() as redis_client:
+        await redis_client.rpush(buffer_queue_key, buffer_ids_str)
 
-            queue_size = await redis_client.llen(buffer_queue_key)
+        queue_size = await redis_client.llen(buffer_queue_key)
 
-            TRACE_LOG.info(
-                project_id,
-                user_id,
-                f"[background] Enqueued {len(actual_buffer_ids)} buffer IDs to queue (queue size: {queue_size})",
-            )
-
-        await flush_buffer_background_running(user_id, project_id, blob_type)
-    except Exception as e:
-        TRACE_LOG.error(
+        TRACE_LOG.info(
             project_id,
             user_id,
-            f"[background] Error enqueue buffer ids: {e}: {traceback.format_exc()}",
+            f"[background] Enqueued {len(actual_buffer_ids)} buffer IDs to queue (queue size: {queue_size})",
         )
+
+    # 核心 import_source 在计算前登记 generation；这里不另建执行代次。
+    await flush_buffer_background_running(
+        user_id, project_id, blob_type,
+        max_processing_time_s=max(0, deadline - asyncio.get_running_loop().time()),
+    )
 
 
 async def flush_buffer_background_running(
@@ -125,215 +140,76 @@ async def flush_buffer_background_running(
     max_processing_time_s: float = 60 * 15,  # Maximum 15 minutes total processing time
     max_consecutive_errors=5,  # Stop after 5 consecutive errors
 ):
-    user_key = get_user_lock_key(
-        user_id, project_id, f"flush_buffer_background_{blob_type}"
-    )
+    if process_interval_s <= 0:
+        raise ValueError("User lease TTL must be positive")
+    try:
+        # 后台入口复用真实 owner；直调 runner 也经过同一个 UserLease 原语。
+        async with UserLease(str(user_id), project_id, ttl=process_interval_s) as lease:
+            await _flush_queued_batches(user_id, project_id, blob_type, lease,
+                                        asleep_waiting_s, max_iterations,
+                                        max_processing_time_s, max_consecutive_errors)
+    except LeaseUnavailable:
+        TRACE_LOG.debug(project_id, user_id, "[background] Another user owner is active")
+
+
+async def _flush_queued_batches(user_id, project_id, blob_type, lease,
+                                asleep_waiting_s, max_iterations,
+                                max_processing_time_s, max_consecutive_errors):
     buffer_queue_key = get_user_buffer_queue_key(
         user_id, project_id, f"flush_buffer_background_{blob_type}"
     )
+    start_time = asyncio.get_running_loop().time()
+    encountered_error = False
+    consecutive_errors = 0
+    for iteration in range(max_iterations):
+        lease.assert_owned()
+        if asyncio.get_running_loop().time() - start_time > max_processing_time_s:
+            raise TimeoutError("Background flush processing budget exhausted")
 
-    __lock_value = str(uuid.uuid4())
-    start_time = asyncio.get_event_loop().time()
-    if process_interval_s <= 0:
-        raise ValueError("User lease TTL must be positive")
-    lease_ttl_ms = max(1, int(process_interval_s * 1000))
-    renew_interval_s = lease_ttl_ms / 3000
-    lease_lost = asyncio.Event()
-
-    async with get_redis_client() as redis_client:
-        acquired = await redis_client.set(
-            user_key, __lock_value, nx=True, px=lease_ttl_ms
-        )
-        if not acquired:
-            TRACE_LOG.debug(
-                project_id,
-                user_id,
-                f"[background] Lock already acquired",
+        # 原子校验 owner 并弹出任务，禁止失锁后的旧执行者消费新 owner 的队列。
+        async with get_redis_client() as redis_client:
+            batch = await redis_client.eval(
+                REDIS_LUA_CHECK_AND_POP_BATCH, 2, lease.key, buffer_queue_key, lease.owner,
             )
-            return
+            if batch[0] != 1:
+                lease.lost.set()
+                raise LeaseLost()
+            if batch[1] is None:
+                break
+            current_queue_size = await redis_client.llen(buffer_queue_key)
 
-    async def heartbeat():
-        # 独立于整个 batch 的模型等待；失锁或无法确认续租时保守停止后续取任务。
+        TRACE_LOG.info(project_id, user_id,
+                       f"[background]({iteration}/{max_iterations}) Processing buffer (left queue size: {current_queue_size})")
+        buffer_ids = unpack_ids_from_str(batch[1])
+        if not buffer_ids:
+            continue
         try:
-            while True:
-                await asyncio.sleep(renew_interval_s)
-                async with asyncio.timeout(renew_interval_s):
-                    async with get_redis_client() as redis_client:
-                        renewed = await redis_client.eval(
-                            REDIS_LUA_CHECK_AND_EXPIRE_LOCK,
-                            1,
-                            user_key,
-                            __lock_value,
-                            lease_ttl_ms,
-                        )
-                if renewed != 1:
-                    lease_lost.set()
-                    TRACE_LOG.warning(project_id, user_id, "[background] User lease lost")
-                    return
-        except Exception as e:
-            lease_lost.set()
-            TRACE_LOG.error(
-                project_id, user_id, f"[background] Cannot confirm user lease renewal: {e}"
+            # 不强行取消在途模型等待：取消不证明供应商停止，不能据此重放。
+            result = await flush_buffer_by_ids(
+                user_id, project_id, blob_type, buffer_ids,
+                select_status=BufferStatus.processing,
             )
-
-    heartbeat_task = asyncio.create_task(heartbeat())
-    from .user_lease import UserLease, CURRENT_LEASE
-    lease = UserLease(user_id, project_id)
-    lease.owner = __lock_value
-    lease.lost = lease_lost
-    context_token = CURRENT_LEASE.set(lease)
-    try:
-        iteration_count = 0
-        consecutive_errors = 0
-
-        while iteration_count < max_iterations:
-            if lease_lost.is_set():
-                break
-            current_time = asyncio.get_event_loop().time()
-
-            # Check if we've exceeded maximum processing time
-            if current_time - start_time > max_processing_time_s:
-                TRACE_LOG.warning(
-                    project_id,
-                    user_id,
-                    f"[background] Maximum processing time ({max_processing_time_s}s) exceeded",
-                )
-                break
-
-            # 原子校验 owner 并弹出任务，禁止失锁后的旧执行者消费新 owner 的队列。
-            async with get_redis_client() as redis_client:
-                batch = await redis_client.eval(
-                    REDIS_LUA_CHECK_AND_POP_BATCH,
-                    2,
-                    user_key,
-                    buffer_queue_key,
-                    __lock_value,
-                )
-                if batch[0] != 1:
-                    lease_lost.set()
-                    TRACE_LOG.debug(
-                        project_id,
-                        user_id,
-                        "[background] Lock expired",
-                    )
-                    break
-
-                buffer_ids_str = batch[1]
-                if buffer_ids_str is None:  # Queue is empty
-                    TRACE_LOG.debug(
-                        project_id,
-                        user_id,
-                        "[background] Queue empty",
-                    )
-                    break
-
-                current_queue_size = await redis_client.llen(buffer_queue_key)
-
-            TRACE_LOG.info(
-                project_id,
-                user_id,
-                f"[background]({iteration_count}/{max_iterations}) Processing buffer (left queue size: {current_queue_size})",
-            )
-
-            buffer_ids = unpack_ids_from_str(buffer_ids_str or "")
-            if not buffer_ids:
-                continue
-
-            try:
-                # 不强行取消在途处理：取消等待不代表外部模型已停止，不能盲目重放。
-                processing_start = asyncio.get_event_loop().time()
-
-                p = await flush_buffer_by_ids(
-                    user_id,
-                    project_id,
-                    blob_type,
-                    buffer_ids,
-                    select_status=BufferStatus.processing,
-                )
-
-                processing_time = asyncio.get_event_loop().time() - processing_start
-
-                if not p.ok():
-                    consecutive_errors += 1
-                    TRACE_LOG.error(
-                        project_id,
-                        user_id,
-                        f"[background] Error flushing buffer by ids: {p.msg()}",
-                    )
-
-                    # Stop if too many consecutive errors
-                    if consecutive_errors >= max_consecutive_errors:
-                        TRACE_LOG.error(
-                            project_id,
-                            user_id,
-                            f"[background] Too many consecutive errors ({consecutive_errors}), stopping",
-                        )
-                        break
-                else:
-                    consecutive_errors = 0  # Reset error counter on success
-                    TRACE_LOG.debug(
-                        project_id,
-                        user_id,
-                        f"[background] Processed batch in {processing_time:.2f}s",
-                    )
-
-            except Exception as e:
+        except LeaseLost:
+            raise
+        except Exception as error:
+            encountered_error = True
+            consecutive_errors += 1
+            TRACE_LOG.error(project_id, user_id,
+                            f"[background] Batch failed ({type(error).__name__}); not completed")
+        else:
+            if result.ok():
+                consecutive_errors = 0
+            else:
+                encountered_error = True
                 consecutive_errors += 1
-                TRACE_LOG.error(
-                    project_id,
-                    user_id,
-                    f"[background] Unknown Error flushing buffer by ids: {e}\n{traceback.format_exc()}",
-                )
+                TRACE_LOG.error(project_id, user_id,
+                                "[background] Buffer core rejected this batch; not completed")
+        if consecutive_errors >= max_consecutive_errors:
+            break
+        await asyncio.sleep(asleep_waiting_s)
 
-                # Stop if too many consecutive errors
-                if consecutive_errors >= max_consecutive_errors:
-                    TRACE_LOG.error(
-                        project_id,
-                        user_id,
-                        f"[background] Too many consecutive errors ({consecutive_errors}), stopping",
-                    )
-                    break
-
-            # Sleep between iterations to prevent overwhelming the system
-            await asyncio.sleep(asleep_waiting_s)
-            iteration_count += 1
-
-        total_processing_time = asyncio.get_event_loop().time() - start_time
-        TRACE_LOG.info(
-            project_id,
-            user_id,
-            f"[background] Completed processing. "
-            f"Iterations: {iteration_count}, Time: {total_processing_time:.2f}s, "
-            f"Final consecutive errors: {consecutive_errors}",
-        )
-
-    finally:
-        # 释放前先停止并收回 heartbeat；异常、取消和正常退出共用此清理路径。
-        heartbeat_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await heartbeat_task
-        CURRENT_LEASE.reset(context_token)
-        lease_lost.set()
-        try:
-            async with get_redis_client() as redis_client:
-                result = await redis_client.eval(
-                    REDIS_LUA_CHECK_AND_DELETE_LOCK, 1, user_key, __lock_value
-                )
-                if result == 1:
-                    TRACE_LOG.debug(
-                        project_id,
-                        user_id,
-                        f"[background] Successfully released lock",
-                    )
-                else:
-                    TRACE_LOG.warning(
-                        project_id,
-                        user_id,
-                        f"[background] Lock was already expired/released",
-                    )
-        except Exception as e:
-            TRACE_LOG.error(
-                project_id,
-                user_id,
-                f"[background] Failed to release lock: {e}",
-            )
+    lease.assert_owned()
+    if encountered_error:
+        raise RuntimeError("Background flush contains uncompleted batches")
+    TRACE_LOG.info(project_id, user_id,
+                   f"[background] Finished draining this run in {asyncio.get_running_loop().time() - start_time:.2f}s")
