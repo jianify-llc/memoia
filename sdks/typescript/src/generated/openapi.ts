@@ -1,4 +1,21 @@
 export interface paths {
+    "/api/v2/users/{user_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Forget User */
+        delete: operations["forgetUser"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/users/{user_id}/sources": {
         parameters: {
             query?: never;
@@ -293,6 +310,19 @@ export interface components {
             sub_topic: string;
             /** Support Groups */
             support_groups: string[][];
+        };
+        /** ForgottenUser */
+        ForgottenUser: {
+            /**
+             * User Id
+             * Format: uuid
+             */
+            user_id: string;
+            /**
+             * Forgotten
+             * @constant
+             */
+            forgotten: true;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -618,6 +648,37 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    forgetUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ForgottenUser"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     listSources: {
         parameters: {
             query?: {

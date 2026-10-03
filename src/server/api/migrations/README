@@ -10,6 +10,12 @@ memoia_server.schema.check_schema() 校验 revision 和 embedding 维度、初�
   0002_sources_v2       用户 generation/version、来源、证据事实及持久操作回执。
   0003_profile_history  画像版本、差异及来源关联。
   0004_key_scopes_search 撤销/到期/权限 key 与 PostgreSQL 词法检索索引。
+  0005_user_tombstones  永久遗忘的项目／用户身份，仅保存 UUID 与遗忘时间。
+
+0005 是前向迁移，不改写既有记忆；墓碑仅外键关联 projects，不关联 users，用户数据
+级联删除不能解除遗忘。`DELETE /api/v2/users/{user_id}` 原子写墓碑并清理用户数据，重复
+执行保持成功；旧 v1 DELETE 不写墓碑，普通删除后按同 UUID 重建仍可用。明确永久遗忘后，
+v1 create 和 v2 import/retry 均拒绝复建。墓碑不能靠降级、恢复旧 API 或删除用户行清除。
 
 0001 不重建、清空或改写既有表。仅当 v1 表集合完整，字段/类型/非空/now() 默认值、
 主键、外键及关联 schema/级联行为和必需索引均符合冻结契约时接纳；部分表、漂移列、

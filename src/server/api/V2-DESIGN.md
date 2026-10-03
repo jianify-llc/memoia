@@ -6,6 +6,8 @@ Luvel 决定消息范围；服务只处理一个完整有界来源，不截断�
 
 同一用户所有生成、修改、撤回使用 Redis 的 owner lease。续租使用 compare-and-expire，释放使用 compare-and-delete。模型等待不占数据库连接。新 owner 在数据库登记 generation；提交同时比较 generation 和读快照的 version，CAS 失败整个事务回滚，禁止仅重试 INSERT。
 
+注册、快照、正式提交与永久遗忘使用同一项目／UUID 的 PostgreSQL `pg_advisory_xact_lock`，稳定 SHA-256 的长度安全 JSON 键归一 UUID；不使用 Python 随机 hash 或 session lock。lease 关联的 SQL Session 在 after_begin 通过已开始事务的 Connection 先取得锁，避免旧 v1 行锁与遗忘形成反向锁序。锁只属于短 SQL 事务，commit／rollback／close 结束后释放，不能跨模型 await；非记忆计费事务明确跳过。Redis 负责协调长计算，SQL 锁与 generation/version 负责所有正式数据提交的串行正确性，不再维护第二个长期锁 owner。
+
 导入先登记可查询的 processing 操作，随后计算。来源、事实、证据、派生结果和 completed 回执在同一个事务提交。调用响应丢失可以查询原结果；模型失败且已确认事务未提交可以用同一个键恢复。取消或数据库结果未知时不写 failed。来源和操作唯一约束是最终去重依据。
 
 ## 证据与删除
@@ -22,9 +24,13 @@ Luvel 决定消息范围；服务只处理一个完整有界来源，不截断�
 
 已鉴权的 `DELETE /api/v1/users/{user_id}` 是幂等删除：当前项目中用户不存在（包括从未导入或已经删除）时，同样返回 HTTP 200、`errno: 0`、`data: null`。已有用户仍在原用户 lease 和数据库 generation/version fence 内原子级联删除；鉴权失败仍拒绝请求。这个成功响应只确认当前删除操作，不是永久身份墓碑，也不证明独立的迟到导入请求已取消；调用方仍须保留未确认写入的核查与补偿边界。
 
+永久遗忘必须显式调用 `DELETE /api/v2/users/{user_id}`，返回严格 `{user_id, forgotten: true}`。同一短事务中先写项目／UUID 墓碑，再级联清理用户、原始来源、事实、操作和派生记忆；墓碑无 User 外键，不能随用户数据消失。重复遗忘（包括从未创建的用户）稳定成功且不改首次遗忘时间。这个纯数据库操作是长计算 lease 的明确例外：不等待 Redis/model，而是用相同 SQL 锁线性化；已开始计算的旧执行者在快照或正式提交遇到墓碑，回滚并返回 HTTP 410 `user_forgotten`，`retryable: false`。取消发生在事务提交前则全部回滚；响应或 COMMIT 确认丢失后可显式再次遗忘相同 UUID，不能凭单次 GET404 推断遗忘成功。
+
+v1 普通 DELETE 不写、也不解除墓碑，所以普通删除后同 UUID 重建仍允许；只有显式 v2 永久遗忘后，v1 create 也拒绝该项目／UUID（旧 envelope `errno: 403`），v2 import／retry 同样拒绝。跨项目相同 UUID 不受影响。墓碑不保存正文，只随所属项目删除才级联；没有取消永久遗忘或恢复旧 UUID 的公开入口。备份恢复不能用遗忘前快照覆盖当前业务库、撤销已完成的遗忘。
+
 ## 协议、安全与检索
 
-协议真相源为 FastAPI 路由和 Pydantic 模型；`export-openapi.py openapi-v2.json` 生成冻结的 v2 OpenAPI，TypeScript SDK 从它生成类型和运行时校验。首次 v2 导入在已鉴权项目下按固定 UUID 创建用户，与受理回执同事务、同用户／项目唯一约束；调用方不必先进行 v1 ensure 请求。查询、撤回及 retry 不自动创建已删除的用户。账号永久删除及过期导入任务的墓碑／补偿由业务调用方控制，不能让旧任务作为新导入重新提交。来源和幂等键不可含 `/`；消息 ID、角色、正文和带时区时间共同保留来源定位能力。
+协议真相源为 FastAPI 路由和 Pydantic 模型；`export-openapi.py openapi-v2.json` 生成冻结的 v2 OpenAPI，TypeScript SDK 从它生成类型和运行时校验。首次 v2 导入在已鉴权项目下按固定 UUID 创建尚未永久遗忘的用户，与受理回执同事务、同用户／项目唯一约束；调用方不必先进行 v1 ensure 请求。查询、撤回及 retry 不自动创建已删除的用户。账号永久删除由调用方明确使用 v2 遗忘入口；调用方仍维护过期任务与删除意图，不能把未知写入改为未提交或作为新身份重放。来源和幂等键不可含 `/`；消息 ID、角色、正文和带时区时间共同保留来源定位能力。
 
 `GET operations/by-key/{key}` 用于响应丢失后的确认；`POST operations/{id}/retry` 只使用服务端已受理的输入，不要求调用方重发可能已删除的消息。已完成返回原结果；活跃执行者返回 processing；确认无正式提交的失败或失去执行权的 processing 可经新 lease 与数据库 generation 接管恢复。参数、权限或输入预算错误不重试。模型费用不承诺 exactly-once，正式数据库效果依靠事务和唯一身份去重。
 

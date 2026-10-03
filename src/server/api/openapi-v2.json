@@ -5,6 +5,49 @@
     "version": "0.2.0"
   },
   "paths": {
+    "/api/v2/users/{user_id}": {
+      "delete": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Forget User",
+        "operationId": "forgetUser",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForgottenUser"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/users/{user_id}/sources": {
       "post": {
         "tags": [
@@ -1084,6 +1127,27 @@
           "support_groups"
         ],
         "title": "Evidence"
+      },
+      "ForgottenUser": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "User Id"
+          },
+          "forgotten": {
+            "type": "boolean",
+            "const": true,
+            "title": "Forgotten"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "user_id",
+          "forgotten"
+        ],
+        "title": "ForgottenUser"
       },
       "HTTPValidationError": {
         "properties": {

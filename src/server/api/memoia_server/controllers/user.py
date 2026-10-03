@@ -7,10 +7,15 @@ from ..models.blob import BlobType
 
 
 async def create_user(data: UserData, project_id: str) -> Promise[IdData]:
+    from .source import assert_user_active, SourceError
     with Session() as session:
         db_user = User(additional_fields=data.data, project_id=project_id)
         if data.id is not None:
             db_user.id = str(data.id)
+        try:
+            assert_user_active(session, db_user.id, project_id)
+        except SourceError:
+            return Promise.reject(CODE.FORBIDDEN, "User identity was permanently forgotten")
         session.add(db_user)
         session.commit()
         return Promise.resolve(IdData(id=db_user.id))

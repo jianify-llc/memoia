@@ -147,17 +147,126 @@ describe("fixed source identity and acknowledgement", () => {
   });
 });
 
+describe("permanent account forgetting", () => {
+  it("requires a bodyless DELETE and accepts an explicit repeat with the same UUID", async () => {
+    const receipt = { user_id: user, forgotten: true };
+    const calls = [];
+    const api = client(async (url, init) => {
+      calls.push({ url, init });
+      return json(receipt);
+    });
+    assert.deepEqual(await api.forgetUser(user, { deadline: Date.now() + 30_000 }), receipt);
+    assert.deepEqual(await api.forgetUser(user), receipt);
+    assert.equal(calls.length, 2);
+    for (const { url, init } of calls) {
+      assert.equal(url, `https://memoia.example/api/v2/users/${user}`);
+      assert.equal(init.method, "DELETE");
+      assert.equal(init.body, undefined);
+      assert.equal(init.headers["Content-Type"], undefined);
+      assert.equal(init.headers.Authorization, "Bearer private-project-token");
+      assert.equal(init.redirect, "manual");
+    }
+  });
+
+  it("compares UUID identity independently of letter casing", async () => {
+    const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const receipt = { user_id: id, forgotten: true };
+    assert.deepEqual(await client(async () => json(receipt)).forgetUser(id.toUpperCase()), receipt);
+  });
+
+  it("rejects invalid UUID input before starting a destructive request", async () => {
+    let calls = 0;
+    const api = client(async () => { calls++; return json({ user_id: user, forgotten: true }); });
+    for (const id of ["", "not-a-user-uuid", `${user}/sources`, 42, null]) {
+      await assert.rejects(async () => api.forgetUser(id), (error) => error.code === "INVALID_INPUT" && error.outcome === "rejected");
+    }
+    assert.equal(calls, 0);
+  });
+
+  it("does not accept false, incomplete, foreign or malformed forgetting receipts", async () => {
+    for (const receipt of [
+      { user_id: sourceId, forgotten: true },
+      { user_id: "not-a-uuid", forgotten: true },
+      { user_id: user, forgotten: false },
+      { user_id: user, forgotten: "true" },
+      { user_id: user, forgotten: 1 },
+      { user_id: user },
+      { forgotten: true },
+      { user_id: user, forgotten: true, unexpected: "private data" },
+      null,
+    ]) {
+      let calls = 0;
+      await assert.rejects(client(async () => { calls++; return json(receipt); }).forgetUser(user), (error) =>
+        error instanceof MemoiaError && error.code === "INVALID_RESPONSE" && error.outcome === "unknown" && error.retryable === false);
+      assert.equal(calls, 1);
+    }
+    for (const status of [201, 202, 204]) {
+      let calls = 0;
+      const api = client(async () => {
+        calls++;
+        return status === 204 ? new Response(null, { status }) : json({ user_id: user, forgotten: true }, status);
+      });
+      await assert.rejects(api.forgetUser(user), (error) => error.code === "INVALID_RESPONSE" && error.status === status && error.outcome === "unknown");
+      assert.equal(calls, 1);
+    }
+  });
+
+  it("retains an unknown DELETE without replay and lets the caller explicitly confirm it", async () => {
+    let calls = 0;
+    const receipt = { user_id: user, forgotten: true };
+    const api = client(async () => {
+      calls++;
+      if (calls === 1) throw new Error("lost forgetting acknowledgment");
+      return json(receipt);
+    }, { maxAttempts: 4 });
+    await assert.rejects(api.forgetUser(user), (error) => error.code === "TRANSPORT_ERROR" && error.outcome === "unknown" && error.retryable === false);
+    assert.equal(calls, 1);
+    assert.deepEqual(await api.forgetUser(user), receipt);
+    assert.equal(calls, 2);
+  });
+
+  it("bounds a hung DELETE and refuses expired or cancelled requests before I/O", async () => {
+    let calls = 0;
+    const api = client((_url, { signal }) => new Promise((_resolve, reject) => {
+      calls++;
+      signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    }), { writeTimeoutMs: 15 });
+    await assert.rejects(api.forgetUser(user), (error) => error.outcome === "unknown" && error.retryable === false);
+    assert.equal(calls, 1);
+    await assert.rejects(api.forgetUser(user, { deadline: Date.now() - 1 }), /BUDGET_EXHAUSTED/);
+    const controller = new AbortController(); controller.abort();
+    await assert.rejects(api.forgetUser(user, { signal: controller.signal }), /BUDGET_EXHAUSTED/);
+    assert.equal(calls, 1);
+  });
+
+  it("does not replay unauthorized forgetting or permanently rejected future imports", async () => {
+    for (const status of [401, 403]) {
+      let calls = 0;
+      await assert.rejects(client(async () => { calls++; return json({ detail: { code: "DENIED", retryable: true } }, status); }).forgetUser(user), (error) =>
+        error.status === status && error.retryable === false && error.outcome === "rejected");
+      assert.equal(calls, 1);
+    }
+    for (const action of ["import", "retry"]) {
+      let calls = 0;
+      const api = client(async () => { calls++; return json({ detail: { code: "user_forgotten", retryable: false } }, 410); });
+      await assert.rejects(action === "import" ? api.importSource(user, source) : api.retryOperation(user, complete.operation_id), (error) =>
+        error.code === "user_forgotten" && error.status === 410 && error.retryable === false && error.outcome === "rejected");
+      assert.equal(calls, 1);
+    }
+  });
+});
+
 describe("bounded transport", () => {
   it("rejects redirects without replaying or exposing the destination", async () => {
     for (const status of [301, 302, 303, 307, 308]) {
-      for (const method of ["GET", "POST"]) {
+      for (const method of ["GET", "POST", "DELETE"]) {
         let calls = 0;
         const api = client(async (_url, init) => {
           calls++;
           assert.equal(init.redirect, "manual");
           return new Response("private response", { status, headers: { Location: "https://other.example/?secret=private-project-token" } });
         });
-        const request = method === "GET" ? api.getProfiles(user) : api.importSource(user, source);
+        const request = method === "GET" ? api.getProfiles(user) : method === "DELETE" ? api.forgetUser(user) : api.importSource(user, source);
         await assert.rejects(request, (error) =>
           error instanceof MemoiaError && error.code === "REDIRECT_REJECTED" &&
           error.status === status && error.retryable === false &&

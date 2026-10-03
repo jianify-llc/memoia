@@ -28,6 +28,11 @@ class SourceMessage(StrictModel):
         return value
 
 
+class ForgottenUser(StrictModel):
+    user_id: UUID
+    forgotten: Literal[True]
+
+
 class ImportSource(StrictModel):
     idempotency_key: str = Field(min_length=1, max_length=255, pattern=r"^[^/]+$")
     external_id: str = Field(min_length=1, max_length=255, pattern=r"^[^/]+$")
@@ -169,6 +174,13 @@ user_memory_states = Table(
     Column("generation", BigInteger, nullable=False, server_default="0"),
     Column("version", BigInteger, nullable=False, server_default="0"),
     user_fk(), UniqueConstraint("user_id", "project_id"),
+)
+user_memory_tombstones = Table(
+    "memory_user_tombstones", REG.metadata,
+    Column("project_id", String(64), primary_key=True),
+    Column("user_id", PGUUID(as_uuid=True), primary_key=True),
+    Column("forgotten_at", TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")),
+    ForeignKeyConstraint(["project_id"], ["projects.project_id"], ondelete="CASCADE"),
 )
 memory_sources = Table(
     "memory_sources", REG.metadata,

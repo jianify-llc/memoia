@@ -13,6 +13,8 @@ const api = JSON.parse(apiText);
 const { version: sdkVersion } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const route = "/api/v2/users/{user_id}";
 const targets = {
+  validateForgetUserPath: ["delete", route, "path"],
+  validateForgottenUser: ["delete", route, "response"],
   validateOperation: ["post", `${route}/sources`, "response"],
   validateImport: ["post", `${route}/sources`, "request"],
   validateRetraction: ["post", `${route}/sources/{source_id}/retract`, "request"],
@@ -43,11 +45,11 @@ for (const [name, [method, path, kind]] of Object.entries(targets)) {
   const operation = api.paths[path]?.[method];
   const success = Object.entries(operation?.responses ?? {}).find(([status, response]) => /^2\d\d$/.test(status) && response.content?.["application/json"]);
   const body = kind === "request" ? operation?.requestBody : success?.[1];
-  const queryParameters = operation?.parameters?.filter((parameter) => parameter.in === "query");
-  const schema = kind === "query" ? {
+  const parameters = operation?.parameters?.filter((parameter) => parameter.in === kind);
+  const schema = kind === "query" || kind === "path" ? {
     type: "object", additionalProperties: false,
-    properties: Object.fromEntries(queryParameters.map((parameter) => [parameter.name, parameter.schema])),
-    required: queryParameters.filter((parameter) => parameter.required).map((parameter) => parameter.name),
+    properties: Object.fromEntries(parameters.map((parameter) => [parameter.name, parameter.schema])),
+    required: parameters.filter((parameter) => parameter.required).map((parameter) => parameter.name),
   } : body?.content?.["application/json"]?.schema;
   if (!schema) throw new Error(`OpenAPI lacks ${kind} schema for ${method} ${path}`);
   const id = `https://memoia.jianify.dev/sdk/${name}`;

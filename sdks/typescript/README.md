@@ -1,6 +1,6 @@
 # Memoia TypeScript SDK v2
 
-`@jianify/memoia@0.2.3` supports Node.js and Cloudflare Workers. This is a separate v2 client; the upstream v1 SDK is unchanged. Protocol types and runtime validators are generated from `src/server/api/openapi-v2.json`, not a second hand-written contract. This patch fixes native Worker fetch receiver and redirect compatibility, preserving recoverable ownership-conflict classification and bundled validator license notices; the server protocol remains v2/0.2.0.
+`@jianify/memoia@0.2.4` supports Node.js and Cloudflare Workers. This is a separate v2 client; the upstream v1 SDK is unchanged. Protocol types and runtime validators are generated from `src/server/api/openapi-v2.json`, not a second hand-written contract. This patch adds permanent account forgetting while preserving native Worker fetch, redirect safety, recoverable ownership-conflict classification and bundled validator license notices; the server protocol remains v2/0.2.0.
 
 ```ts
 import { MemoiaClient } from "@jianify/memoia";
@@ -17,7 +17,11 @@ The base URL is an origin, without `/api/v2`. `deadline` is an absolute Unix tim
 
 Completed results are schema-validated, including final event/profile IDs. `processing` is not success. A transport timeout or lost write response throws `MemoiaError` with `outcome === "unknown"`: query `getOperationByKey()` to recover before deciding whether to resend. Only safe reads and explicit retryable server failures receive bounded backoff; there is no implicit replay of a write whose commit is unknown.
 
-HTTP 409 is recoverable only when the server explicitly supplies `detail.retryable: true` with `detail.code: "write_conflict"` or `"lease_lost"`. Other conflicts, including changed idempotent input, are not implicitly replayed. Task consumers can use `maxAttempts: 1` to retain this classification without SDK replay, then query the fixed operation key and call `retryOperation()` on its persisted input. This patch does not change the OpenAPI wire contract or weaken unknown-write handling.
+HTTP 409 is recoverable only when the server explicitly supplies `detail.retryable: true` with `detail.code: "write_conflict"` or `"lease_lost"`. Other conflicts, including changed idempotent input, are not implicitly replayed. Task consumers can use `maxAttempts: 1` to retain this classification without SDK replay, then query the fixed operation key and call `retryOperation()` on its persisted input. Unknown-write handling is unchanged.
+
+`forgetUser(userId, { deadline })` permanently forgets an account within the authenticated project. It requires a valid UUID and accepts only HTTP 200 with the same UUID and `forgotten: true`; an empty response, another user's receipt, or a malformed acknowledgment is not proof of forgetting. UUID letter casing is normalized for identity comparison. This is not ordinary event deletion, message retraction, or the unchanged v1 user deletion. The server tombstone also blocks later v2 imports and resumed operations with `410 user_forgotten`, a permanent non-retryable error.
+
+A lost or invalid DELETE acknowledgment remains `outcome === "unknown"` and is never automatically replayed. The caller may explicitly call `forgetUser()` again for the same project and UUID: the server's permanent tombstone makes that confirmation idempotent. Only a verified forgetting receipt may justify resolving earlier unknown account writes. The SDK does not own account-cleanup scheduling or discard its caller's unresolved operation tracking.
 
 The SDK does not perform message segmentation, profile reconstruction, task scheduling, or provider-specific business decisions.
 

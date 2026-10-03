@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from pydantic import Field, model_validator
 from openai import BadRequestError, AuthenticationError, PermissionDeniedError, NotFoundError
-from sqlalchemy import select, update, delete, and_, func
+from sqlalchemy import select, update, delete, and_, func, text
 from sqlalchemy.dialects.postgresql import insert
 
 from ..connectors import Session
@@ -19,6 +19,7 @@ from ..models.source import (
     memory_sources as sources, memory_operations as operations,
     memory_facts as facts, user_memory_states as states,
     memory_profile_revisions as revisions, HistoryEntry,
+    user_memory_tombstones as tombstones, ForgottenUser,
 )
 from ..utils import get_encoded_tokens
 from ..llms.openai_model_llm import openai_complete
@@ -119,6 +120,35 @@ def _scope(table, user_id, project_id):
 
 def _hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+
+
+def lock_user_identity(session, user_id, project_id):
+    # Transaction-scoped PostgreSQL locks are released by COMMIT/ROLLBACK, not by
+    # a pooled connection's lifetime. JSON framing avoids ambiguous project/UUID keys.
+    identity = ["memoia:user-identity:v1", project_id, str(UUID(str(user_id)))]
+    digest = hashlib.sha256(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode()).digest()
+    key = int.from_bytes(digest[:8], "big", signed=True)
+    session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
+
+def assert_user_active(session, user_id, project_id):
+    lock_user_identity(session, user_id, project_id)
+    if session.execute(select(tombstones.c.user_id).where(
+        _scope(tombstones, user_id, project_id),
+    )).scalar_one_or_none() is not None:
+        raise SourceError("user_forgotten", "User identity was permanently forgotten", 410, False)
+
+
+def forget_user(user_id, project_id):
+    with Session.begin() as session:
+        # Permanent forgetting preempts model computation instead of waiting on its
+        # renewable Redis lease. The same SQL identity lock linearizes all commits.
+        session.info["memoia_fence_done"] = True
+        lock_user_identity(session, user_id, project_id)
+        session.execute(insert(tombstones).values(user_id=user_id, project_id=project_id)
+                        .on_conflict_do_nothing(index_elements=["project_id", "user_id"]))
+        session.execute(delete(User).where(User.id == user_id, User.project_id == project_id))
+    return ForgottenUser(user_id=user_id, forgotten=True)
 
 
 def _operation(row):
@@ -255,6 +285,7 @@ async def reconcile_facts(candidate_facts, *, rules=None, project_id=DEFAULT_PRO
 
 
 def _fence_snapshot(session, user_id, project_id, lease):
+    assert_user_active(session, user_id, project_id)
     session.info["memoia_fence_done"] = True
     session.execute(insert(states).values(user_id=user_id, project_id=project_id).on_conflict_do_nothing())
     row = session.execute(update(states).where(_identity(user_id, project_id))
@@ -264,6 +295,7 @@ def _fence_snapshot(session, user_id, project_id, lease):
 
 
 def fence_commit(session, user_id, project_id, lease):
+    assert_user_active(session, user_id, project_id)
     session.info["memoia_fence_done"] = True
     lease.assert_owned()
     result = session.execute(update(states).where(
@@ -389,6 +421,7 @@ def _write_event(session, user_id, project_id, source_row, source_facts, content
 def _register(user_id, project_id, key, kind, request, external_id, source_id=None):
     request_hash = _hash({"kind": kind, "request": request})
     with Session.begin() as session:
+        assert_user_active(session, user_id, project_id)
         if kind == "import":
             # The authenticated project owns this UUID; first imports and concurrent
             # accepted receipts create it in this same transaction, not a v1 preflight.
@@ -440,6 +473,7 @@ async def import_source(user_id, project_id, request: ImportSource, *, legacy_bu
     try:
         async with UserLease(str(user_id), project_id) as lease:
             with Session.begin() as session:
+                assert_user_active(session, user_id, project_id)
                 current = session.execute(select(operations).where(operations.c.id == op["id"])).mappings().one()
                 if current["status"] == "completed":
                     return _operation(current)
@@ -508,6 +542,7 @@ async def import_source(user_id, project_id, request: ImportSource, *, legacy_bu
 
 async def retry_operation(user_id, project_id, operation_id):
     with Session() as session:
+        assert_user_active(session, user_id, project_id)
         row = session.execute(select(operations).where(_scope(operations, user_id, project_id),
                                                        operations.c.id == operation_id)).mappings().one_or_none()
         if row is None:
@@ -562,6 +597,7 @@ async def retract_messages(user_id, project_id, source_id, request: RetractMessa
     try:
         async with UserLease(str(user_id), project_id) as lease:
             with Session.begin() as session:
+                assert_user_active(session, user_id, project_id)
                 current = session.execute(select(operations).where(operations.c.id == op["id"])).mappings().one()
                 if current["status"] == "completed":
                     return _operation(current)

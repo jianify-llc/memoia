@@ -5,6 +5,7 @@ type JsonBody<T> = T extends { content: { "application/json": infer R } } ? R : 
 type ResponseBody<T> = T extends { responses: infer R } ? JsonBody<R[Extract<keyof R, 200 | 201>]> : never;
 type RequestBody<T> = T extends { requestBody: { content: { "application/json": infer R } } } ? R : never;
 export type Operation = ResponseBody<paths["/api/v2/users/{user_id}/sources"]["post"]>;
+export type ForgottenUser = ResponseBody<paths["/api/v2/users/{user_id}"]["delete"]>;
 export type Operations = ResponseBody<paths["/api/v2/users/{user_id}/operations"]["get"]>;
 type SourcesQuery = NonNullable<paths["/api/v2/users/{user_id}/sources"]["get"]["parameters"]["query"]>;
 type HistoryQuery = NonNullable<paths["/api/v2/users/{user_id}/history"]["get"]["parameters"]["query"]>;
@@ -136,6 +137,13 @@ export class MemoiaClient {
     return this.request("POST", `${this.userPath(userId)}/sources/${segment(sourceId)}/retract`, operationValidator, options, input);
   }
 
+  /** 永久遗忘只接受同一 UUID 的提交回执；未知结果由调用方显式再次确认。 */
+  forgetUser(userId: string, options?: RequestOptions): Promise<ForgottenUser> {
+    if (!validators.validateForgetUserPath({ user_id: userId })) throw new MemoiaError("INVALID_INPUT", null, false);
+    const validate: Validator = (value) => validators.validateForgottenUser(value) && (value as ForgottenUser).user_id.toLowerCase() === userId.toLowerCase();
+    return this.request("DELETE", this.userPath(userId), validate, options, undefined, 200);
+  }
+
   getProfiles(userId: string, options?: RequestOptions): Promise<Profiles> {
     return this.request("GET", `${this.userPath(userId)}/profiles`, validators.validateProfiles, options);
   }
@@ -193,7 +201,7 @@ export class MemoiaClient {
     return encoded ? `${path}?${encoded}` : path;
   }
 
-  private async request<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, validate: Validator, options: RequestOptions = {}, body?: unknown): Promise<T> {
+  private async request<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, validate: Validator, options: RequestOptions = {}, body?: unknown, successStatus?: number): Promise<T> {
     const limit = method === "GET" ? this.readTimeout : this.writeTimeout;
     const deadline = options.deadline ?? Date.now() + limit;
     if (!Number.isFinite(deadline)) throw new TypeError("deadline must be a finite Unix timestamp");
@@ -230,6 +238,7 @@ export class MemoiaClient {
           throw new MemoiaError("INVALID_RESPONSE", response.status, false, method === "GET" ? "rejected" : "unknown");
         }
         if (response.ok) {
+          if (successStatus !== undefined && response.status !== successStatus) throw new MemoiaError("INVALID_RESPONSE", response.status, false, method === "GET" ? "rejected" : "unknown");
           if (!validate(payload)) throw new MemoiaError("INVALID_RESPONSE", response.status, false, method === "GET" ? "rejected" : "unknown");
           return payload as T;
         }

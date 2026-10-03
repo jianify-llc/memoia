@@ -39,6 +39,18 @@ REDIS_POOL = None
 Session = sessionmaker(bind=DB_ENGINE)
 
 
+@event.listens_for(Session, "after_begin")
+def serialize_memory_transaction(session, transaction, connection):
+    from .controllers.user_lease import CURRENT_LEASE
+    lease = CURRENT_LEASE.get()
+    if lease is None or session.info.get("memoia_non_memory_commit"):
+        return
+    from .controllers.source import lock_user_identity
+    # Use the already-begun physical transaction, not Session.execute(), which
+    # would recursively try to provision the connection during after_begin.
+    lock_user_identity(connection, lease.identity[0], lease.identity[1])
+
+
 @event.listens_for(Session, "after_commit")
 def acknowledge_memory_version(session):
     version = session.info.pop("memoia_committed_version", None)

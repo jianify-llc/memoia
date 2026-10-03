@@ -3,7 +3,7 @@ from sqlalchemy import text
 from .connectors import Session
 from .models.database import Project, UserEvent, UserEventGist
 
-EXPECTED_REVISION = "0004_key_scopes_search"
+EXPECTED_REVISION = "0005_user_tombstones"
 
 
 def check_schema():

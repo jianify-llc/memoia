@@ -71,7 +71,7 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 
 ## Schema 维护与 v2 升级
 
-现有 v1 库升级 v2 是显式维护，不是普通 `prepare`。当前 Alembic 链依次为 `0001_v1_baseline`、`0002_sources_v2`、`0003_profile_history`、`0004_key_scopes_search`。0001 对完整既有 v1 表、字段/类型/默认值/非空、键/外键与索引做严格核对，只接纳匹配的原库，不重建、不删历史数据；部分表、插件额外列或 schema 漂移均停止。不要先执行 `alembic stamp` 绕过 adoption，也不要直接填写新的 schema.sha256。迁移机制详见 [服务端迁移说明](../src/server/api/migrations/README)。
+现有 v1 库升级 v2 是显式维护，不是普通 `prepare`。当前 Alembic 链依次为 `0001_v1_baseline`、`0002_sources_v2`、`0003_profile_history`、`0004_key_scopes_search`、`0005_user_tombstones`。0001 对完整既有 v1 表、字段/类型/默认值/非空、键/外键与索引做严格核对，只接纳匹配的原库，不重建、不删历史数据；部分表、插件额外列或 schema 漂移均停止。0005 增加永久用户身份墓碑，不改写已有记忆；0004→0005 同样必须使用维护入口，不能用普通 API 更新绕过。不要先执行 `alembic stamp` 绕过 adoption，也不要直接填写新的 schema.sha256。迁移机制详见 [服务端迁移说明](../src/server/api/migrations/README)。
 
 本轮 `migrate-schema`／`finalize-schema` 仅允许 Test。操作顺序：
 
@@ -143,11 +143,11 @@ ShellCheck/actionlint/Bash 语法仅静态验证。test_workflow.py 解析真实
 
 ### v2 TypeScript SDK 真实探针
 
-`v2-sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.2.2 已构建产物，不安装依赖、不构建源码、不重新打 SDK 包。stdin 是一个 JSON 对象：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 为整体等待预算，默认 360000、上限 900000；地址和 token 不放 argv 或日志。输入与输出都应保存为 root:root 0600 的受保护文件，不进入公开 artifact。
+`v2-sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.2.4 已构建产物，不安装依赖、不构建源码、不重新打 SDK 包。stdin 是一个 JSON 对象：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 为整体等待预算，默认 360000、上限 900000；地址和 token 不放 argv 或日志。输入与输出都应保存为 root:root 0600 的受保护文件，不进入公开 artifact。
 
 探针使用随机 UUID 的专用新用户，分别验证缺失／错误 Bearer、首次导入隐式创建用户、固定幂等键和 operation ID 的结果查询、来源证据、非空画像、事件搜索、真实画像历史。只有首次导入已明确 completed 后，才进行一次显式幂等重放：以完全相同正文和 key 再 POST，必须立即返回同一已完成操作及 source/event IDs，重新读取来源、画像和专用用户的完整事件列表，确认身份和数量不增长。随后撤回一条消息验证剩余证据，撤回另一条验证画像／来源证据／历史内容／事件不再返回失效内容。历史审计行可以保留，但其失效画像内容不能返回。除这次已完成导入的明确测试外，每个 mutation 最多发送一次；仍 processing 或丢失 ACK 未确认时只按固定 key 查询，绝不重发正文、自动调用 retryOperation 或重置身份。显式重放本身若结果未知，同样失败并保留用户及已知 ID，不再 POST 或自动清理。
 
-正常结束时只删除本次随机用户，并读取确认不存在；未确认的 mutation 不自动清理。stdout 仅为布尔检查、UUID／幂等键及计数的单个证据 JSON，不包含 token 或正文。任一业务检查失败、结果未知或清理无法确认，进程均退出非零；保留输出中的 user_id、import_key 和已知 operation/source ID 供核查，不通过重跑新用户替代核查。若进程被强制终止、没有输出，需从服务端操作记录和日志核查，不能宣称已经清理。
+正常结束时通过 v1 普通删除清理本次随机用户，并读取确认不存在；这不是 v2 永久遗忘证明。账号永久遗忘须另验 `forgetUser` 的同 UUID／`forgotten: true` 回执及迟到导入的 `410 user_forgotten`。未确认的 mutation 不自动清理。stdout 仅为布尔检查、UUID／幂等键及计数的单个证据 JSON，不包含 token 或正文。任一业务检查失败、结果未知或清理无法确认，进程均退出非零；保留输出中的 user_id、import_key 和已知 operation/source ID 供核查，不通过重跑新用户替代核查。若进程被强制终止、没有输出，需从服务端操作记录和日志核查，不能宣称已经清理。
 
 可复用已验收的 Inspector Node 镜像执行，只读挂载脚本与已解包 SDK，凭据仍仅走 stdin。例如操作员确认下面的实际路径和 digest 后运行：
 

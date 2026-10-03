@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request, Query, HTTPException, Response
 from ..models.source import (
     ImportSource, RetractMessages, Operation, Operations, Source, Sources, Profiles, Profile,
     SearchResult, SearchEvent, History, HistoryEntry,
+    ForgottenUser,
 )
 
 router = APIRouter(prefix="/api/v2", tags=["sources"])
@@ -21,6 +22,15 @@ def translate(error):
     raise HTTPException(status_code=error.status, detail={
         "code": error.code, "message": error.message, "retryable": error.retryable,
     }) from error
+
+
+@router.delete("/users/{user_id}", response_model=ForgottenUser, operation_id="forgetUser")
+async def forget_user(user_id: UUID, request: Request):
+    from ..controllers import source
+    try:
+        return source.forget_user(user_id, project_id(request))
+    except source.SourceError as error:
+        translate(error)
 
 
 @router.post("/users/{user_id}/sources", response_model=Operation, operation_id="importSource")

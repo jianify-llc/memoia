@@ -41,10 +41,10 @@ def install_legacy(engine):
                 connection.execute(text(statement))
 
 
-def migrate(url):
+def migrate(url, target="head"):
     env = {**os.environ, "DATABASE_URL": url}
     # Never echo the subprocess environment or connection URL.
-    return subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], cwd=ROOT, env=env,
+    return subprocess.run([sys.executable, "-m", "alembic", "upgrade", target], cwd=ROOT, env=env,
                           capture_output=True, text=True)
 
 
@@ -59,11 +59,34 @@ def test_existing_v1_adoption_preserves_rows_config_and_vectors(legacy_schema):
     result = migrate(url)
     assert result.returncode == 0, result.stderr
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0004_key_scopes_search"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0005_user_tombstones"
         assert connection.execute(text("SELECT profile_config FROM projects WHERE project_id='legacy'")).scalar_one() == "language: zh"
         assert connection.execute(text("SELECT content FROM user_profiles WHERE user_id=:uid"), {"uid": uid}).scalar_one() == "Do not rebuild legacy memory"
         assert connection.execute(text("SELECT count(*) FROM memory_sources")).scalar_one() == 0
+        assert connection.execute(text("SELECT count(*) FROM memory_user_tombstones")).scalar_one() == 0
     assert migrate(url).returncode == 0
+
+
+def test_v2_upgrade_adds_only_persistent_identity_tombstones(legacy_schema):
+    engine, url = legacy_schema
+    install_legacy(engine)
+    assert migrate(url, "0004_key_scopes_search").returncode == 0
+    uid = uuid4()
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO projects(id,project_id,project_secret,status) VALUES(:id,'upgrade','test-only','active')"), {"id": uuid4()})
+        connection.execute(text("INSERT INTO users(id,project_id) VALUES(:uid,'upgrade')"), {"uid": uid})
+        connection.execute(text("INSERT INTO user_profiles(id,user_id,project_id,content,attributes) VALUES(:id,:uid,'upgrade','Preserve until explicit forgetting','{}')"),
+                           {"id": uuid4(), "uid": uid})
+    upgraded = migrate(url)
+    assert upgraded.returncode == 0, upgraded.stderr
+    with engine.begin() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0005_user_tombstones"
+        assert connection.execute(text("SELECT content FROM user_profiles WHERE user_id=:uid"), {"uid": uid}).scalar_one() == "Preserve until explicit forgetting"
+        connection.execute(text("INSERT INTO memory_user_tombstones(project_id,user_id) VALUES('upgrade',:uid)"), {"uid": uid})
+        connection.execute(text("DELETE FROM users WHERE project_id='upgrade' AND id=:uid"), {"uid": uid})
+        assert connection.execute(text("SELECT count(*) FROM memory_user_tombstones WHERE user_id=:uid"), {"uid": uid}).scalar_one() == 1
+        connection.execute(text("DELETE FROM projects WHERE project_id='upgrade'"))
+        assert connection.execute(text("SELECT count(*) FROM memory_user_tombstones WHERE user_id=:uid"), {"uid": uid}).scalar_one() == 0
 
 
 @pytest.mark.parametrize("drift", ["partial", "nullable", "type", "default", "extra_column"])

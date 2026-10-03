@@ -7,6 +7,12 @@ import { Miniflare, Response as RuntimeResponse, convertV4MiniflareOptions } fro
 const userId = "11111111-1111-4111-8111-111111111111";
 const origin = "https://memoia.invalid";
 const apiKey = "isolated-placeholder-token";
+const forgetUsers = Object.fromEntries([
+  "normal-default-forget", "normal-native-forget", "normal-wrapped-forget", "normal-bound-forget",
+  "redirect-302-forget", "redirect-307-forget", "redirect-308-forget",
+  "unknown-response-forget", "unknown-transport-forget",
+].map((marker, index) => [marker, `66666666-6666-4666-8666-${String(index + 1).padStart(12, "0")}`]));
+const forgetMarkers = Object.fromEntries(Object.entries(forgetUsers).map(([marker, id]) => [id, marker]));
 const complete = (externalId) => ({
   operation_id: "22222222-2222-4222-8222-222222222222",
   status: "completed",
@@ -39,7 +45,7 @@ export default {
     const options = {
       baseUrl: ${JSON.stringify(origin)}, apiKey: ${JSON.stringify(apiKey)},
       maxAttempts: 4, readTimeoutMs: 2000,
-      writeTimeoutMs: marker === "unknown-transport" ? 100 : 2000,
+      writeTimeoutMs: marker.startsWith("unknown-transport") ? 100 : 2000,
     };
     if (mode === "native") options.fetch = fetch;
     if (mode === "wrapped") options.fetch = (input, init) => fetch(input, init);
@@ -48,6 +54,8 @@ export default {
     try {
       const value = action === "read"
         ? await client.getOperationByKey(${JSON.stringify(userId)}, marker)
+        : action === "forget"
+        ? await client.forgetUser(${JSON.stringify(forgetUsers)}[marker])
         : await client.importSource(${JSON.stringify(userId)}, {
             idempotency_key: "probe:" + marker,
             external_id: "probe:" + marker,
@@ -85,9 +93,10 @@ export default {
       const url = new URL(request.url);
       const body = request.method === "POST" ? await request.text() : "";
       const input = body ? JSON.parse(body) : null;
+      const pathId = decodeURIComponent(url.pathname.split("/").at(-1));
       const marker = input
         ? input.external_id.slice("probe:".length)
-        : decodeURIComponent(url.pathname.split("/").at(-1));
+        : forgetMarkers[pathId] ?? pathId;
       calls.push({
         marker, origin: url.origin, method: request.method,
         path: url.pathname, body,
@@ -102,16 +111,17 @@ export default {
           headers: { Location: "https://must-not-follow.invalid/captured?private=fixture" },
         });
       }
-      if (marker === "unknown-response") {
+      if (marker.startsWith("unknown-response")) {
         return new RuntimeResponse("invalid JSON", { status: 502 });
       }
-      if (marker === "unknown-transport") {
+      if (marker.startsWith("unknown-transport")) {
         await new Promise((resolve) => setTimeout(resolve, 500));
-        return json(complete(input.external_id));
+        return request.method === "DELETE" ? json({ user_id: pathId, forgotten: true }) : json(complete(input.external_id));
       }
       if (request.method === "GET") {
         return json({ detail: { code: "operation_not_found", message: "not found", retryable: false } }, 404);
       }
+      if (request.method === "DELETE") return json({ user_id: pathId, forgotten: true });
       return json(complete(input.external_id));
     },
   }));
@@ -167,10 +177,23 @@ describe("Memoia SDK in the real workerd runtime", { concurrency: false }, () =>
       assert.equal(JSON.parse(call.body).messages[0].content, `never-forward-body:${marker}`);
       assertOriginOnly();
     });
+
+    it(`uses ${mode} fetch for a bodyless permanent account DELETE`, async () => {
+      const marker = `normal-${mode}-forget`;
+      const result = await probe(marker, "forget", mode);
+      assert.deepEqual(result, { ok: true, value: { user_id: forgetUsers[marker], forgotten: true } });
+      const [call] = received(marker);
+      assert.equal(received(marker).length, 1);
+      assert.equal(call.method, "DELETE");
+      assert.equal(call.path, `/api/v2/users/${forgetUsers[marker]}`);
+      assert.equal(call.body, "");
+      assert.equal(call.authorization, `Bearer ${apiKey}`);
+      assertOriginOnly();
+    });
   }
 
   for (const status of [302, 307, 308]) {
-    for (const action of ["read", "write"]) {
+    for (const action of ["read", "write", "forget"]) {
       it(`rejects ${status} ${action} redirects without forwarding or replaying`, async () => {
         const marker = `redirect-${status}-${action}`;
         const result = await probe(marker, action);
@@ -205,6 +228,30 @@ describe("Memoia SDK in the real workerd runtime", { concurrency: false }, () =>
     assert.equal(result.outcome, "unknown");
     assert.equal(result.retryable, false);
     assert.equal(received("unknown-transport").length, 1);
+    assertOriginOnly();
+  });
+
+  it("does not replay a DELETE after an unknown response", async () => {
+    const marker = "unknown-response-forget";
+    const result = await probe(marker, "forget");
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "INVALID_RESPONSE");
+    assert.equal(result.status, 502);
+    assert.equal(result.outcome, "unknown");
+    assert.equal(result.retryable, false);
+    assert.equal(received(marker).length, 1);
+    assertOriginOnly();
+  });
+
+  it("does not replay a DELETE after its native fetch transport is aborted", async () => {
+    const marker = "unknown-transport-forget";
+    const result = await probe(marker, "forget", "native");
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "TRANSPORT_ERROR");
+    assert.equal(result.status, null);
+    assert.equal(result.outcome, "unknown");
+    assert.equal(result.retryable, false);
+    assert.equal(received(marker).length, 1);
     assertOriginOnly();
   });
 });
