@@ -208,11 +208,19 @@ export class MemoiaClient {
       const timer = setTimeout(() => controller.abort(), Math.min(limit, remaining));
       let error: MemoiaError;
       try {
-        const response = await this.transport(`${this.origin}${path}`, {
-          method, redirect: "error", cache: "no-store", signal: controller.signal,
+        // Runtime fetch requires its global receiver, not a MemoiaClient instance.
+        // A standalone call also preserves explicitly bound custom transports.
+        const transport = this.transport;
+        const response = await transport(`${this.origin}${path}`, {
+          method, redirect: "manual", cache: "no-store", signal: controller.signal,
           headers: { Authorization: `Bearer ${this.apiKey}`, Accept: "application/json", ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         });
+        // Never follow a redirect with project credentials. A mutation may
+        // already have executed before its redirect response, so query its key.
+        if (response.status >= 300 && response.status < 400) {
+          throw new MemoiaError("REDIRECT_REJECTED", response.status, false, method === "GET" ? "rejected" : "unknown");
+        }
         if (response.status === 204) {
           if (!validate(undefined)) throw new MemoiaError("INVALID_RESPONSE", response.status, false, method === "GET" ? "rejected" : "unknown");
           return undefined as T;

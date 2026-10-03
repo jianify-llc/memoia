@@ -16,7 +16,7 @@ describe("fixed source identity and acknowledgement", () => {
     const api = client(async (url, init) => { sent = { url, init }; return json(complete); });
     assert.deepEqual(await api.importSource(user, source), complete);
     assert.equal(sent.url, `https://memoia.example/api/v2/users/${user}/sources`);
-    assert.equal(sent.init.redirect, "error");
+    assert.equal(sent.init.redirect, "manual");
     assert.equal(sent.init.headers.Authorization, "Bearer private-project-token");
     assert.deepEqual(JSON.parse(sent.init.body), source);
   });
@@ -148,6 +148,47 @@ describe("fixed source identity and acknowledgement", () => {
 });
 
 describe("bounded transport", () => {
+  it("rejects redirects without replaying or exposing the destination", async () => {
+    for (const status of [301, 302, 303, 307, 308]) {
+      for (const method of ["GET", "POST"]) {
+        let calls = 0;
+        const api = client(async (_url, init) => {
+          calls++;
+          assert.equal(init.redirect, "manual");
+          return new Response("private response", { status, headers: { Location: "https://other.example/?secret=private-project-token" } });
+        });
+        const request = method === "GET" ? api.getProfiles(user) : api.importSource(user, source);
+        await assert.rejects(request, (error) =>
+          error instanceof MemoiaError && error.code === "REDIRECT_REJECTED" &&
+          error.status === status && error.retryable === false &&
+          error.outcome === (method === "GET" ? "rejected" : "unknown") &&
+          !error.message.includes("private-project-token") && !error.message.includes("other.example"));
+        assert.equal(calls, 1);
+      }
+    }
+  });
+
+  it("calls fetch as a function without supplying the client as its receiver", async () => {
+    let calls = 0;
+    const api = client(async function (_url, init) {
+      assert.equal(this, undefined);
+      calls++;
+      assert.equal(init.method, "GET");
+      return json(complete);
+    });
+    assert.deepEqual(await api.getOperationByKey(user, source.idempotency_key), complete);
+    assert.equal(calls, 1);
+  });
+
+  it("preserves an explicitly bound custom transport owner", async () => {
+    const owner = {
+      calls: 0,
+      async fetch() { this.calls++; return json(complete); },
+    };
+    assert.deepEqual(await client(owner.fetch.bind(owner)).getOperationByKey(user, "key"), complete);
+    assert.equal(owner.calls, 1);
+  });
+
   it("validates project/key creation responses and handles bodyless revocation", async () => {
     const project = { project_id: "luvel-test", status: "active", created_at: "2026-10-02T00:00:00Z" };
     const issued = { key_id: eventId, name: "Luvel", scopes: ["read", "write"], expires_at: null, revoked_at: null, created_at: project.created_at, token: "one-time-token" };

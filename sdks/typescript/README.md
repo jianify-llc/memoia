@@ -1,6 +1,6 @@
 # Memoia TypeScript SDK v2
 
-`@jianify/memoia@0.2.2` supports Node.js and Cloudflare Workers. This is a separate v2 client; the upstream v1 SDK is unchanged. Protocol types and runtime validators are generated from `src/server/api/openapi-v2.json`, not a second hand-written contract. This patch preserves the server's recoverable ownership-conflict classification and bundled validator license notices; the server protocol remains v2/0.2.0.
+`@jianify/memoia@0.2.3` supports Node.js and Cloudflare Workers. This is a separate v2 client; the upstream v1 SDK is unchanged. Protocol types and runtime validators are generated from `src/server/api/openapi-v2.json`, not a second hand-written contract. This patch fixes native Worker fetch receiver and redirect compatibility, preserving recoverable ownership-conflict classification and bundled validator license notices; the server protocol remains v2/0.2.0.
 
 ```ts
 import { MemoiaClient } from "@jianify/memoia";
@@ -20,6 +20,10 @@ Completed results are schema-validated, including final event/profile IDs. `proc
 HTTP 409 is recoverable only when the server explicitly supplies `detail.retryable: true` with `detail.code: "write_conflict"` or `"lease_lost"`. Other conflicts, including changed idempotent input, are not implicitly replayed. Task consumers can use `maxAttempts: 1` to retain this classification without SDK replay, then query the fixed operation key and call `retryOperation()` on its persisted input. This patch does not change the OpenAPI wire contract or weaken unknown-write handling.
 
 The SDK does not perform message segmentation, profile reconstruction, task scheduling, or provider-specific business decisions.
+
+Transport callbacks are invoked as standalone functions, never as methods of the client. This is required by native Worker `fetch`; Node-only mocks do not establish Worker runtime compatibility. A custom transport that depends on an object's `this` must be explicitly bound by its caller. Transport failures retain bounded read retry and unknown-write handling; the client never prints the original exception, credentials or response body.
+
+Requests use `redirect: "manual"`, which the Worker runtime supports, and reject every 3xx response without following `Location` or disclosing it. Redirected mutations retain an unknown outcome because their first request may already have executed. `pnpm test` runs both Node contract tests and an isolated workerd transport regression; all workerd outbound requests are intercepted locally, without business credentials or network access.
 
 `listSources()`, `listOperations()`, and `getHistory()` accept server-defined `limit`/`offset` pagination together with transport options. Operation listings allow an Inspector refresh to recover accepted work without storing a second browser session. History contains actual profile revisions and added/removed diffs; it excludes withdrawn evidence and is not a restore API. `retryOperation()` resumes the server's persisted request without resending message bodies.
 
