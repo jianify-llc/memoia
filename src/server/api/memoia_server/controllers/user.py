@@ -56,7 +56,7 @@ async def delete_user(user_id: str, project_id: str) -> Promise[None]:
             .one_or_none()
         )
         if db_user is None:
-            return Promise.reject(CODE.NOT_FOUND, f"User {user_id} not found")
+            return Promise.resolve(None)
         session.delete(db_user)
         session.commit()
     return Promise.resolve(None)
