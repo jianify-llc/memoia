@@ -4,6 +4,41 @@
 
 Agent 操作远端服务器前，必须阅读相邻仓库 `../Jianify-LLC/ops/server/agent-operations.md` 的“Agent 可见运维”。共享终端及既有部署脚本的执行边界以该规范为准。
 
+## 本地检查与明确 Test 验收
+
+分支、Actions 与 hook 规则以[公司规范](https://github.com/jianify-llc/Jianify-LLC/blob/main/docs/engineering/branch-release.md)为准。普通开发分支／Test／release push 及开发 PR 不运行 Actions；归档到 main 的 PR／merge queue 保留 Verify。Test 只有明确验收批次才手动启动，Online 的版本标签、digest 与审批门禁保持不变。
+
+```bash
+python3 scripts/test_push.py install
+python3 scripts/verify_local.py
+# 提交自己的改动后，在准确提交的干净 worktree 中同步 Test：
+python3 scripts/test_push.py push
+# 仅在负责人明确要求 Test 验收后运行，不是日常 push 的后续步骤：
+gh workflow run deploy-test.yml --ref test --repo jianify-llc/memoia
+```
+
+本地与远端 Verify 使用同一个 `scripts/verify_local.py`：要求 Python 3、uv（提供 Python 3.12）、Node.js、pnpm 10.12.4、ShellCheck、curl 和本机 Docker。冻结安装在临时源码目录完成，源码快照不复制业务 `.env` 或真实 `config.yaml`；仅使用虚构模型设置及本批独占 PostgreSQL／Redis 随机回环端口。所有原有部署夹具、API/schema/OpenAPI、SDK 生成与测试保留，禁止共享数据库、真实模型或远端平台调用。JUnit／覆盖率写入忽略的 `.local-ci-results/<批次>/`，不作为检查缓存。部署夹具使用经官方 SHA-256 校验的 jq 1.8.1 静态二进制，容器无网络；依赖下载仅继承不带认证的本机代理配置。总检查上限 20 分钟，退出时只清理本批容器及其匿名卷；缺依赖、失败、超时或取消都阻止推送。
+
+Test 长检查先于 Git 连接，hook 按目标 ref 验证本次提交和远端基线；源码／基线改变即重新检查。直接 Test push、force push、删除 Test、脏树或手工复用内部证明均不允许。安装入口遇到已有 hook 管理器停止，不覆盖。仓库文件存在不代表 hook 已安装，也不代表默认分支的手动 workflow 已注册；这些须在合入后核对，不以创建一个 Actions run 验证普通触发规则。
+
+手动 Test 流程在 Verify／镜像构建前核对选择的是当前 test 提交，后续 stale-deployment 检查继续保留。`MEMOIA_TEST_DEPLOY_ENABLED` 仍决定是否执行真实部署；手动启动并不绕过这个门禁、GHCR 匿名拉取或正常恢复要求。
+
+### 既有工作流的切换顺序
+
+2026-10-04，为避免新规则合入前继续被普通 push 自动发布，既有 Test 工作流已临时停用；Verify 和 Online 未停用。恢复 Test 入口前须：
+
+1. 按仓库授权提交并合入这些 workflow、脚本和 hook；在默认分支注册带 `workflow_dispatch` 的 Test 工作流，在 Test 分支保留同一部署契约。
+2. 只读检查实际工作流源码：Test 无 `push` 触发，Verify 不含普通开发／Test PR 和归档后的重复 push 触发；检查 hook 安装及项目依赖。
+3. 确认新源码后执行 `gh workflow enable deploy-test.yml --repo jianify-llc/memoia`。禁止恢复旧 `on: push` 版本。启用本身不创建 run；只有获授权的验收批次才执行上面的手动命令。
+
+本地文件改完不等于远端默认分支已切换；在合入完成前，远端旧 Verify 触发语义仍可能存在。本批不以实际部署验证静态触发规则。
+
+## GitHub Organization 与镜像归属
+
+源码仓库为 `jianify-llc/memoia`，当前 Test 已验收镜像仍在 `ghcr.io/jianify/memoia`。工作流使用 `github.repository`，迁移后的新候选将发布到 `ghcr.io/jianify-llc/memoia`；上线该候选前须确认 package 关联 `jianify-llc/memoia`、该仓库的 Actions 有写权限、package 可匿名拉取，并通过 AMD64/ARM64 产物身份与服务器验收。仓库可见性不等于 package 可见性。
+
+部署与 schema 指纹脚本仅接受上述两个 namespace 的完整 digest；恢复仍须匹配已验收记录及源码身份。不要把旧 digest 的 owner 字符串改成新 owner；不要删除旧 package，直到历史 digest、新镜像发布、服务器拉取及恢复链路均已确认。以下旧 namespace 示例代表现有镜像，实际部署地址以验收记录为准。
+
 ```text
 /opt/jianify/
 ├── .env                         宿主机环境与 Tunnel token，Jianify-LLC 管理
@@ -49,7 +84,7 @@ MEMOIA_IMAGE 可填初始候选总 manifest digest，不用 latest；所有应�
 
 首次启动由操作员使用 `deploy-memoia.sh init /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256`。init-config 不等于安装或验收。init 必须确认无现有应用容器、Redis 数据目录和公司 `memoia` 数据库均为空、解析后的 Redis 挂载与数据库网络正确、公司 PostgreSQL 状态健康。先启动 Redis，再用候选 API 镜像显式执行 `python -m alembic upgrade head` 和 `check_schema()`，成功后才启动 API；迁移失败保留 pending，不启动候选 API。启动后分别验证真实模型、embedding、Bearer 正反例、SDK 写入/flush/最终事件 ID/画像与事件/删除、重启持久性、容量和 IPv4/IPv6 无公网旁路，再 finalize，不能仅凭健康检查宣称业务通过。
 
-2026-09-30，Test 已完成旧独立 PostgreSQL 到公司共享实例 `memoia` 数据库的一次性停写切换；旧 PostgreSQL 已停止，当前 API 连接公司数据库，自动测试发布已重新启用。此后按下文日常发布流程操作，不重跑 `backup-cutover` 或 `adopt-external-postgres`，也不以旧库快照覆盖新写入。一次性候选与旧版补丁见[历史切换说明](cutover/README.md)，实际迁移、数据及业务验收见[公司监控切换记录](https://github.com/jianify/Jianify-llc/blob/main/ops/monitoring/test-cutover.md)。
+2026-09-30，Test 已完成旧独立 PostgreSQL 到公司共享实例 `memoia` 数据库的一次性停写切换；旧 PostgreSQL 已停止，当前 API 连接公司数据库，Test 发布入口已重新启用（本次规范推广后须明确手动验收）。此后按下文日常发布流程操作，不重跑 `backup-cutover` 或 `adopt-external-postgres`，也不以旧库快照覆盖新写入。一次性候选与旧版补丁见[历史切换说明](cutover/README.md)，实际迁移、数据及业务验收见[公司监控切换记录](https://github.com/jianify-llc/Jianify-llc/blob/main/ops/monitoring/test-cutover.md)。
 
 init 记录 infra-config.sha256 和 schema.sha256；前者包含公司 PostgreSQL 只读配置指纹、Memoia Redis、外部网络与应用连接契约，后者只读取镜像内 ORM、建表连接层和迁移源码，不导入应用或连接 DB。Memoia 独立管理自己的服务生命周期；是否已有 Luvel 等消费者不作为日常发布资格，不再创建或读取 standalone-mode 标记。
 
@@ -71,7 +106,7 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 
 ## Schema 维护与 v2 升级
 
-现有 v1 库升级 v2 是显式维护，不是普通 `prepare`。当前 Alembic 链依次为 `0001_v1_baseline`、`0002_sources_v2`、`0003_profile_history`、`0004_key_scopes_search`、`0005_user_tombstones`。0001 对完整既有 v1 表、字段/类型/默认值/非空、键/外键与索引做严格核对，只接纳匹配的原库，不重建、不删历史数据；部分表、插件额外列或 schema 漂移均停止。0005 增加永久用户身份墓碑，不改写已有记忆；0004→0005 同样必须使用维护入口，不能用普通 API 更新绕过。不要先执行 `alembic stamp` 绕过 adoption，也不要直接填写新的 schema.sha256。迁移机制详见 [服务端迁移说明](../src/server/api/migrations/README)。
+现有 v1 库升级 v2 是显式维护，不是普通 `prepare`。当前 Alembic 链依次为 `0001_v1_baseline`、`0002_sources_v2`、`0003_profile_history`、`0004_key_scopes_search`、`0005_user_tombstones`、`0006_source_blob_messages`、`0007_event_time_evidence`。0001 严格接纳匹配的完整 v1 库；漂移须停止调查，不重建历史数据。0005 增加永久用户墓碑；0006 将旧批次保留为 legacy 来源，建立 Blob／消息归属约束并清除完成输入原文，未完成输入暂留 7 天。0006 为不可逆原文清理及 v2/0.3 协议调整，调用方必须协调升级，不能走普通 API 更新或恢复旧 API。不要 stamp 或手填 schema 指纹绕过维护。迁移范围见[服务端迁移说明](../src/server/api/migrations/README)与[数据及恢复契约](../src/server/api/V2-DESIGN.md)。
 
 本轮 `migrate-schema`／`finalize-schema` 仅允许 Test。操作顺序：
 
@@ -101,7 +136,7 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 
 ## GitHub Actions
 
-`verify.yml` 提供共用 CI，也直接验证 `main` push、PR 和 merge queue，不构建 Docker 镜像；`deploy-test.yml` 仅在 `test` push 后执行验证、双架构发布、匿名拉取和自动部署；`release` push 不触发 workflow。只有指向当前 `release` HEAD 的稳定 `v*` 标签才触发 `deploy-online.yml`：先验 Tag 来源，再验证、构建一次双架构版本镜像、核对源码标签和 digest，等待 `online` Environment 审批后只部署同一 digest。不同 SHA 不宣称 Test 与 Online 是同一镜像；既有版本标签若已存在，重跑仅验证并复用，不重新构建。GHCR 需 Public；服务器没有 GitHub 写权限凭据。Online 的 Secrets、主机和恢复路径尚未配置/验收，因此本轮不得批准 Online 部署。
+`verify.yml` 提供共用 CI，也验证归档到 `main` 的 PR 和 merge queue，不构建 Docker 镜像；`deploy-test.yml` 仅在明确手动选择当前 `test` 的验收批次执行验证、双架构发布、匿名拉取及受门禁控制的部署；`release` push 不触发 workflow。只有指向当前 `release` HEAD 的稳定 `v*` 标签才触发 `deploy-online.yml`：先验 Tag 来源，再验证、构建一次双架构版本镜像、核对源码标签和 digest，等待 `online` Environment 审批后只部署同一 digest。不同 SHA 不宣称 Test 与 Online 是同一镜像；既有版本标签若已存在，重跑仅验证并复用，不重新构建。GHCR 需 Public；服务器没有 GitHub 写权限凭据。Online 的 Secrets、主机和恢复路径尚未配置/验收，因此本轮不得批准 Online 部署。
 
 首次安装/业务验收前，仓库级 `MEMOIA_TEST_DEPLOY_ENABLED` 保持关闭；当前测试环境已完成初装，该门闩按实际状态启用。test Environment 限 test 分支，online Environment 限 `v*` 标签并配置 Required Reviewer。GitHub Actions 直接连接服务器公网 SSH，不再经过 Cloudflare Tunnel 或依赖 Access Service Token；业务 HTTPS API 继续使用宿主机 Tunnel。
 
@@ -143,7 +178,7 @@ ShellCheck/actionlint/Bash 语法仅静态验证。test_workflow.py 解析真实
 
 ### v2 TypeScript SDK 真实探针
 
-`v2-sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.2.4 已构建产物，不安装依赖、不构建源码、不重新打 SDK 包。stdin 是一个 JSON 对象：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 为整体等待预算，默认 360000、上限 900000；地址和 token 不放 argv 或日志。输入与输出都应保存为 root:root 0600 的受保护文件，不进入公开 artifact。
+`v2-sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.3.0 已构建产物，不安装依赖、不构建源码、不重新打 SDK 包。stdin 是一个 JSON 对象：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 为整体等待预算，默认 360000、上限 900000；地址和 token 不放 argv 或日志。输入与输出都应保存为 root:root 0600 的受保护文件，不进入公开 artifact。
 
 探针使用随机 UUID 的专用新用户，分别验证缺失／错误 Bearer、首次导入隐式创建用户、固定幂等键和 operation ID 的结果查询、来源证据、非空画像、事件搜索、真实画像历史。只有首次导入已明确 completed 后，才进行一次显式幂等重放：以完全相同正文和 key 再 POST，必须立即返回同一已完成操作及 source/event IDs，重新读取来源、画像和专用用户的完整事件列表，确认身份和数量不增长。随后撤回一条消息验证剩余证据，撤回另一条验证画像／来源证据／历史内容／事件不再返回失效内容。历史审计行可以保留，但其失效画像内容不能返回。原有业务检查全部通过后，调用 v2 `forgetUser`，严格确认同 UUID／`forgotten: true` 提交回执；只有这次回执确认后，才明确重复一次同 UUID 的 DELETE 验证幂等。随后使用预先记录的新 key／external ID 单次尝试迟到导入，必须是 SDK `MemoiaError` 的 HTTP 410／`user_forgotten`／`retryable: false`／`outcome: rejected`，普通 404、鉴权失败或意外接纳均不通过。
 
@@ -173,3 +208,5 @@ sudo -n sh -c '
 只有真实服务未使用模型 mock、实际配置启用事件 embedding 且供应商调用证据吻合时，才能把导入／搜索成功记为模型与 embedding 通过；单独 `embedding_search=true` 不证明服务启用了向量调用。脚本级测试 `node --test deploy/tests/test_v2_sdk_probe.mjs` 使用假 SDK／本机 HTTP 边界，验证探针自己的重放、deadline、过滤、清理、脱敏、检查点拒绝停写和进程退出留证行为，不是业务验收。原 v1 SDK 探针继续保留，v2 不替代旧契约回归。
 
 2026-09-27 首次真实验收发现人工 .env 的数据根误写成 dat，备份的实际挂载检查正确阻断；已通过单独停写备份和目录维护校正，SDK 原事件仍可读。必须核验解析和运行时挂载，不能只核验模板或预建空目录；日常发布不能自动搬数据。详见 validation 记录。
+
+时间证据版本使用 0007 与 SDK 0.4：只新增可空事件时间和原时区字段，不自动回填或撤销既有事实。发布前按隔离迁移、契约与召回证据验收；旧 API 镜像不能当作删除已保存时间证据的回退方式。

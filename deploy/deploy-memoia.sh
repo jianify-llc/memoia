@@ -47,7 +47,7 @@ image=${3:?manifest-addressed image}
 source_sha=${4:?source commit}
 run_id=${5:?GitHub run ID}
 compose_sha=${6:?compose SHA-256}
-[[ "$image" =~ ^ghcr\.io/jianify/memoia@sha256:[0-9a-f]{64}$ ]] || exit 2
+[[ "$image" =~ ^ghcr\.io/(jianify|jianify-llc)/memoia@sha256:[0-9a-f]{64}$ ]] || exit 2
 [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || exit 2
 [[ "$run_id" =~ ^[0-9]+$ ]] || exit 2
 [[ "$compose_sha" =~ ^[0-9a-f]{64}$ ]] || exit 2
@@ -287,7 +287,7 @@ fi
 if [[ "$mode" != restore-api && "$mode" != adopt-external-postgres ]]; then
 branch=$deployment_env
 [[ "$deployment_env" != online ]] || branch=release
-head_sha=$(curl -fsSL --max-time 15 "https://api.github.com/repos/jianify/memoia/git/ref/heads/$branch" | jq -r .object.sha)
+head_sha=$(curl -fsSL --max-time 15 "https://api.github.com/repos/jianify-llc/memoia/git/ref/heads/$branch" | jq -r .object.sha)
 [[ "$head_sha" == "$source_sha" ]] || {
   echo "A newer $branch branch head exists; refusing stale deployment" >&2
   exit 1
@@ -345,7 +345,7 @@ tunnel_ready || { echo 'Host Tunnel is not connected' >&2; exit 1; }
 old_container=$("${compose[@]}" ps -q memoia)
 [[ -n "$old_container" && -f deploy-state ]] || { echo 'No accepted running API to switch safely' >&2; exit 1; }
 accepted_image=$(cut -d' ' -f3 deploy-state)
-[[ "$accepted_image" =~ ^ghcr\.io/jianify/memoia@sha256:[0-9a-f]{64}$ && "$(docker inspect --format '{{.Config.Image}}' "$old_container")" == "$accepted_image" ]] || {
+[[ "$accepted_image" =~ ^ghcr\.io/(jianify|jianify-llc)/memoia@sha256:[0-9a-f]{64}$ && "$(docker inspect --format '{{.Config.Image}}' "$old_container")" == "$accepted_image" ]] || {
   echo 'Running API differs from the accepted deployment; review manual changes before switching' >&2; exit 1;
 }
 api_database_matches "$old_container" || { echo 'Running API database connection drifted' >&2; exit 1; }

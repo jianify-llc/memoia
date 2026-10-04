@@ -48,7 +48,7 @@ previously interrupted flush is safe to replay.
 ## Build and record a release
 
 The shared [`verify` workflow](../../.github/workflows/verify.yml)
-runs frozen-dependency and deployment-contract tests on `main` without building
+runs the same isolated local verification entry on pull requests archiving to `main` without building
 a Docker image. The separate `test` and `release` workflows own test deployment and
 online release respectively; neither is triggered by a `main` push. Promoting
 code to `release` and deploying online remain separate decisions. A successful
@@ -111,7 +111,7 @@ versions consuming the same queues.
 Use the checked-in [image override](../../src/server/docker-compose.image.yml)
 with the **existing deployment's** base Compose file, project identity, environment,
 and working directory. The override does not rename services or replace DB/Redis.
-Set `MEMOIA_IMAGE` to the complete verified `ghcr.io/jianify/memoia@sha256:…` value;
+Set `MEMOIA_IMAGE` to the complete verified `ghcr.io/jianify/memoia@sha256:…` value (the currently accepted namespace; use `ghcr.io/jianify-llc/memoia@sha256:…` only after that image is published and verified);
 do not use `latest`. The inherited base Compose pins AMD64; an ARM64 installation
 must preserve its existing platform override and select the ARM64 manifest.
 

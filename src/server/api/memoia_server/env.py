@@ -112,6 +112,7 @@ class Config:
     source_max_input_tokens: int = 16384
     source_context_window_tokens: int = 131072
     source_output_reserve_tokens: int = 32768
+    source_input_retention_seconds: int = 7 * 24 * 60 * 60
 
     additional_user_profiles: list[dict] = field(default_factory=list)
     overwrite_user_profiles: Optional[list[dict]] = None
@@ -195,6 +196,8 @@ class Config:
         return overwrite_config
 
     def __post_init__(self):
+        if self.source_input_retention_seconds <= 0:
+            raise ValueError("source_input_retention_seconds must be positive")
         assert self.llm_api_key is not None, "llm_api_key is required"
         if self.enable_event_embedding:
             if self.embedding_api_key is None and (

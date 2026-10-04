@@ -50,18 +50,45 @@ if command == "bash" and os.getenv("FIXTURE_SMOKE_FAIL"):
 
 
 class PublicationContract(unittest.TestCase):
+    def test_shared_verification_and_runner_budgets(self):
+        verify_source = VERIFY_WORKFLOW.read_text()
+        self.assertIn("python3 scripts/verify_local.py", verify_source)
+        local = (WORKFLOW.parents[2] / "scripts/verify_local.py").read_text()
+        for name in ("test_compose.py", "test_recovery.py", "test_sdk_probe.py", "test_deploy.py", "pytest", "check:generated"):
+            self.assertIn(name, local)
+        for path in (WORKFLOW, ONLINE_WORKFLOW, VERIFY_WORKFLOW):
+            for job in yaml.safe_load(path.read_text())["jobs"].values():
+                if "runs-on" in job:
+                    self.assertGreater(job["timeout-minutes"], 0)
+                    self.assertLessEqual(job["timeout-minutes"], 75)
+
+    def test_manual_selector_rejects_wrong_ref_and_changed_head(self):
+        step = yaml.safe_load(WORKFLOW.read_text())["jobs"]["validate-test"]["steps"][-1]
+        with tempfile.TemporaryDirectory() as directory:
+            git = Path(directory) / "git"
+            git.write_text('#!/bin/sh\nprintf "%s\\trefs/heads/test\\n" "$FIXTURE_HEAD"\n')
+            git.chmod(0o755)
+            for ref, head, accepted in (("refs/heads/test", SHA, True),
+                                        ("refs/heads/main", SHA, False),
+                                        ("refs/heads/test", "a" * 40, False)):
+                environment = dict(PATH=directory + ":/usr/bin:/bin", SELECTED_REF=ref,
+                                   GITHUB_SHA=SHA, FIXTURE_HEAD=head)
+                result = subprocess.run(["bash", "-c", step["run"]], env=environment,
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
     def test_test_and_online_workflows_have_separate_triggers_and_environments(self):
         test = yaml.safe_load(WORKFLOW.read_text())
         online = yaml.safe_load(ONLINE_WORKFLOW.read_text())
         verify = yaml.safe_load(VERIFY_WORKFLOW.read_text())
-        self.assertNotIn("tags", test[True]["push"])
-        self.assertNotIn("main", test[True]["push"]["branches"])
-        self.assertNotIn("release", test[True]["push"]["branches"])
-        self.assertEqual(test[True], {"push": {"branches": ["test"]}})
+        self.assertEqual(test[True], {"workflow_dispatch": None})
+        guard = test["jobs"]["validate-test"]
+        self.assertEqual(test["jobs"]["verify"]["needs"], "validate-test")
+        self.assertIn('"$SELECTED_REF" == refs/heads/test', guard["steps"][-1]["run"])
         self.assertEqual(online[True], {"push": {"tags": ["v*"]}})
         self.assertIn("workflow_call", verify[True])
-        self.assertEqual(verify[True]["push"], {"branches": ["main"]})
-        self.assertEqual(verify[True]["pull_request"], {"branches": ["main", "test", "release"]})
+        self.assertNotIn("push", verify[True])
+        self.assertEqual(verify[True]["pull_request"], {"branches": ["main"]})
         self.assertIn("merge_group", verify[True])
         self.assertNotIn("build", verify["jobs"])
         self.assertNotIn("docker/build-push-action", VERIFY_WORKFLOW.read_text())
@@ -127,7 +154,7 @@ class DirectSSHWorkflow(unittest.TestCase):
                         SSH_PRIVATE_KEY="fixture-only-not-a-real-key", SSH_KNOWN_HOSTS="fixture-only-known-hosts",
                         DEPLOY_HOST="203.0.113.10", DEPLOY_PORT="22", DEPLOY_USER="github",
                         TEST_BEARER_TOKEN="fixture-bearer", GITHUB_SHA=SHA, GITHUB_RUN_ID="200",
-                        REGISTRY="ghcr.io", IMAGE_NAME="jianify/memoia", MANIFEST_DIGEST="sha256:" + "a" * 64)
+                        REGISTRY="ghcr.io", IMAGE_NAME="jianify-llc/memoia", MANIFEST_DIGEST="sha256:" + "a" * 64)
         for name in ("CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "TUNNEL_SERVICE_TOKEN_ID", "TUNNEL_SERVICE_TOKEN_SECRET"):
             self.env.pop(name, None)
 

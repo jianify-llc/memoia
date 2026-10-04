@@ -14,13 +14,13 @@ from memoia_server.controllers.user_lease import UserLease, LeaseUnavailable, CU
 from memoia_server.connectors import Session, get_redis_client, DB_ENGINE
 from memoia_server.models.database import User, UserProfile, UserEvent, UserEventGist, Project, Billing, ProjectBilling
 from memoia_server.models.response import UserData
-from memoia_server.models.source import ImportSource, RetractMessages, memory_sources, memory_operations, memory_facts, user_memory_states
+from memoia_server.models.source import ImportSource, DeleteMessages, memory_blobs, memory_operations, memory_facts, user_memory_states
 from memoia_server.env import CONFIG
 from memoia_server.models.utils import Promise
 
 
 def request(key="import-1", external="log-1", messages=None):
-    return ImportSource(idempotency_key=key, external_id=external, messages=messages or [
+    return ImportSource(idempotency_key=key, source_id=external, messages=messages or [
         {"message_id": "1", "role": "user", "content": "I live in Tokyo", "occurred_at": datetime.now(timezone.utc)},
         {"message_id": "2", "role": "user", "content": "I enjoy chess", "occurred_at": datetime.now(timezone.utc)},
     ])
@@ -66,7 +66,7 @@ async def test_completed_replay_returns_same_ids_and_effect_once(source_user, mo
     assert first == second and first.status == "completed"
     assert models.await_count == 1
     with Session() as session:
-        assert session.scalar(select(func.count()).select_from(memory_sources).where(memory_sources.c.user_id == source_user)) == 1
+        assert session.scalar(select(func.count()).select_from(memory_blobs).where(memory_blobs.c.user_id == source_user)) == 1
         assert session.scalar(select(func.count()).select_from(UserEvent).where(UserEvent.user_id == source_user)) == 1
 
 
@@ -96,17 +96,18 @@ async def test_fixed_user_import_is_project_scoped_and_deleted_user_is_not_recre
     try:
         first = await source.import_source(uid, "__root__", request())
         other = await source.import_source(uid, project, request())
-        assert first.source_id != other.source_id
+        assert first.source_id == other.source_id and first.blob_id != other.blob_id
         with Session.begin() as session:
             assert session.scalar(select(func.count()).select_from(User).where(User.id == uid)) == 2
             session.execute(delete(User).where(User.id == uid, User.project_id == "__root__"))
         with pytest.raises(source.SourceError, match="not found"):
             await source.retry_operation(uid, "__root__", first.operation_id)
-        with pytest.raises(source.SourceError, match="not found"):
-            await source.retract_messages(uid, "__root__", first.source_id,
-                                         RetractMessages(idempotency_key="forgotten", message_ids=["1"]))
+        # Plain v1 user deletion remains recreatable; a delete-message request must
+        # still establish a tombstone before a queued first batch can arrive.
+        await source.delete_messages(uid, "__root__", first.source_id,
+                                     DeleteMessages(idempotency_key="forgotten", message_ids=["1"]))
         with Session() as session:
-            assert session.get(User, (uid, "__root__")) is None
+            assert session.get(User, (uid, "__root__")) is not None
             assert session.get(User, (uid, project)) is not None
     finally:
         with Session.begin() as session:
@@ -160,7 +161,8 @@ async def test_profile_failure_rolls_back_source_events_and_completion(source_us
     receipt = source.get_operation(source_user, "__root__", key=body.idempotency_key)
     assert receipt.status == "failed" and receipt.error.retryable
     with Session() as session:
-        assert session.scalar(select(func.count()).select_from(memory_sources).where(memory_sources.c.user_id == source_user)) == 0
+        assert session.scalar(select(func.count()).select_from(memory_blobs).where(memory_blobs.c.user_id == source_user)) == 1
+        assert source.get_blob(source_user, "__root__", receipt.blob_id).status == "failed"
         assert session.scalar(select(func.count()).select_from(memory_facts).where(memory_facts.c.user_id == source_user)) == 0
         assert session.scalar(select(func.count()).select_from(UserEvent).where(UserEvent.user_id == source_user)) == 0
     monkeypatch.setattr(source, "_replace_profiles", original)
@@ -177,11 +179,11 @@ async def test_retract_joint_support_preserves_independent_support(source_user, 
     monkeypatch.setattr(source, "extract_source", joint)
     body = request(messages=[{"message_id": mid, "role": "user", "content": "Tokyo", "occurred_at": now} for mid in ["1", "2", "3"]])
     inserted = await source.import_source(source_user, "__root__", body)
-    await source.retract_messages(source_user, "__root__", inserted.source_id, RetractMessages(idempotency_key="remove1", message_ids=["1"]))
+    await source.delete_messages(source_user, "__root__", inserted.source_id, DeleteMessages(idempotency_key="remove1", message_ids=["1"]))
     detail = source.get_source(source_user, "__root__", source_id=inserted.source_id)
     assert detail.evidence[0].support_groups == [["3"]]
     assert (await profile.get_user_profiles(source_user, "__root__")).data().profiles[0].content == "Tokyo"
-    await source.retract_messages(source_user, "__root__", inserted.source_id, RetractMessages(idempotency_key="remove3", message_ids=["3"]))
+    await source.delete_messages(source_user, "__root__", inserted.source_id, DeleteMessages(idempotency_key="remove3", message_ids=["3"]))
     assert not (await profile.get_user_profiles(source_user, "__root__")).data().profiles
     assert all("Tokyo" not in p.content for h in source.get_history(source_user, "__root__") for p in h.profiles)
     assert not (await event.get_user_events(source_user, "__root__")).data().events
@@ -193,7 +195,7 @@ async def test_failed_rebuild_is_hidden_and_recoverable(source_user, models, mon
     original = source.reconcile_facts
     monkeypatch.setattr(source, "reconcile_facts", AsyncMock(side_effect=source.SourceError("model_failure", "test", 503, True)))
     with pytest.raises(source.SourceError):
-        await source.retract_messages(source_user, "__root__", inserted.source_id, RetractMessages(idempotency_key="remove1", message_ids=["1"]))
+        await source.delete_messages(source_user, "__root__", inserted.source_id, DeleteMessages(idempotency_key="remove1", message_ids=["1"]))
     assert not (await event.get_user_events(source_user, "__root__")).data().events
     assert [p.content for p in (await profile.get_user_profiles(source_user, "__root__")).data().profiles] == ["I enjoy chess"]
     assert all("Tokyo" not in p.content for h in source.get_history(source_user, "__root__") for p in h.profiles)
@@ -240,25 +242,25 @@ async def test_event_tags_rebuild_uses_only_configured_remaining_evidence(source
         imported = await source.import_source(source_user, "__root__", request())
         with Session() as session:
             assert session.get(UserEvent, (imported.result.event_ids[0], "__root__")).event_data["event_tags"] == tags
-        withdrawal = RetractMessages(idempotency_key="withdraw-city-tag", message_ids=["1"])
+        withdrawal = DeleteMessages(idempotency_key="withdraw-city-tag", message_ids=["1"])
         if fail_first:
             with pytest.raises(source.SourceError, match="Tag generation failed"):
-                await source.retract_messages(source_user, "__root__", imported.source_id, withdrawal)
+                await source.delete_messages(source_user, "__root__", imported.source_id, withdrawal)
             receipt = source.get_operation(source_user, "__root__", key=withdrawal.idempotency_key)
             assert receipt.status == "failed" and receipt.error.retryable
-            assert source.get_source(source_user, "__root__", source_id=imported.source_id).status == "rebuilding"
+            assert source.get_blob(source_user, "__root__", imported.blob_id).status == "rebuilding"
             assert not (await event.get_user_events(source_user, "__root__")).data().events
             completed = await source.retry_operation(source_user, "__root__", receipt.operation_id)
             assert completed.operation_id == receipt.operation_id
         else:
-            completed = await source.retract_messages(source_user, "__root__", imported.source_id, withdrawal)
+            completed = await source.delete_messages(source_user, "__root__", imported.source_id, withdrawal)
         assert completed.status == "completed"
         with Session() as session:
             rebuilt = session.get(UserEvent, (completed.result.event_ids[0], "__root__"))
             assert rebuilt.event_data["event_tags"] == [{"tag": "hobby", "value": "chess"}]
             assert "Tokyo" not in json.dumps(rebuilt.event_data)
-        await source.retract_messages(source_user, "__root__", imported.source_id,
-                                      RetractMessages(idempotency_key="withdraw-hobby-tag", message_ids=["2"]))
+        await source.delete_messages(source_user, "__root__", imported.source_id,
+                                      DeleteMessages(idempotency_key="withdraw-hobby-tag", message_ids=["2"]))
         assert len(calls) == (2 if fail_first else 1)
         assert not (await event.get_user_events(source_user, "__root__")).data().events
     finally:
@@ -287,7 +289,8 @@ async def test_new_generation_fences_stale_model_result(source_user, models, mon
         await old
     assert new.status == "completed"
     with Session() as session:
-        assert session.scalar(select(func.count()).select_from(memory_sources).where(memory_sources.c.user_id == source_user)) == 1
+        assert session.scalar(select(func.count()).select_from(memory_blobs).where(memory_blobs.c.user_id == source_user)) == 2
+        assert session.scalar(select(func.count()).select_from(UserEvent).where(UserEvent.user_id == source_user)) == 1
 
 
 @pytest.mark.asyncio
@@ -325,7 +328,8 @@ async def test_cancelled_model_keeps_processing_receipt_and_can_resume(source_us
     receipt = source.get_operation(source_user, "__root__", key="import-1")
     assert receipt.status == "processing"
     with Session() as session:
-        assert session.scalar(select(func.count()).select_from(memory_sources).where(memory_sources.c.user_id == source_user)) == 0
+        assert session.scalar(select(func.count()).select_from(memory_blobs).where(memory_blobs.c.user_id == source_user)) == 1
+        assert session.scalar(select(func.count()).select_from(memory_facts).where(memory_facts.c.user_id == source_user)) == 0
     async with get_redis_client() as redis:
         assert await redis.get(UserLease(source_user, "__root__").key) is None
     monkeypatch.setattr(source, "extract_source", original)
@@ -343,8 +347,8 @@ async def test_event_delete_keeps_source_and_profiles_and_never_resurrects(sourc
         assert (await event.delete_user_event(source_user, "__root__", eid)).ok()
     assert len(source.get_source(source_user, "__root__", source_id=inserted.source_id).evidence) == 2
     assert len((await profile.get_user_profiles(source_user, "__root__")).data().profiles) == 2
-    retracted = await source.retract_messages(source_user, "__root__", inserted.source_id,
-        RetractMessages(idempotency_key="withdraw-one", message_ids=["1"]))
+    retracted = await source.delete_messages(source_user, "__root__", inserted.source_id,
+        DeleteMessages(idempotency_key="withdraw-one", message_ids=["1"]))
     assert retracted.result.event_ids == []
     assert not (await event.get_user_events(source_user, "__root__")).data().events
     with Session() as session:
@@ -382,8 +386,8 @@ async def test_profile_edit_cannot_strip_provenance_then_escape_withdrawal(sourc
     with Session() as session:
         attributes = session.get(UserProfile, (pid, "__root__")).attributes
         assert attributes["memoia_v2"] and attributes["fact_ids"]
-    await source.retract_messages(source_user, "__root__", inserted.source_id,
-        RetractMessages(idempotency_key="withdraw-first", message_ids=["1"]))
+    await source.delete_messages(source_user, "__root__", inserted.source_id,
+        DeleteMessages(idempotency_key="withdraw-first", message_ids=["1"]))
     assert all("Tokyo" not in row.content for row in (await profile.get_user_profiles(source_user, "__root__")).data().profiles)
 
 
@@ -407,7 +411,7 @@ event_tags: []
         assert data["configuration"]["language"] == "zh"
         if model is source.Extraction:
             assert set(data["configuration"]) == {"language", "profile_topics", "event_tag_definitions"}
-            return source.Extraction(facts=[source.ExtractedFact(content="Tokyo", topic="custom", sub_topic="city", support_groups=[["1"]])], event_tags=[])
+            return source.Extraction(facts=[source.ExtractedFact(content="Tokyo", topic="custom", sub_topic="city", support_groups=[["1"]], event_time=None)], event_tags=[])
         assert data["configuration"]["strict_mode"] is True
         fid = data["facts"][0]["fact_id"]
         return source.Reconciliation(decisions=[source.FactDecision(fact_id=fid, include=True)],
@@ -463,10 +467,11 @@ async def test_external_identity_reuses_effect_and_never_resurrects(source_user,
     first = await source.import_source(source_user, "__root__", body)
     changed_key = body.model_copy(update={"idempotency_key": "another-key"})
     second = await source.import_source(source_user, "__root__", changed_key)
-    assert second.source_id == first.source_id and second.result == first.result
+    assert second.source_id == first.source_id and second.blob_id != first.blob_id
+    assert not second.result.event_ids
     assert models.await_count == 1
-    await source.retract_messages(source_user, "__root__", first.source_id,
-                                  RetractMessages(idempotency_key="forget", message_ids=["1", "2"]))
+    await source.delete_messages(source_user, "__root__", first.source_id,
+                                  DeleteMessages(idempotency_key="forget", message_ids=["1", "2"]))
     third = await source.import_source(source_user, "__root__", body.model_copy(update={"idempotency_key": "third"}))
     assert third.status == "completed" and third.source_id == first.source_id
     assert not source.get_source(source_user, "__root__", source_id=first.source_id).evidence
@@ -478,20 +483,20 @@ async def test_profile_history_is_atomic_diff_and_redacts_retracted_evidence(sou
     first = await source.import_source(source_user, "__root__", request())
     history = source.get_history(source_user, "__root__")
     assert len(history) == 1 and len(history[0].profiles) == 2 and len(history[0].added) == 2
-    await source.retract_messages(source_user, "__root__", first.source_id,
-                                  RetractMessages(idempotency_key="forget", message_ids=["1"]))
+    await source.delete_messages(source_user, "__root__", first.source_id,
+                                  DeleteMessages(idempotency_key="forget", message_ids=["1"]))
     history = source.get_history(source_user, "__root__")
     assert len(history) == 2
     assert all("Tokyo" not in p.content for h in history for field in (h.profiles, h.added, h.removed) for p in field)
     with Session() as session:
         accepted = session.execute(select(memory_operations.c.request).where(memory_operations.c.id == first.operation_id)).scalar_one()
-        assert accepted["messages"][0]["content"] == ""
+        assert "messages" not in accepted
 
 
 @pytest.mark.asyncio
 async def test_retract_completed_replay_does_not_recompute(source_user, models, monkeypatch):
     first = await source.import_source(source_user, "__root__", request())
-    body = RetractMessages(idempotency_key="forget", message_ids=["1"])
-    done = await source.retract_messages(source_user, "__root__", first.source_id, body)
+    body = DeleteMessages(idempotency_key="forget", message_ids=["1"])
+    done = await source.delete_messages(source_user, "__root__", first.source_id, body)
     monkeypatch.setattr(source, "reconcile_facts", AsyncMock(side_effect=AssertionError("must not recompute")))
-    assert await source.retract_messages(source_user, "__root__", first.source_id, body) == done
+    assert await source.delete_messages(source_user, "__root__", first.source_id, body) == done

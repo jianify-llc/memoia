@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Memoia V2 API",
-    "version": "0.2.0"
+    "version": "0.4.0"
   },
   "paths": {
     "/api/v2/users/{user_id}": {
@@ -48,13 +48,13 @@
         }
       }
     },
-    "/api/v2/users/{user_id}/sources": {
+    "/api/v2/users/{user_id}/blobs": {
       "post": {
         "tags": [
           "sources"
         ],
         "summary": "Import Source",
-        "operationId": "importSource",
+        "operationId": "importBlob",
         "parameters": [
           {
             "name": "user_id",
@@ -84,70 +84,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Operation"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "get": {
-        "tags": [
-          "sources"
-        ],
-        "summary": "List Sources",
-        "operationId": "listSources",
-        "parameters": [
-          {
-            "name": "user_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid",
-              "title": "User Id"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 100,
-              "minimum": 1,
-              "default": 50,
-              "title": "Limit"
-            }
-          },
-          {
-            "name": "offset",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 0,
-              "default": 0,
-              "title": "Offset"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Sources"
                 }
               }
             }
@@ -336,6 +272,72 @@
         }
       }
     },
+    "/api/v2/users/{user_id}/sources": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "List Sources",
+        "operationId": "listSources",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Sources"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/users/{user_id}/operations/{operation_id}/retry": {
       "post": {
         "tags": [
@@ -389,13 +391,13 @@
         }
       }
     },
-    "/api/v2/users/{user_id}/sources/by-external-id/{external_id}": {
+    "/api/v2/users/{user_id}/blobs/{blob_id}": {
       "get": {
         "tags": [
           "sources"
         ],
-        "summary": "Get Source By External Id",
-        "operationId": "getSourceByExternalId",
+        "summary": "Get Blob",
+        "operationId": "getBlob",
         "parameters": [
           {
             "name": "user_id",
@@ -408,12 +410,13 @@
             }
           },
           {
-            "name": "external_id",
+            "name": "blob_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
-              "title": "External Id"
+              "format": "uuid",
+              "title": "Blob Id"
             }
           }
         ],
@@ -423,7 +426,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Source"
+                  "$ref": "#/components/schemas/Blob"
                 }
               }
             }
@@ -465,7 +468,6 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid",
               "title": "Source Id"
             }
           }
@@ -494,13 +496,13 @@
         }
       }
     },
-    "/api/v2/users/{user_id}/sources/{source_id}/retract": {
-      "post": {
+    "/api/v2/users/{user_id}/sources/{source_id}/messages": {
+      "delete": {
         "tags": [
           "sources"
         ],
-        "summary": "Retract Messages",
-        "operationId": "retractMessages",
+        "summary": "Delete Messages",
+        "operationId": "deleteMessages",
         "parameters": [
           {
             "name": "user_id",
@@ -518,7 +520,6 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid",
               "title": "Source Id"
             }
           }
@@ -528,7 +529,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RetractMessages"
+                "$ref": "#/components/schemas/DeleteMessages"
               }
             }
           }
@@ -1087,12 +1088,158 @@
   },
   "components": {
     "schemas": {
+      "Blob": {
+        "properties": {
+          "blob_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Blob Id"
+          },
+          "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "processing",
+              "failed",
+              "active",
+              "retracted",
+              "rebuilding"
+            ],
+            "title": "Status"
+          },
+          "message_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Message Ids"
+          },
+          "event_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Event Ids"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "blob_id",
+          "source_id",
+          "status",
+          "message_ids",
+          "event_ids",
+          "created_at"
+        ],
+        "title": "Blob"
+      },
+      "DeleteMessages": {
+        "properties": {
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "pattern": "^[^/]+$",
+            "title": "Idempotency Key"
+          },
+          "message_ids": {
+            "items": {
+              "type": "string",
+              "maxLength": 255,
+              "minLength": 1
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Message Ids"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "idempotency_key",
+          "message_ids"
+        ],
+        "title": "DeleteMessages"
+      },
+      "EventTime": {
+        "properties": {
+          "start": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start"
+          },
+          "end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End"
+          },
+          "precision": {
+            "type": "string",
+            "enum": [
+              "year",
+              "month",
+              "day",
+              "range",
+              "unknown"
+            ],
+            "title": "Precision"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/TimeEvidence"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Evidence"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "start",
+          "end",
+          "precision",
+          "evidence"
+        ],
+        "title": "EventTime"
+      },
       "Evidence": {
         "properties": {
           "fact_id": {
             "type": "string",
             "format": "uuid",
             "title": "Fact Id"
+          },
+          "blob_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Blob Id"
           },
           "content": {
             "type": "string",
@@ -1115,12 +1262,30 @@
             },
             "type": "array",
             "title": "Support Groups"
+          },
+          "event_time": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EventTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_messages": {
+            "items": {
+              "$ref": "#/components/schemas/SourceObservation"
+            },
+            "type": "array",
+            "title": "Source Messages"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
           "fact_id",
+          "blob_id",
           "content",
           "topic",
           "sub_topic",
@@ -1183,8 +1348,7 @@
           },
           "source_ids": {
             "items": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             },
             "type": "array",
             "title": "Source Ids"
@@ -1241,7 +1405,6 @@
           },
           "source_id": {
             "type": "string",
-            "format": "uuid",
             "title": "Source Id"
           },
           "created_at": {
@@ -1293,12 +1456,12 @@
             "pattern": "^[^/]+$",
             "title": "Idempotency Key"
           },
-          "external_id": {
+          "source_id": {
             "type": "string",
             "maxLength": 255,
             "minLength": 1,
             "pattern": "^[^/]+$",
-            "title": "External Id"
+            "title": "Source Id"
           },
           "messages": {
             "items": {
@@ -1319,7 +1482,7 @@
         "type": "object",
         "required": [
           "idempotency_key",
-          "external_id",
+          "source_id",
           "messages"
         ],
         "title": "ImportSource"
@@ -1575,6 +1738,10 @@
             "title": "Status"
           },
           "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "blob_id": {
             "anyOf": [
               {
                 "type": "string",
@@ -1584,11 +1751,7 @@
                 "type": "null"
               }
             ],
-            "title": "Source Id"
-          },
-          "external_id": {
-            "type": "string",
-            "title": "External Id"
+            "title": "Blob Id"
           },
           "result": {
             "anyOf": [
@@ -1617,7 +1780,7 @@
           "operation_id",
           "status",
           "source_id",
-          "external_id",
+          "blob_id",
           "result",
           "error"
         ],
@@ -1680,8 +1843,7 @@
           },
           "source_ids": {
             "items": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             },
             "type": "array",
             "title": "Source Ids"
@@ -1773,35 +1935,6 @@
         ],
         "title": "Projects"
       },
-      "RetractMessages": {
-        "properties": {
-          "idempotency_key": {
-            "type": "string",
-            "maxLength": 255,
-            "minLength": 1,
-            "pattern": "^[^/]+$",
-            "title": "Idempotency Key"
-          },
-          "message_ids": {
-            "items": {
-              "type": "string",
-              "maxLength": 255,
-              "minLength": 1
-            },
-            "type": "array",
-            "maxItems": 1000,
-            "minItems": 1,
-            "title": "Message Ids"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "idempotency_key",
-          "message_ids"
-        ],
-        "title": "RetractMessages"
-      },
       "SearchEvent": {
         "properties": {
           "id": {
@@ -1816,6 +1949,17 @@
           "source_id": {
             "anyOf": [
               {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Id"
+          },
+          "blob_id": {
+            "anyOf": [
+              {
                 "type": "string",
                 "format": "uuid"
               },
@@ -1823,7 +1967,7 @@
                 "type": "null"
               }
             ],
-            "title": "Source Id"
+            "title": "Blob Id"
           },
           "score": {
             "type": "number",
@@ -1833,6 +1977,13 @@
             "type": "string",
             "format": "date-time",
             "title": "Occurred At"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/Evidence"
+            },
+            "type": "array",
+            "title": "Evidence"
           }
         },
         "additionalProperties": false,
@@ -1841,6 +1992,7 @@
           "id",
           "content",
           "source_id",
+          "blob_id",
           "score",
           "occurred_at"
         ],
@@ -1867,21 +2019,11 @@
         "properties": {
           "source_id": {
             "type": "string",
-            "format": "uuid",
             "title": "Source Id"
           },
-          "external_id": {
-            "type": "string",
-            "title": "External Id"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "active",
-              "retracted",
-              "rebuilding"
-            ],
-            "title": "Status"
+          "legacy": {
+            "type": "boolean",
+            "title": "Legacy"
           },
           "message_ids": {
             "items": {
@@ -1890,17 +2032,24 @@
             "type": "array",
             "title": "Message Ids"
           },
-          "retracted_message_ids": {
+          "deleted_message_ids": {
             "items": {
               "type": "string"
             },
             "type": "array",
-            "title": "Retracted Message Ids"
+            "title": "Deleted Message Ids"
           },
           "created_at": {
             "type": "string",
             "format": "date-time",
             "title": "Created At"
+          },
+          "blobs": {
+            "items": {
+              "$ref": "#/components/schemas/Blob"
+            },
+            "type": "array",
+            "title": "Blobs"
           },
           "evidence": {
             "items": {
@@ -1914,11 +2063,11 @@
         "type": "object",
         "required": [
           "source_id",
-          "external_id",
-          "status",
+          "legacy",
           "message_ids",
-          "retracted_message_ids",
+          "deleted_message_ids",
           "created_at",
+          "blobs",
           "evidence"
         ],
         "title": "Source"
@@ -1951,6 +2100,18 @@
             "type": "string",
             "format": "date-time",
             "title": "Occurred At"
+          },
+          "time_zone": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Zone"
           }
         },
         "additionalProperties": false,
@@ -1962,6 +2123,37 @@
           "occurred_at"
         ],
         "title": "SourceMessage"
+      },
+      "SourceObservation": {
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "title": "Message Id"
+          },
+          "recorded_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Recorded At"
+          },
+          "time_zone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time Zone"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "message_id",
+          "recorded_at"
+        ],
+        "title": "SourceObservation"
       },
       "SourceResult": {
         "properties": {
@@ -2006,6 +2198,29 @@
           "sources"
         ],
         "title": "Sources"
+      },
+      "TimeEvidence": {
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Message Id"
+          },
+          "expression": {
+            "type": "string",
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Expression"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "message_id",
+          "expression"
+        ],
+        "title": "TimeEvidence"
       },
       "ValidationError": {
         "properties": {

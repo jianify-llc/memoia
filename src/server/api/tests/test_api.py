@@ -431,7 +431,7 @@ async def test_api_user_flush_buffer(
     d = p.json()
     assert p.status_code == 200
     assert d["errno"] == 0
-    assert len(d["data"]["ids"]) == 1
+    assert len(d["data"]["ids"]) == 0
 
     response = client.get(f"{PREFIX}/users/profile/{u_id}")
     d = response.json()

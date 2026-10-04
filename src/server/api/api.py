@@ -23,14 +23,38 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+    from memoia_server.controllers.source import purge_expired_inputs
     from memoia_server.schema import check_schema
     check_schema()
     init_redis_pool()
     await check_embedding_sanity()
     await llm_sanity_check()
     LOG.info(f"Start Memoia Server {memoia_server.__version__} 🖼️")
-    yield
-    await close_connection()
+    async def erase_expired():
+        while True:
+            try:
+                sweep = asyncio.create_task(asyncio.to_thread(purge_expired_inputs))
+                try:
+                    await asyncio.shield(sweep)
+                except asyncio.CancelledError:
+                    # Cancelling a thread await does not stop its SQL transaction.
+                    # Finish this sweep before closing shared connections.
+                    await sweep
+                    raise
+            except Exception:
+                LOG.error("Temporary input erasure failed; inspect database connectivity")
+            await asyncio.sleep(60)
+    eraser = asyncio.create_task(erase_expired())
+    try:
+        yield
+    finally:
+        eraser.cancel()
+        try:
+            await eraser
+        except asyncio.CancelledError:
+            pass
+        await close_connection()
 
 
 app = FastAPI(

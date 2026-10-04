@@ -1,17 +1,27 @@
 # Memoia TypeScript SDK v2
 
-`@jianify/memoia@0.2.4` supports Node.js and Cloudflare Workers. This is a separate v2 client; the upstream v1 SDK is unchanged. Protocol types and runtime validators are generated from `src/server/api/openapi-v2.json`, not a second hand-written contract. This patch adds permanent account forgetting while preserving native Worker fetch, redirect safety, recoverable ownership-conflict classification and bundled validator license notices; the server protocol remains v2/0.2.0.
+`@jianify/memoia@0.3.0` supports Node.js and Cloudflare Workers. Protocol types and runtime validators are generated from `src/server/api/openapi-v2.json`. This v2 revision changes Source from a processing batch to a caller-owned grouping; upgrade callers together with the server. The upstream v1 SDK and its event/user deletion contracts are unchanged.
 
 ```ts
 import { MemoiaClient } from "@jianify/memoia";
 
 const memoia = new MemoiaClient({ baseUrl: "https://test-memoia.jianify.dev", apiKey: projectToken });
-const operation = await memoia.importSource(userId, {
+const operation = await memoia.importBlob(userId, {
   idempotency_key: batchKey,
-  external_id: `luvel:memory_store_logs:${logId}`,
+  source_id: String(dialogId),
   messages: [{ message_id: "123", role: "user", content: "I live in Tokyo.", occurred_at: "2026-10-02T00:00:00Z" }],
 }, { deadline: Date.now() + 90_000 });
+
+await memoia.getBlob(userId, operation.blob_id!);
+await memoia.deleteMessages(userId, String(dialogId), {
+  idempotency_key: deletionKey,
+  message_ids: ["123"],
+});
 ```
+
+A Source is unique within the authenticated project and user. Every import creates one server-owned Blob tied to its fixed idempotency key. Messages belong to the Source, not the Blob: overlapping batches reuse their identity and cannot create independent evidence from the same message. Changed body, role or occurrence time for an existing message ID returns a conflict. `deleteMessages()` deletes contributions across all Blobs in that Source; it does not require message bodies or event IDs. Event deletion and permanent account forgetting remain distinct operations.
+
+Completed imports atomically erase raw input and retain their receipt, facts and message associations. Incomplete raw input defaults to seven days of temporary retention; retry does not extend it. After expiry, `retryOperation()` returns `input_required`. First query the original receipt, then explicitly resupply the identical batch using its original key if still incomplete. The SDK never reconstructs or resends expired input automatically. Legacy groups (`legacy:` / `v1-flush:`) are not inferred external conversation identities.
 
 The base URL is an origin, without `/api/v2`. `deadline` is an absolute Unix timestamp in milliseconds; `signal` may also cancel a request. Reads retain a 5-second per-attempt limit, writes a 90-second limit, both bounded by the caller's remaining deadline. The client never generates or replaces an idempotency key.
 
@@ -43,3 +53,7 @@ pnpm pack
 ```
 
 The generated validators are standalone JavaScript: runtime use requires no Node.js APIs, dynamic evaluation, or Ajv dependency. A fixed-version tarball can be copied into a consumer's `vendor/` directory and referenced through a `file:` dependency with its lockfile; no registry publication is required for first integration. Regenerate after exporting server OpenAPI. The generated-schema check must be part of verification before distribution.
+
+## Time evidence (0.4)
+
+Import messages may include `time_zone` (original IANA zone). `occurred_at` remains the message recording instant, not the date of the event it describes. Returned source evidence and search events preserve `event_time` (inclusive dates, precision and verbatim source expressions) and `source_messages` (recording instants/zones). `EventTime` and `Evidence` are exported from generated OpenAPI. Missing fields in old responses are compatible; unknown dates must remain unknown. A month/year range is not an exact occurrence or duration. Pair SDK 0.4 with schema revision 0007; no history backfill is implicit.

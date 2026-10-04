@@ -2,7 +2,7 @@
 
 <!-- Modified for Memoia: source builds, compatible deployment identity, and release instructions. -->
 
-This is the independently maintained server from [jianify/memoia](https://github.com/jianify/memoia),
+This is the independently maintained server from [jianify-llc/memoia](https://github.com/jianify-llc/memoia),
 derived from Memobase under Apache-2.0. The Python package is `memoia_server`;
 client SDKs remain `memobase`. References to upstream features below remain applicable.
 

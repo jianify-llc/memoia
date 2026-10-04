@@ -11,6 +11,7 @@ from datetime import timedelta
 from sqlalchemy import desc, select
 from sqlalchemy.sql import func
 from ..env import TRACE_LOG, CONFIG
+from ..temporal import query_periods, time_overlap, render_gist
 
 
 async def get_user_event_gists(
@@ -55,7 +56,7 @@ async def truncate_event_gists(
     c_tokens = 0
     truncated_results = []
     for r in events.gists:
-        c_tokens += len(get_encoded_tokens(r.gist_data.content))
+        c_tokens += len(get_encoded_tokens(render_gist(r.gist_data)))
         if c_tokens > max_token_size:
             break
         truncated_results.append(r)
@@ -93,9 +94,6 @@ async def search_user_event_gists(
         return query_embeddings
     query_embedding = query_embeddings.data()[0]
 
-    # Calculate the time cutoff once
-    time_cutoff = func.now() - timedelta(days=time_range_in_days)
-
     # Store the similarity expression to avoid recomputation
     similarity_expr = 1 - UserEventGist.embedding.cosine_distance(query_embedding)
 
@@ -107,17 +105,21 @@ async def search_user_event_gists(
         .where(
             UserEventGist.user_id == user_id,
             UserEventGist.project_id == project_id,
-            UserEventGist.created_at > time_cutoff,
             similarity_expr > similarity_threshold,
             UserEventGist.embedding.is_not(None),  # Skip null embeddings
         )
         .order_by(desc("similarity"))
-        .limit(topk)
+        .limit(min(500, max(50, topk * 5)))
     )
 
     with Session() as session:
         # Use .all() instead of .scalars().all() to get both columns
         result = session.execute(stmt).all()
+        periods = query_periods(query)
+        # Recording age is not event time. Unknown dates stay in the candidate set;
+        # the bounded bonus cannot rescue semantically unrelated candidates.
+        result.sort(key=lambda row: -(row[1] + (0.03 if time_overlap(row[0].gist_data.get("event_time"), periods) else 0)))
+        result = result[:topk]
         user_event_gists: list[UserEventGistData] = []
         for row in result:
             user_event: UserEventGist = row[0]  # UserEventGist object
@@ -137,7 +139,7 @@ async def search_user_event_gists(
         TRACE_LOG.info(
             project_id,
             user_id,
-            f"Event Query: {query}",
+            f"Event query returned {len(user_event_gists)} gists",
         )
 
     return Promise.resolve(user_event_gists_data)

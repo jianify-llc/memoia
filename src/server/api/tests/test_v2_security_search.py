@@ -111,8 +111,8 @@ def test_missing_root_credential_never_authorizes(monkeypatch):
 def test_rejected_input_is_not_echoed_in_validation_response(managed_project):
     _, client = managed_project
     secret_text = "private-body-not-for-error-output"
-    response = client.post(f"/api/v2/users/{uuid4()}/sources", json={"idempotency_key": "invalid",
-        "external_id": "invalid", "messages": [{"message_id": "1", "role": "wrong-role", "content": secret_text}]})
+    response = client.post(f"/api/v2/users/{uuid4()}/blobs", json={"idempotency_key": "invalid",
+        "source_id": "invalid", "messages": [{"message_id": "1", "role": "wrong-role", "content": secret_text}]})
     assert response.status_code == 422
     assert secret_text not in response.text
     assert all("input" not in item for item in response.json()["detail"])

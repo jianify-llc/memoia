@@ -3,7 +3,7 @@ FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc07
 COPY --from=ghcr.io/astral-sh/uv:0.9.17@sha256:5cb6b54d2bc3fe2eb9a8483db958a0b9eebf9edff68adedb369df8e7b98711a2 /uv /uvx /bin/
 
 ARG VCS_REF=unknown
-LABEL org.opencontainers.image.source="https://github.com/jianify/memoia" \
+LABEL org.opencontainers.image.source="https://github.com/jianify-llc/memoia" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.licenses="Apache-2.0"
 

@@ -6,6 +6,7 @@ from pydantic import BaseModel, UUID4, UUID5, Field
 from .blob import BlobData, OpenAICompatibleMessage
 from .claim import ClaimData
 from .action import ActionData
+from .source import EventTime, SourceObservation
 
 UUID = UUID4 | UUID5
 
@@ -99,6 +100,11 @@ class EventTag(BaseModel):
 
 class EventGistData(BaseModel):
     content: str = Field(..., description="The event gist content")
+    event_time: "EventTime | None" = None
+    source_messages: list["SourceObservation"] = Field(default_factory=list)
+    source_id: str | None = None
+    blob_id: UUID | None = None
+    fact_id: UUID | None = None
 
 
 class EventData(BaseModel):

@@ -98,6 +98,10 @@ If you have questions or need help, please:
 
 - Check existing issues and documentation
 - Create a new issue for discussion
-- Use [Memoia issues](https://github.com/jianify/memoia/issues); upstream community channels do not provide support for this fork.
+- Use [Memoia issues](https://github.com/jianify-llc/memoia/issues); upstream community channels do not provide support for this fork.
 
 Thank you for contributing to Memoia!
+
+## Company branch and Test push contract
+
+Follow the [company branch/release policy](https://github.com/jianify-llc/Jianify-LLC/blob/main/docs/engineering/branch-release.md). Ordinary development/Test pushes and development PRs do not start Actions. Install the local guard with `python3 scripts/test_push.py install`, then use `python3 scripts/test_push.py push` from a clean committed worktree to validate before syncing Test. Test publication requires an explicitly requested manual acceptance batch; production tags and approvals remain separate. Dependencies and local isolation are documented in [deploy/README.md](deploy/README.md#本地检查与明确-test-验收).

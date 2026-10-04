@@ -10,10 +10,11 @@ import { test } from "node:test";
 import { runProbe } from "../v2-sdk-probe.mjs";
 
 // These deterministic adapters test the acceptance tool, not Memoia or a model.
-async function fixture(mode = "complete", version = "0.2.4") {
+async function fixture(mode = "complete", version = "0.3.0") {
   const directory = await mkdtemp(join(tmpdir(), "memoia-v2-probe-"));
   const symbol = `memoia-probe-${randomUUID()}`;
-  const sourceId = randomUUID(), operationId = randomUUID(), nameId = randomUUID(), foodId = randomUUID(), eventId = randomUUID();
+  let sourceId = randomUUID();
+  const blobId = randomUUID(), operationId = randomUUID(), nameId = randomUUID(), foodId = randomUUID(), eventId = randomUUID();
   const extraId = randomUUID();
   const lateSourceId = randomUUID(), lateOperationId = randomUUID(), lateEventId = randomUUID(), lateProfileId = randomUUID();
   const counters = { imports: 0, retracts: 0, deletes: 0, keyReads: 0, calls: 0, completedReplays: 0,
@@ -26,7 +27,7 @@ async function fixture(mode = "complete", version = "0.2.4") {
     }
   }
   const operation = (status = "completed") => ({ operation_id: operationId, status,
-    source_id: sourceId, external_id: "fixture", result: status === "completed" ? { event_ids: [eventId], profile_ids: [] } : null,
+    source_id: sourceId, blob_id: blobId, result: status === "completed" ? { event_ids: [eventId], profile_ids: [] } : null,
     error: null });
   const imported = operation();
   const profile = (id, content) => ({ id, content, topic: "basic_info", sub_topic: "name",
@@ -36,9 +37,10 @@ async function fixture(mode = "complete", version = "0.2.4") {
     profiles: phase === 1 ? [{ fact_ids: [nameId] }, { fact_ids: [foodId] }] : phase === 2 ?
       [{ fact_ids: [mode === "invalid-history" ? nameId : foodId] }] :
       mode === "final-history-leak" ? [{ fact_ids: [foodId] }] : [], added: [], removed: [] }] });
-  const source = () => ({ source_id: sourceId, status: phase === 3 ? "retracted" : "active",
-    external_id: acceptedBody?.external_id, message_ids: ["name", "food"],
-    retracted_message_ids: phase === 1 ? [] : phase === 2 ? ["name"] : ["name", "food"],
+  const blob = () => ({ blob_id: blobId, source_id: sourceId, status: phase === 3 ? "retracted" : "active",
+    message_ids: ["name", "food"], event_ids: phase === 3 ? [] : [eventId], created_at: new Date().toISOString() });
+  const source = () => ({ source_id: sourceId, blobs: [blob()], message_ids: ["name", "food"],
+    deleted_message_ids: phase === 1 ? [] : phase === 2 ? ["name"] : ["name", "food"],
     evidence: phase === 1 ? [{ fact_id: nameId, support_groups: [["name"]] }, { fact_id: foodId, support_groups: [["food"]] }] :
       phase === 2 ? [{ fact_id: foodId, support_groups: [["food"]] }] : [] });
   const MemoiaClient = class {
@@ -46,14 +48,14 @@ async function fixture(mode = "complete", version = "0.2.4") {
     async getProfiles() { return { profiles: phase === 1 ? [profile(nameId, "Renata Calder"), profile(foodId, "lemon risotto"),
       ...(mode === "replay-profiles-grow" && counters.completedReplays ? [profile(extraId, "fixture")] : [])] :
       phase === 2 ? [profile(foodId, "lemon risotto")] : [] }; }
-    async importSource(uid, input) {
+    async importBlob(uid, input) {
       counters.imports++;
       if (counters.forgets) {
         counters.lateImports++;
         assert.equal(counters.forgets, 2, "A late import requires two confirmed forget receipts");
         assert.equal(uid, userId);
         assert.notEqual(input.idempotency_key, acceptedBody.idempotency_key);
-        assert.notEqual(input.external_id, acceptedBody.external_id);
+        assert.notEqual(input.source_id, acceptedBody.source_id);
         assert.equal(input.messages.length, 1);
         if (mode === "late-lost-ack") throw new MemoiaError("TRANSPORT_ERROR", null, false, "unknown");
         if (mode === "late-forged-410") throw { code: "user_forgotten", status: 410, retryable: false, outcome: "rejected" };
@@ -65,7 +67,7 @@ async function fixture(mode = "complete", version = "0.2.4") {
         if (["late-processing", "late-completed", "late-failed"].includes(mode)) {
           created = true;
           const status = mode.slice(5);
-          return { operation_id: lateOperationId, status, source_id: lateSourceId, external_id: input.external_id,
+          return { operation_id: lateOperationId, status, source_id: lateSourceId, blob_id: randomUUID(),
             result: status === "completed" ? { event_ids: [lateEventId], profile_ids: [lateProfileId] } : null,
             error: status === "failed" ? { code: "model_unavailable", retryable: true } : null };
         }
@@ -83,6 +85,7 @@ async function fixture(mode = "complete", version = "0.2.4") {
         return imported;
       }
       acceptedBody = structuredClone(input); created = true; phase = 1; lastKey = input.idempotency_key; userId = uid;
+      sourceId = input.source_id; imported.source_id = sourceId;
       if (mode === "lost-ack") throw { outcome: "unknown", status: null, message: "must never escape" };
       if (["processing", "never-completes"].includes(mode)) return operation("processing");
       completed = true;
@@ -95,13 +98,13 @@ async function fixture(mode = "complete", version = "0.2.4") {
       return imported;
     }
     async getOperation() { return imported; }
-    async getSourceByExternalId() { return source(); }
+    async getBlob() { return blob(); }
     async getSource() { return source(); }
     async listSources() { return { sources: [source(),
       ...(mode === "replay-sources-grow" && counters.completedReplays ? [{ ...source(), source_id: extraId }] : [])] }; }
     async getHistory() { return history(); }
     async search() { return { events: phase === 3 && mode !== "final-search-leak" ? [] : [{ source_id: sourceId }] }; }
-    async retractMessages(uid, sid, input) {
+    async deleteMessages(uid, sid, input) {
       assert.equal(uid, userId); assert.equal(sid, sourceId);
       counters.retracts++; phase++; lastKey = input.idempotency_key;
       return operation();
@@ -170,9 +173,9 @@ test("fixed SDK completes original checks before permanent forget, repeat receip
     counters.lateImports, counters.deletes], [3, 1, 2, 2, 1, 0]);
   assert.equal(result.ids.forget_user_id, result.ids.user_id);
   assert.equal(result.ids.forget_repeat_user_id, result.ids.user_id);
-  assert.ok(result.ids.late_import_key && result.ids.late_external_id);
+  assert.ok(result.ids.late_import_key && result.ids.late_input_source_id);
   assert.notEqual(result.ids.late_import_key, result.ids.import_key);
-  assert.notEqual(result.ids.late_external_id, result.ids.external_id);
+  assert.notEqual(result.ids.late_input_source_id, result.ids.input_source_id);
   assert.equal(result.counts.sources_before_replay, result.counts.sources_after_replay);
   assert.equal(result.counts.profiles_before, result.counts.profiles_after_replay);
   assert.equal(result.counts.events_before_replay, result.counts.events_after_replay);
@@ -307,7 +310,7 @@ for (const mode of ["late-lost-ack", "late-forged-410", "late-unknown-410", "lat
     assert.equal(counters.imports, 3);
     assert.equal(counters.forgets, 2);
     assert.equal(counters.deletes, 0);
-    assert.ok(result.ids.late_import_key && result.ids.late_external_id);
+    assert.ok(result.ids.late_import_key && result.ids.late_input_source_id);
   });
 }
 
@@ -356,7 +359,7 @@ test("checkpoint precedes every mutation and persists cumulative receipts before
     assert.equal(result.success, true);
     assert.equal(records.length, 15);
     const first = records.find((r) => r.stage === "first_import.before");
-    assert.ok(first.ids.user_id && first.ids.import_key && first.ids.late_import_key && first.ids.late_external_id);
+    assert.ok(first.ids.user_id && first.ids.import_key && first.ids.late_import_key && first.ids.late_input_source_id);
     assert.equal(first.outcome_unknown, true);
     assert.equal(first.ids.operation_ids.length, 0, "Checkpoint data must not change with later receipts");
     const imported = records.find((r) => r.stage === "first_import.receipt");
@@ -468,11 +471,11 @@ test("CLI regular-file boundary survives process exit inside the first mutation"
   try {
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     await mkdir(join(directory, "dist"));
-    await writeFile(join(directory, "package.json"), JSON.stringify({ name: "@jianify/memoia", version: "0.2.4", type: "module" }));
+    await writeFile(join(directory, "package.json"), JSON.stringify({ name: "@jianify/memoia", version: "0.3.0", type: "module" }));
     await writeFile(join(directory, "dist/index.js"), `export class MemoiaError extends Error {}
       export class MemoiaClient {
         async getProfiles() { return { profiles: [] }; }
-        async importSource() { process.exit(73); }
+        async importBlob() { process.exit(73); }
       }`);
     output = await open(receipt, "wx", 0o600);
     child = spawn(process.execPath, [fileURLToPath(new URL("../v2-sdk-probe.mjs", import.meta.url)), join(directory, "dist/index.js")],

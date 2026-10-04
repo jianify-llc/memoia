@@ -16,18 +16,17 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/sources": {
+    "/api/v2/users/{user_id}/blobs": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List Sources */
-        get: operations["listSources"];
+        get?: never;
         put?: never;
         /** Import Source */
-        post: operations["importSource"];
+        post: operations["importBlob"];
         delete?: never;
         options?: never;
         head?: never;
@@ -85,6 +84,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/users/{user_id}/sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Sources */
+        get: operations["listSources"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/users/{user_id}/operations/{operation_id}/retry": {
         parameters: {
             query?: never;
@@ -102,15 +118,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/sources/by-external-id/{external_id}": {
+    "/api/v2/users/{user_id}/blobs/{blob_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Get Source By External Id */
-        get: operations["getSourceByExternalId"];
+        /** Get Blob */
+        get: operations["getBlob"];
         put?: never;
         post?: never;
         delete?: never;
@@ -136,7 +152,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/sources/{source_id}/retract": {
+    "/api/v2/users/{user_id}/sources/{source_id}/messages": {
         parameters: {
             query?: never;
             header?: never;
@@ -145,9 +161,9 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Retract Messages */
-        post: operations["retractMessages"];
-        delete?: never;
+        post?: never;
+        /** Delete Messages */
+        delete: operations["deleteMessages"];
         options?: never;
         head?: never;
         patch?: never;
@@ -295,6 +311,51 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** Blob */
+        Blob: {
+            /**
+             * Blob Id
+             * Format: uuid
+             */
+            blob_id: string;
+            /** Source Id */
+            source_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "processing" | "failed" | "active" | "retracted" | "rebuilding";
+            /** Message Ids */
+            message_ids: string[];
+            /** Event Ids */
+            event_ids: string[];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
+        /** DeleteMessages */
+        DeleteMessages: {
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Message Ids */
+            message_ids: string[];
+        };
+        /** EventTime */
+        EventTime: {
+            /** Start */
+            start: string | null;
+            /** End */
+            end: string | null;
+            /**
+             * Precision
+             * @enum {string}
+             */
+            precision: "year" | "month" | "day" | "range" | "unknown";
+            /** Evidence */
+            evidence: components["schemas"]["TimeEvidence"][];
+        };
         /** Evidence */
         Evidence: {
             /**
@@ -302,6 +363,11 @@ export interface components {
              * Format: uuid
              */
             fact_id: string;
+            /**
+             * Blob Id
+             * Format: uuid
+             */
+            blob_id: string;
             /** Content */
             content: string;
             /** Topic */
@@ -310,6 +376,9 @@ export interface components {
             sub_topic: string;
             /** Support Groups */
             support_groups: string[][];
+            event_time?: components["schemas"]["EventTime"] | null;
+            /** Source Messages */
+            source_messages?: components["schemas"]["SourceObservation"][];
         };
         /** ForgottenUser */
         ForgottenUser: {
@@ -364,10 +433,7 @@ export interface components {
              * Format: uuid
              */
             operation_id: string;
-            /**
-             * Source Id
-             * Format: uuid
-             */
+            /** Source Id */
             source_id: string;
             /**
              * Created At
@@ -385,8 +451,8 @@ export interface components {
         ImportSource: {
             /** Idempotency Key */
             idempotency_key: string;
-            /** External Id */
-            external_id: string;
+            /** Source Id */
+            source_id: string;
             /** Messages */
             messages: components["schemas"]["SourceMessage"][];
             /** Metadata */
@@ -482,9 +548,9 @@ export interface components {
              */
             status: "processing" | "completed" | "failed";
             /** Source Id */
-            source_id: string | null;
-            /** External Id */
-            external_id: string;
+            source_id: string;
+            /** Blob Id */
+            blob_id: string | null;
             result: components["schemas"]["SourceResult"] | null;
             error: components["schemas"]["OperationError"] | null;
         };
@@ -544,13 +610,6 @@ export interface components {
             /** Projects */
             projects: components["schemas"]["ManagedProject"][];
         };
-        /** RetractMessages */
-        RetractMessages: {
-            /** Idempotency Key */
-            idempotency_key: string;
-            /** Message Ids */
-            message_ids: string[];
-        };
         /** SearchEvent */
         SearchEvent: {
             /**
@@ -562,6 +621,8 @@ export interface components {
             content: string;
             /** Source Id */
             source_id: string | null;
+            /** Blob Id */
+            blob_id: string | null;
             /** Score */
             score: number;
             /**
@@ -569,6 +630,8 @@ export interface components {
              * Format: date-time
              */
             occurred_at: string;
+            /** Evidence */
+            evidence?: components["schemas"]["Evidence"][];
         };
         /** SearchResult */
         SearchResult: {
@@ -577,27 +640,21 @@ export interface components {
         };
         /** Source */
         Source: {
-            /**
-             * Source Id
-             * Format: uuid
-             */
+            /** Source Id */
             source_id: string;
-            /** External Id */
-            external_id: string;
-            /**
-             * Status
-             * @enum {string}
-             */
-            status: "active" | "retracted" | "rebuilding";
+            /** Legacy */
+            legacy: boolean;
             /** Message Ids */
             message_ids: string[];
-            /** Retracted Message Ids */
-            retracted_message_ids: string[];
+            /** Deleted Message Ids */
+            deleted_message_ids: string[];
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
+            /** Blobs */
+            blobs: components["schemas"]["Blob"][];
             /** Evidence */
             evidence: components["schemas"]["Evidence"][];
         };
@@ -617,6 +674,20 @@ export interface components {
              * Format: date-time
              */
             occurred_at: string;
+            /** Time Zone */
+            time_zone?: string | null;
+        };
+        /** SourceObservation */
+        SourceObservation: {
+            /** Message Id */
+            message_id: string;
+            /**
+             * Recorded At
+             * Format: date-time
+             */
+            recorded_at: string;
+            /** Time Zone */
+            time_zone?: string | null;
         };
         /** SourceResult */
         SourceResult: {
@@ -629,6 +700,13 @@ export interface components {
         Sources: {
             /** Sources */
             sources: components["schemas"]["Source"][];
+        };
+        /** TimeEvidence */
+        TimeEvidence: {
+            /** Message Id */
+            message_id: string;
+            /** Expression */
+            expression: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -679,41 +757,7 @@ export interface operations {
             };
         };
     };
-    listSources: {
-        parameters: {
-            query?: {
-                limit?: number;
-                offset?: number;
-            };
-            header?: never;
-            path: {
-                user_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Sources"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    importSource: {
+    importBlob: {
         parameters: {
             query?: never;
             header?: never;
@@ -846,6 +890,40 @@ export interface operations {
             };
         };
     };
+    listSources: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Sources"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     retryOperation: {
         parameters: {
             query?: never;
@@ -878,13 +956,13 @@ export interface operations {
             };
         };
     };
-    getSourceByExternalId: {
+    getBlob: {
         parameters: {
             query?: never;
             header?: never;
             path: {
                 user_id: string;
-                external_id: string;
+                blob_id: string;
             };
             cookie?: never;
         };
@@ -896,7 +974,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Source"];
+                    "application/json": components["schemas"]["Blob"];
                 };
             };
             /** @description Validation Error */
@@ -942,7 +1020,7 @@ export interface operations {
             };
         };
     };
-    retractMessages: {
+    deleteMessages: {
         parameters: {
             query?: never;
             header?: never;
@@ -954,7 +1032,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["RetractMessages"];
+                "application/json": components["schemas"]["DeleteMessages"];
             };
         };
         responses: {

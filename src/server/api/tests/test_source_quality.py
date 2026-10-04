@@ -21,7 +21,7 @@ SETTINGS = {"api_key": "quality-fake-key", "model": "gpt-6-luna", "base_url": "h
 
 
 def request_body(messages):
-    return ImportSource(idempotency_key="quality-unit", external_id="quality-unit", messages=[
+    return ImportSource(idempotency_key="quality-unit", source_id="quality-unit", messages=[
         {"message_id": mid, "role": role, "content": content, "occurred_at": f"2026-01-01T00:00:{index:02d}Z"}
         for index, (mid, role, content) in enumerate(messages)
     ])
@@ -42,7 +42,8 @@ def model_transport(contents):
 
 
 def fact(content, groups):
-    return {"content": content, "topic": "interest", "sub_topic": "hobby", "support_groups": groups}
+    return {"content": content, "topic": "interest", "sub_topic": "hobby", "support_groups": groups,
+            "event_time": None}
 
 
 def test_prompt_clarifies_self_evidence_without_forcing_nonempty_or_slot_filtering():
@@ -70,11 +71,13 @@ async def test_actual_extract_preserves_full_roles_ids_times_and_joint_support(m
         wire = bodies[0]
         assert json.loads(wire["messages"][1]["content"]) == {
             "configuration": {"language": "en", "profile_topics": [], "event_tag_definitions": []},
-            "messages": [message.model_dump(mode="json") for message in request.messages]}
+            "messages": [{**message.model_dump(mode="json"), "local_recorded_date": None}
+                         for message in request.messages]}
         assert wire["response_format"]["json_schema"]["schema"] == source.Extraction.model_json_schema()
         assert wire["response_format"]["json_schema"]["strict"] is True
         assert result.facts[0]["support_groups"] == [["u-preference", "a-option"]]
         assert result.facts[0]["occurred_at"] == request.messages[1].occurred_at
+        assert result.facts[0]["event_time"] is None
         assert len(bodies) == 1 and accounting.await_count == 1
     finally:
         await client.close()

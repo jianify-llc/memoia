@@ -193,7 +193,7 @@ async def flush_buffer_by_ids(
         from uuid import uuid5, NAMESPACE_URL
         from datetime import datetime, timezone
         from ..models.source import ImportSource, SourceMessage
-        from .source import import_source, SourceError
+        from .source import import_source, get_operation, retry_operation, SourceError
         identity = str(uuid5(NAMESPACE_URL, f"{project_id}:{user_id}:" + ":".join(str(i) for i in blob_ids)))
         messages = []
         for row, blob in zip(buffer_blob_data, blobs, strict=True):
@@ -209,9 +209,19 @@ async def flush_buffer_by_ids(
                 messages.append(SourceMessage(message_id=f"{row.blob_id}:{index}", role=message.role,
                                               content=message.content, occurred_at=occurred_at))
         try:
-            result = await import_source(user_id, project_id, ImportSource(
-                idempotency_key=f"v1-flush:{identity}", external_id=f"v1-flush:{identity}", messages=messages,
-            ), legacy_buffers=(process_buffer_ids, blob_ids))
+            body = ImportSource(
+                idempotency_key=f"v1-flush:{identity}", source_id=f"v1-flush:{identity}", messages=messages,
+            )
+            try:
+                accepted = get_operation(user_id, project_id, key=body.idempotency_key)
+            except SourceError as error:
+                if error.code != "operation_not_found":
+                    raise
+                accepted = None
+            # Pre-0006 receipts keep their explicit legacy grouping. Never relabel
+            # an accepted request or present generated IDs as external message IDs.
+            result = await retry_operation(user_id, project_id, accepted.operation_id) if accepted else await import_source(
+                user_id, project_id, body, legacy_buffers=(process_buffer_ids, blob_ids))
         except SourceError as error:
             p = Promise.reject(CODE(error.status) if error.status in CODE else CODE.BAD_REQUEST, error.message)
         else:
@@ -239,7 +249,7 @@ async def flush_buffer_by_ids(
                     {BufferZone.status: BufferStatus.done},
                     synchronize_session=False,
                 )
-                if blob_type == BlobType.chat and not CONFIG.persistent_chat_blobs:
+                if blob_type == BlobType.chat:
                     session.query(GeneralBlob).filter(
                         GeneralBlob.id.in_(blob_ids),
                         GeneralBlob.project_id == project_id,

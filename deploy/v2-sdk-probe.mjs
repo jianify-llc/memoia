@@ -103,7 +103,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     evidence.checks.input = true;
     const entry = resolve(sdkEntry);
     const manifest = JSON.parse(await readFile(resolve(dirname(entry), "../package.json"), "utf8"));
-    requireTrue(manifest.name === "@jianify/memoia" && manifest.version === "0.2.4");
+    requireTrue(manifest.name === "@jianify/memoia" && manifest.version === "0.3.0");
     const sdk = await import(pathToFileURL(entry).href);
     const { MemoiaClient } = sdk;
     MemoiaError = sdk.MemoiaError;
@@ -111,8 +111,8 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     client = new MemoiaClient({ baseUrl: origin, apiKey: token, fetch: transport,
       maxAttempts: 1, readTimeoutMs: 15_000, writeTimeoutMs: 90_000 });
     evidence.checks.sdk_version = true;
-    evidence.ids = { user_id: randomUUID(), external_id: randomUUID(), import_key: randomUUID(),
-      partial_retract_key: randomUUID(), retract_key: randomUUID(), late_import_key: randomUUID(), late_external_id: randomUUID(),
+    evidence.ids = { user_id: randomUUID(), input_source_id: randomUUID(), import_key: randomUUID(),
+      partial_retract_key: randomUUID(), retract_key: randomUUID(), late_import_key: randomUUID(), late_input_source_id: randomUUID(),
       operation_ids: [], source_ids: [], event_ids: [], profile_ids: [] };
     const uid = evidence.ids.user_id;
     const profilePath = `/api/v2/users/${uid}/profiles`;
@@ -127,20 +127,22 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     evidence.checks.user_absent = true;
     ownedUser = true;
     const occurredAt = new Date().toISOString();
-    const body = { idempotency_key: evidence.ids.import_key, external_id: evidence.ids.external_id,
+    const body = { idempotency_key: evidence.ids.import_key, source_id: evidence.ids.input_source_id,
       metadata: { sdk_probe: true }, messages: [
         { message_id: "name", role: "user", content: "My real name is Renata Calder. Please remember my name.", occurred_at: occurredAt },
         { message_id: "food", role: "user", content: "My favourite food is lemon risotto, and it has been my favourite for years.", occurred_at: occurredAt },
       ] };
-    const imported = await complete("first_import", body.idempotency_key, () => client.importSource(uid, body, options()));
+    const imported = await complete("first_import", body.idempotency_key, () => client.importBlob(uid, body, options()));
     evidence.ids.source_id = imported.source_id;
     evidence.ids.import_operation_id = imported.operation_id;
     evidence.checks.first_import = true;
     const queried = await client.getOperationByKey(uid, body.idempotency_key, options());
     const byId = await client.getOperation(uid, imported.operation_id, options());
     requireTrue(same(queried, imported) && same(byId, imported));
-    const stored = await client.getSourceByExternalId(uid, body.external_id, options());
-    requireTrue(stored.source_id === imported.source_id && stored.status === "active" && stored.evidence.length > 0);
+    const stored = await client.getSource(uid, body.source_id, options());
+    const storedBlob = await client.getBlob(uid, imported.blob_id, options());
+    requireTrue(stored.source_id === body.source_id && stored.source_id === imported.source_id &&
+      storedBlob.source_id === stored.source_id && storedBlob.status === "active" && stored.evidence.length > 0);
     requireTrue(["name", "food"].every((id) => stored.evidence.some((fact) =>
       fact.support_groups.some((group) => group.length === 1 && group[0] === id))));
     evidence.counts.evidence_before = stored.evidence.length;
@@ -176,7 +178,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     await record("operation_replay.before", true);
     mutationUnknown = true;
     let replayed;
-    try { replayed = await client.importSource(uid, body, options()); }
+    try { replayed = await client.importBlob(uid, body, options()); }
     catch (error) {
       if (error.outcome !== "unknown") mutationUnknown = false;
       await record(mutationUnknown ? "operation_replay.unknown" : "operation_replay.rejected");
@@ -195,31 +197,32 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     requireTrue(same(ids(sourcesAfter.sources, "source_id"), ids(sourcesBefore.sources, "source_id")) &&
       same(profileState(profilesAfter.profiles), profileState(profiles.profiles)) && same(ids(eventsAfter), ids(eventsBefore)));
     const replaySource = sourcesAfter.sources[0];
-    requireTrue(replaySource.external_id === body.external_id && replaySource.status === "active" &&
+    requireTrue(replaySource.source_id === body.source_id && replaySource.blobs.length === 1 &&
+      replaySource.blobs[0].blob_id === imported.blob_id &&
       same(replaySource.message_ids, stored.message_ids) &&
       same(ids(replaySource.evidence, "fact_id"), ids(stored.evidence, "fact_id")));
     evidence.checks.operation_replay = true;
     const withdrawn = new Set(stored.evidence.filter((f) =>
       f.support_groups.every((group) => group.includes("name"))).map((f) => f.fact_id));
-    const partial = await complete("partial_retract", evidence.ids.partial_retract_key, () => client.retractMessages(uid, imported.source_id,
+    const partial = await complete("partial_retract", evidence.ids.partial_retract_key, () => client.deleteMessages(uid, imported.source_id,
       { idempotency_key: evidence.ids.partial_retract_key, message_ids: ["name"] }, options()));
     evidence.ids.partial_operation_id = partial.operation_id;
     const remainingSource = await client.getSource(uid, imported.source_id, options());
     const remainingProfiles = await client.getProfiles(uid, options());
     const remainingHistory = await client.getHistory(uid, options());
-    requireTrue(remainingSource.retracted_message_ids.includes("name") && remainingSource.evidence.length > 0 &&
+    requireTrue(remainingSource.deleted_message_ids.includes("name") && remainingSource.evidence.length > 0 &&
       remainingSource.evidence.every((f) => !withdrawn.has(f.fact_id) && f.support_groups.every((g) => !g.includes("name"))));
     requireTrue(remainingProfiles.profiles.length > 0 &&
       remainingProfiles.profiles.every((p) => !p.content.toLowerCase().includes("renata calder")));
     requireTrue(historyProfiles(remainingHistory).every((p) => p.fact_ids.every((id) => !withdrawn.has(id))));
     evidence.counts.profiles_after_partial = remainingProfiles.profiles.length;
     evidence.checks.partial_retract = true;
-    const retracted = await complete("retract", evidence.ids.retract_key, () => client.retractMessages(uid, imported.source_id,
+    const retracted = await complete("retract", evidence.ids.retract_key, () => client.deleteMessages(uid, imported.source_id,
       { idempotency_key: evidence.ids.retract_key, message_ids: ["food"] }, options()));
     evidence.ids.retract_operation_id = retracted.operation_id;
     const finalSource = await client.getSource(uid, imported.source_id, options());
-    requireTrue(finalSource.status === "retracted" && finalSource.evidence.length === 0 &&
-      ["name", "food"].every((id) => finalSource.retracted_message_ids.includes(id)));
+    requireTrue(finalSource.blobs.every((b) => b.status === "retracted") && finalSource.evidence.length === 0 &&
+      ["name", "food"].every((id) => finalSource.deleted_message_ids.includes(id)));
     evidence.checks.retract = true;
     const finalProfiles = await client.getProfiles(uid, options());
     const finalHistory = await client.getHistory(uid, options());
@@ -253,8 +256,8 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     await record("late_import.before", true);
     mutationUnknown = true;
     try {
-      const late = await client.importSource(uid, { idempotency_key: evidence.ids.late_import_key,
-        external_id: evidence.ids.late_external_id, metadata: { sdk_probe: true }, messages: [
+      const late = await client.importBlob(uid, { idempotency_key: evidence.ids.late_import_key,
+        source_id: evidence.ids.late_input_source_id, metadata: { sdk_probe: true }, messages: [
           { message_id: "late", role: "user", content: "This is a late write from the forgotten probe user.", occurred_at: occurredAt },
         ] }, options());
       // 意外接纳同样保留全部已知身份，不能清理后把迟到写入误报为已拒绝。

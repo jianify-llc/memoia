@@ -10,3 +10,5 @@ embedding_provider: openai
 embedding_base_url: https://api.openai.com/v1
 embedding_model: text-embedding-3-large
 embedding_dim: 1536
+# 未完成导入正文临时留存 7 天；完成时立即清除，重试不续期。
+source_input_retention_seconds: 604800

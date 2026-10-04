@@ -209,7 +209,8 @@ async def get_user_context(
         return p
     user_event_gists = p.data()
 
-    event_section = "\n".join([ed.gist_data.content for ed in user_event_gists.gists])
+    from ..temporal import render_gist
+    event_section = "\n".join(render_gist(ed.gist_data) for ed in user_event_gists.gists)
     event_section_tokens = len(get_encoded_tokens(event_section))
 
     TRACE_LOG.info(

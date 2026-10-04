@@ -3,7 +3,7 @@
 
 Memoia is an independently maintained, Apache-2.0 fork of
 [Memobase](https://github.com/memodb-io/memobase), maintained at
-[jianify/memoia](https://github.com/jianify/memoia). The original copyright and
+[jianify-llc/memoia](https://github.com/jianify-llc/memoia). The original copyright and
 [license](./LICENSE) remain intact; this project is not the upstream Memobase service.
 
 The internal server package is `memoia_server`. Existing Memobase SDK packages,
@@ -12,7 +12,7 @@ deployment identities remain compatible. This repository does not publish rename
 
 - [Run or develop the Memoia server](./src/server/readme.md)
 - [Release, drain, upgrade, and rollback](./docs/guide/memoia-release.md)
-- [Report a Memoia issue](https://github.com/jianify/memoia/issues)
+- [Report a Memoia issue](https://github.com/jianify-llc/memoia/issues)
 
 The feature descriptions, examples, logos, SDK badges, and third-party links below
 are inherited from Memobase. Upstream cloud/community links are references, not
@@ -43,11 +43,11 @@ Memoia-operated services or a promise of upstream support.
     </a>
   </p>
   <p>
-    <a href="https://github.com/jianify/memoia/actions/workflows/deploy-test.yml">
-      <img src="https://github.com/jianify/memoia/actions/workflows/deploy-test.yml/badge.svg">
+    <a href="https://github.com/jianify-llc/memoia/actions/workflows/deploy-test.yml">
+      <img src="https://github.com/jianify-llc/memoia/actions/workflows/deploy-test.yml/badge.svg">
     </a>
-        <a href="https://github.com/jianify/memoia/pkgs/container/memoia">
-    <img src="https://img.shields.io/github/v/tag/jianify/memoia">
+        <a href="https://github.com/users/jianify/packages/container/package/memoia">
+    <img src="https://img.shields.io/github/v/tag/jianify-llc/memoia">
     </a>
   </p>
   <p>
@@ -417,7 +417,7 @@ For detailed usage instructions, visit the [documentation](https://docs.memobase
 
 ## Stay Updated
 
-Star [Memoia on GitHub](https://github.com/jianify/memoia) for this fork's updates.
+Star [Memoia on GitHub](https://github.com/jianify-llc/memoia) for this fork's updates.
 
 ![click_star](./assets/images/click.gif)
 
@@ -425,7 +425,7 @@ Star [Memoia on GitHub](https://github.com/jianify/memoia) for this fork's updat
 
 ## Support
 
-Use [Memoia issues](https://github.com/jianify/memoia/issues) for this fork.
+Use [Memoia issues](https://github.com/jianify-llc/memoia/issues) for this fork.
 The following are upstream community references, not Memoia support channels:
 
 -  [Join our Discord](https://discord.gg/YdgwU4d9NB) 👻 

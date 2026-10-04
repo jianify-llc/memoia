@@ -224,11 +224,11 @@ async def test_chat_buffer_modal(
     )
     assert p.ok() and p.data() == 0
 
-    # persistent_chat_blobs default to True
+    # Successful processing erases chat input even under the old persistence flag.
     p = await controllers.user.get_user_all_blobs(
         u_id, DEFAULT_PROJECT_ID, BlobType.chat
     )
-    assert p.ok() and len(p.data().ids) == 2
+    assert p.ok() and len(p.data().ids) == 0
 
     p = await controllers.user.delete_user(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()

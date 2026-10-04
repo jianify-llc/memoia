@@ -2,15 +2,30 @@
 name: Memoia · Test
 
 on:
-  push:
-    branches: [test]
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  validate-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require the selected current Test branch
+        env:
+          SELECTED_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$SELECTED_REF" == refs/heads/test ]] || { echo 'Select the Test branch explicitly' >&2; exit 1; }
+          [[ "$(git ls-remote origin refs/heads/test | cut -f1)" == "$GITHUB_SHA" ]] || { echo 'A newer Test commit exists' >&2; exit 1; }
+
   verify:
+    needs: validate-test
     uses: ./.github/workflows/verify.yml
 
   publish-test:

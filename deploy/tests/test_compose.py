@@ -24,7 +24,7 @@ class ComposeContract(unittest.TestCase):
             shutil.copyfile(SOURCE / "config.yaml.example", root / "api/config.yaml")
             values = {
                 "JIANIFY_ENV": "test", "COMPOSE_PROJECT_NAME": "memoia-test",
-                "MEMOIA_IMAGE": "ghcr.io/jianify/memoia@sha256:" + "a" * 64,
+                "MEMOIA_IMAGE": "ghcr.io/jianify-llc/memoia@sha256:" + "a" * 64,
                 "REDIS_PASSWORD": "fixture-only",
                 "DATABASE_URL": "postgresql://jianify_app:fixture-only@jianify-postgres:5432/memoia",
                 "REDIS_URL": "redis://:fixture-only@redis:6379/0",

@@ -322,3 +322,5 @@ dist
 # act
 .actrc
 event.json
+# Owned local CI reports, never a push-check cache
+/.local-ci-results/

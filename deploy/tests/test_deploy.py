@@ -11,7 +11,7 @@ import unittest
 
 SOURCE = Path(__file__).resolve().parents[1]
 ROOT = Path("/opt/memoia")
-IMAGE = "ghcr.io/jianify/memoia@sha256:" + "e" * 64
+IMAGE = "ghcr.io/jianify-llc/memoia@sha256:" + "e" * 64
 OLD_IMAGE = "ghcr.io/jianify/memoia@sha256:" + "a" * 64
 SHA = "d" * 40
 
@@ -209,7 +209,7 @@ else:
         self.assertEqual(actions[-1]["image"], IMAGE)
 
     def test_live_api_drift_blocks_switch_without_pending_or_stop(self):
-        self.env["FIXTURE_CURRENT_IMAGE"] = "ghcr.io/jianify/memoia@sha256:" + "f" * 64
+        self.env["FIXTURE_CURRENT_IMAGE"] = "ghcr.io/jianify-llc/memoia@sha256:" + "f" * 64
         result = self.deploy()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Running API differs from the accepted deployment", result.stderr)
@@ -265,6 +265,30 @@ else:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.deploy("finalize").returncode, 0)
         self.assert_configs_unchanged()
+
+    def test_organization_image_can_restore_accepted_personal_image(self):
+        config_sha = self.run_command("bash", "-c", "sha256sum /opt/memoia/.env /opt/memoia/api/config.yaml | sha256sum | cut -d' ' -f1").stdout.strip()
+        old_sha = "b" * 40
+        accepted = f"100 {old_sha} {OLD_IMAGE} {self.compose_sha} {config_sha}\n"
+        (self.state / "deploy-state").write_text(accepted)
+        (self.state / "accepted").mkdir()
+        (self.state / "accepted" / old_sha).write_text(accepted)
+        self.assertEqual(self.deploy().returncode, 0)
+        self.assertEqual(self.deploy("finalize").returncode, 0)
+        self.env["FIXTURE_REVISION"] = old_sha
+        for mode in ("restore-api", "finalize"):
+            result = self.run_command("bash", str(SOURCE / "deploy-memoia.sh"), mode,
+                                      str(ROOT), OLD_IMAGE, old_sha, "100", self.compose_sha)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.state / "deploy-state").read_text().split()[:3],
+                         ["200", old_sha, OLD_IMAGE])
+        self.assert_configs_unchanged()
+
+    def test_unrelated_image_owner_is_rejected_before_switch(self):
+        result = self.run_command("bash", str(SOURCE / "deploy-memoia.sh"), "prepare", str(ROOT),
+                                  IMAGE.replace("jianify-llc/", "unrelated/"), SHA, "200", self.compose_sha)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.actions(), [])
 
     def test_routine_update_does_not_probe_inflight_buffers_or_redis_queues(self):
         self.env["FIXTURE_NO_DRAIN_PROBES"] = "1"

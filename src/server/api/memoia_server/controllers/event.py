@@ -179,11 +179,11 @@ async def delete_user_event(
                 CODE.NOT_FOUND,
                 f"User event {event_id} not found",
             )
-        from ..models.source import memory_sources
+        from ..models.source import memory_blobs
         from sqlalchemy import update
-        session.execute(update(memory_sources).where(
-            memory_sources.c.user_id == user_id, memory_sources.c.project_id == project_id,
-            memory_sources.c.event_id == event_id,
+        session.execute(update(memory_blobs).where(
+            memory_blobs.c.user_id == user_id, memory_blobs.c.project_id == project_id,
+            memory_blobs.c.event_id == event_id,
         ).values(event_deleted=True))
         session.delete(user_event)
         session.commit()
@@ -319,6 +319,7 @@ async def search_user_events(
 async def hybrid_search_user_events(user_id, project_id, query, limit=10):
     """Fuse independently bounded lexical and vector ranks, not incomparable raw scores."""
     from ..models.source import SearchEvent, SearchResult
+    from ..temporal import query_periods, time_overlap
     candidates = min(500, max(50, limit * 5))
     document = func.coalesce(UserEvent.event_data["event_tip"].astext, "")
     vector = func.to_tsvector(literal_column("'simple'"), document)
@@ -347,9 +348,15 @@ async def hybrid_search_user_events(user_id, project_id, query, limit=10):
             for rank, row in enumerate(ranking, 1):
                 rows[row.id] = row
                 scores[row.id] = scores.get(row.id, 0) + 1 / (60 + rank)
+        periods = query_periods(query)
+        for key, row in rows.items():
+            if any(time_overlap(f.get("event_time"), periods) for f in row.event_data.get("evidence", [])):
+                scores[key] += .001
         ordered = sorted(scores, key=lambda key: (-scores[key], str(key)))[:limit]
         return Promise.resolve(SearchResult(events=[SearchEvent(id=key, content=rows[key].event_data.get("event_tip", ""),
-            source_id=rows[key].event_data.get("source_id"), score=scores[key], occurred_at=rows[key].created_at) for key in ordered]))
+            source_id=rows[key].event_data.get("source_id"), blob_id=rows[key].event_data.get("blob_id"),
+            score=scores[key], occurred_at=rows[key].created_at,
+            evidence=rows[key].event_data.get("evidence", [])) for key in ordered]))
 
 
 async def filter_user_events(

@@ -33,7 +33,7 @@ def identity(db_env):
 
 
 def request():
-    return ImportSource(idempotency_key="fixed-import", external_id="fixed-source", messages=[{
+    return ImportSource(idempotency_key="fixed-import", source_id="fixed-source", messages=[{
         "message_id": "1", "role": "user", "content": "My name is Gus",
         "occurred_at": datetime.now(timezone.utc),
     }])
@@ -96,7 +96,7 @@ async def test_forget_cascades_and_permanently_blocks_both_protocols(identity, b
         assert forgotten_row(uid)["forgotten_at"] == stamp
         legacy = client.post("/api/v1/users", json={"id": str(uid)})
         assert legacy.json()["errno"] == 403
-        imported = client.post(f"/api/v2/users/{uid}/sources", json=body.model_dump(mode="json"))
+        imported = client.post(f"/api/v2/users/{uid}/blobs", json=body.model_dump(mode="json"))
         assert imported.status_code == 410
         assert imported.json()["detail"]["code"] == "user_forgotten"
         assert imported.json()["detail"]["retryable"] is False

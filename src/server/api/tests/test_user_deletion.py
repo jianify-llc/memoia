@@ -54,7 +54,7 @@ async def test_http_delete_cascades_and_repeat_does_not_create_state(db_env, bou
     token, uid = "user-delete-test-root", uuid4()
     monkeypatch.setenv("ACCESS_TOKEN", token)
     operation = await source.import_source(uid, "__root__", ImportSource(
-        idempotency_key="delete-test", external_id="delete-test", messages=[{
+        idempotency_key="delete-test", source_id="delete-test", messages=[{
             "message_id": "1", "role": "user", "content": "My name is Gus",
             "occurred_at": datetime.now(timezone.utc),
         }]))
@@ -95,7 +95,7 @@ async def test_http_delete_wrong_token_does_not_succeed_or_modify_user(db_env, b
     monkeypatch.setenv("ACCESS_TOKEN", "user-delete-test-root")
     if exists:
         await source.import_source(uid, "__root__", ImportSource(
-            idempotency_key="auth-delete-test", external_id="auth-delete-test", messages=[{
+            idempotency_key="auth-delete-test", source_id="auth-delete-test", messages=[{
                 "message_id": "1", "role": "user", "content": "My name is Gus",
                 "occurred_at": datetime.now(timezone.utc),
             }]))

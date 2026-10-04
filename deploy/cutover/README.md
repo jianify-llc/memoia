@@ -1,6 +1,6 @@
 # 旧 PostgreSQL 一次性切换备份
 
-本文件是 2026-09-30 Test 迁库的历史说明，切换和实际业务验收均已完成，不能作为当前发布或再次迁库的操作步骤。现役 API 连接公司 PostgreSQL 的 `memoia` 数据库；日常发布、配套备份和恢复见[部署手册](../README.md)，当次执行证据见[公司监控切换记录](https://github.com/jianify/Jianify-llc/blob/main/ops/monitoring/test-cutover.md)。
+本文件是 2026-09-30 Test 迁库的历史说明，切换和实际业务验收均已完成，不能作为当前发布或再次迁库的操作步骤。现役 API 连接公司 PostgreSQL 的 `memoia` 数据库；日常发布、配套备份和恢复见[部署手册](../README.md)，当次执行证据见[公司监控切换记录](https://github.com/jianify-llc/Jianify-llc/blob/main/ops/monitoring/test-cutover.md)。
 
 这份补丁只应用于线上已验收的 `54c0ba7664261ea2f68b0b3ab6375392d46a13e9` 版部署脚本。它在旧版配套备份入口增加显式 `backup-cutover` 模式：沿用原有运行身份、静止状态、PG／Redis、manifest 和哈希校验，成功后保持旧 API 停止。普通 `backup` 完全沿用原来的重启行为。当前日常脚本已经面向公司 PostgreSQL，不应为了一次迁移增加旧 Compose 兼容路径。
 

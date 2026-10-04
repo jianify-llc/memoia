@@ -165,7 +165,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if "admin" not in scopes and required not in scopes:
             return JSONResponse(status_code=403, content={"errno": 403, "errmsg": "API key lacks required scope", "data": None})
 
-        if request.method in {"POST", "PUT", "PATCH"}:
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             maximum = 2 * 1024 * 1024
             body = bytearray()
             async for chunk in request.stream():

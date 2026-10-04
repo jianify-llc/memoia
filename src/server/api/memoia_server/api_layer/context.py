@@ -99,7 +99,7 @@ It's a list of chats in OpenAI Message format, for example: [{"role": "user", "c
     ),
     time_range_in_days: int = Query(
         180,
-        description="Only allow events within the past few days, default is 180",
+        description="Recording-age window for recent listings without a query; semantic search keeps older candidates and ranks supported event times. Default 180 days.",
     ),
     customize_context_prompt: str = Query(
         None,

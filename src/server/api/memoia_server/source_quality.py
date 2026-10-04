@@ -95,7 +95,7 @@ async def run_quality(settings, *, cases=CASES, client=None):
                 for case in cases:
                     row = {"case": case.name, "trial": trial, "facts": []}
                     rows.append(row)
-                    request = ImportSource(idempotency_key=f"quality-{case.name}", external_id=f"quality-{case.name}", messages=[
+                    request = ImportSource(idempotency_key=f"quality-{case.name}", source_id=f"quality-{case.name}", messages=[
                         {"message_id": mid, "role": role, "content": content, "occurred_at": f"2026-01-01T00:00:{index:02d}Z"}
                         for index, (mid, role, content) in enumerate(case.messages)
                     ])

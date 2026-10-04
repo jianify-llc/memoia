@@ -1,22 +1,25 @@
-import type { paths } from "./generated/openapi.js";
+import type { components, paths } from "./generated/openapi.js";
 import * as generated from "./generated/validators.js";
 
 type JsonBody<T> = T extends { content: { "application/json": infer R } } ? R : never;
 type ResponseBody<T> = T extends { responses: infer R } ? JsonBody<R[Extract<keyof R, 200 | 201>]> : never;
 type RequestBody<T> = T extends { requestBody: { content: { "application/json": infer R } } } ? R : never;
-export type Operation = ResponseBody<paths["/api/v2/users/{user_id}/sources"]["post"]>;
+export type Operation = ResponseBody<paths["/api/v2/users/{user_id}/blobs"]["post"]>;
 export type ForgottenUser = ResponseBody<paths["/api/v2/users/{user_id}"]["delete"]>;
 export type Operations = ResponseBody<paths["/api/v2/users/{user_id}/operations"]["get"]>;
 type SourcesQuery = NonNullable<paths["/api/v2/users/{user_id}/sources"]["get"]["parameters"]["query"]>;
 type HistoryQuery = NonNullable<paths["/api/v2/users/{user_id}/history"]["get"]["parameters"]["query"]>;
 type OperationsQuery = NonNullable<paths["/api/v2/users/{user_id}/operations"]["get"]["parameters"]["query"]>;
-export type SourceImport = RequestBody<paths["/api/v2/users/{user_id}/sources"]["post"]>;
-export type Retraction = RequestBody<paths["/api/v2/users/{user_id}/sources/{source_id}/retract"]["post"]>;
+export type BlobImport = RequestBody<paths["/api/v2/users/{user_id}/blobs"]["post"]>;
+export type MessageDeletion = RequestBody<paths["/api/v2/users/{user_id}/sources/{source_id}/messages"]["delete"]>;
+export type Blob = ResponseBody<paths["/api/v2/users/{user_id}/blobs/{blob_id}"]["get"]>;
 export type Profiles = ResponseBody<paths["/api/v2/users/{user_id}/profiles"]["get"]>;
 export type Sources = ResponseBody<paths["/api/v2/users/{user_id}/sources"]["get"]>;
 export type Source = ResponseBody<paths["/api/v2/users/{user_id}/sources/{source_id}"]["get"]>;
 export type History = ResponseBody<paths["/api/v2/users/{user_id}/history"]["get"]>;
 export type Search = ResponseBody<paths["/api/v2/users/{user_id}/search"]["get"]>;
+export type EventTime = components["schemas"]["EventTime"];
+export type Evidence = components["schemas"]["Evidence"];
 export type Projects = ResponseBody<paths["/api/v2/projects"]["get"]>;
 export type ManagedProject = ResponseBody<paths["/api/v2/projects"]["post"]>;
 export type ProjectCreate = RequestBody<paths["/api/v2/projects"]["post"]>;
@@ -98,9 +101,11 @@ export class MemoiaClient {
     if (this.attempts > 4) throw new TypeError("maxAttempts cannot exceed four");
   }
 
-  importSource(userId: string, input: SourceImport, options?: RequestOptions): Promise<Operation> {
+  importBlob(userId: string, input: BlobImport, options?: RequestOptions): Promise<Operation> {
     if (!validators.validateImport(input)) throw new MemoiaError("INVALID_INPUT", null, false);
-    return this.request("POST", `${this.userPath(userId)}/sources`, operationValidator, options, input);
+    return this.request("POST", `${this.userPath(userId)}/blobs`,
+      (value) => operationValidator(value) && (value as Operation).blob_id !== null &&
+        (value as Operation).source_id === input.source_id, options, input);
   }
 
   getOperation(userId: string, operationId: string, options?: RequestOptions): Promise<Operation> {
@@ -128,13 +133,15 @@ export class MemoiaClient {
     return this.request("GET", `${this.userPath(userId)}/sources/${segment(sourceId)}`, validators.validateSource, options);
   }
 
-  getSourceByExternalId(userId: string, externalId: string, options?: RequestOptions): Promise<Source> {
-    return this.request("GET", `${this.userPath(userId)}/sources/by-external-id/${segment(externalId)}`, validators.validateSource, options);
+  getBlob(userId: string, blobId: string, options?: RequestOptions): Promise<Blob> {
+    return this.request("GET", `${this.userPath(userId)}/blobs/${segment(blobId)}`,
+      (value) => validators.validateBlob(value) && (value as Blob).blob_id.toLowerCase() === blobId.toLowerCase(), options);
   }
 
-  retractMessages(userId: string, sourceId: string, input: Retraction, options?: RequestOptions): Promise<Operation> {
-    if (!validators.validateRetraction(input)) throw new MemoiaError("INVALID_INPUT", null, false);
-    return this.request("POST", `${this.userPath(userId)}/sources/${segment(sourceId)}/retract`, operationValidator, options, input);
+  deleteMessages(userId: string, sourceId: string, input: MessageDeletion, options?: RequestOptions): Promise<Operation> {
+    if (!validators.validateMessageDeletion(input)) throw new MemoiaError("INVALID_INPUT", null, false);
+    return this.request("DELETE", `${this.userPath(userId)}/sources/${segment(sourceId)}/messages`,
+      (value) => operationValidator(value) && (value as Operation).source_id === sourceId, options, input);
   }
 
   /** 永久遗忘只接受同一 UUID 的提交回执；未知结果由调用方显式再次确认。 */

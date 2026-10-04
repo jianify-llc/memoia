@@ -21,7 +21,7 @@ from memoia_server.env import BufferStatus
 from memoia_server.models.blob import BlobType, BlobData
 from memoia_server.models.database import BufferZone, User, UserEvent
 from memoia_server.models.response import UserData
-from memoia_server.models.source import ImportSource, SourceMessage, memory_sources, memory_operations, user_memory_states
+from memoia_server.models.source import ImportSource, SourceMessage, memory_blobs, memory_operations, user_memory_states
 from memoia_server.models.utils import Promise
 
 
@@ -112,8 +112,8 @@ async def test_asgi_async_flush_hands_off_to_new_owner_and_commits_once(idle_buf
         response = await client.post(f"/api/v1/users/buffer/{uid}/chat?wait_process=false")
     assert response.status_code == 200 and response.json()["errno"] == 0
     with Session() as session:
-        assert session.scalar(select(BufferZone.status).where(BufferZone.id == bid)) == BufferStatus.done
-        assert session.scalar(select(func.count()).select_from(memory_sources).where(memory_sources.c.user_id == uid)) == 1
+        assert session.scalar(select(BufferZone.status).where(BufferZone.id == bid)) is None
+        assert session.scalar(select(func.count()).select_from(memory_blobs).where(memory_blobs.c.user_id == uid)) == 1
         assert session.scalar(select(func.count()).select_from(UserEvent).where(UserEvent.user_id == uid)) == 1
     assert extracted and extracted[0] != owners[0]
     async with background.get_redis_client() as redis:
@@ -136,7 +136,7 @@ async def test_background_waits_for_request_owner_without_changing_idle_buffer(i
             assert CURRENT_LEASE.get() is request_lease
         await asyncio.wait_for(asyncio.shield(worker), 2)
         with Session() as session:
-            assert session.scalar(select(BufferZone.status).where(BufferZone.id == bid)) == BufferStatus.done
+            assert session.scalar(select(BufferZone.status).where(BufferZone.id == bid)) is None
         assert bounded_source_model.await_count == 1
     finally:
         if worker is not None:
@@ -212,7 +212,7 @@ async def test_background_and_v2_share_real_owner_and_register_one_generation(id
             assert await redis.get(owners[0].key) == owners[0].owner
             assert await redis.pttl(owners[0].key) > 0
         competitor = await source.import_source(uid, "__root__", ImportSource(
-            idempotency_key="competing-v2", external_id="competing-v2",
+            idempotency_key="competing-v2", source_id="competing-v2",
             messages=[SourceMessage(message_id="m-v2", role="user", content="My real name is Gus.",
                                     occurred_at=datetime.now(timezone.utc))],
         ))
@@ -226,7 +226,7 @@ async def test_background_and_v2_share_real_owner_and_register_one_generation(id
         assert completed.status == "completed"
         with Session() as session:
             assert session.scalar(select(user_memory_states.c.generation).where(user_memory_states.c.user_id == uid)) == 2
-            assert session.scalar(select(func.count()).select_from(memory_sources).where(memory_sources.c.user_id == uid)) == 2
+            assert session.scalar(select(func.count()).select_from(memory_blobs).where(memory_blobs.c.user_id == uid)) == 2
         assert bounded_source_model.await_count == 2
     finally:
         release.set()
@@ -257,7 +257,7 @@ async def test_cancel_during_real_flush_releases_lease_without_false_completion(
         with Session() as session:
             assert session.scalar(select(BufferZone.status).where(BufferZone.id == bid)) == BufferStatus.processing
             assert session.scalar(select(memory_operations.c.status).where(memory_operations.c.user_id == uid)) == "processing"
-            assert session.scalar(select(func.count()).select_from(memory_sources).where(memory_sources.c.user_id == uid)) == 0
+            assert session.scalar(select(func.count()).select_from(memory_blobs).where(memory_blobs.c.user_id == uid)) == 1
             assert session.scalar(select(func.count()).select_from(UserEvent).where(UserEvent.user_id == uid)) == 0
     finally:
         await stop_runner(worker)

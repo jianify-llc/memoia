@@ -1,7 +1,6 @@
 # Modified for Memoia: relocated from the upstream memobase_server package.
 from fastapi import BackgroundTasks, Request
 from fastapi import Path, Body, Query
-import traceback
 
 from ..controllers import full as controllers
 
@@ -83,10 +82,10 @@ async def insert_blob(
                 )
     except Exception as e:
         TRACE_LOG.error(
-            project_id, user_id, f"Error inserting blob: {e}, {traceback.format_exc()}"
+            project_id, user_id, f"Blob insertion failed ({type(e).__name__})"
         )
         return Promise.reject(
-            CODE.INTERNAL_SERVER_ERROR, f"Error inserting blob: {e}"
+            CODE.INTERNAL_SERVER_ERROR, "Blob insertion failed"
         ).to_response(res.BaseResponse)
 
     background_tasks.add_task(

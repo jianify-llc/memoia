@@ -76,13 +76,13 @@ Memoia独立测试部署、自动更新及兼容API恢复已通过；Luvel实际
 
 - 用户明确调整日常发布边界：Memoia 自己正常停止旧 API、启动兼容版本并验收，不以外部消费者、buffer、Redis 队列或 `standalone-mode` 作为普通发布门禁。备份和数据恢复仍需停写一致切点。新部署脚本保留部署锁、已验收镜像漂移检查、旧 run 防覆盖、schema/embedding/基础设施指纹和旧 API exit0 检查；不会强杀后继续切换。
 - 画像 Redis cache 已移除，读取直接进入 PostgreSQL；Luvel 自己的 KV 画像缓存不受本次服务端更改影响。77 项完整服务测试、50 项部署相关验证通过；包括过期画像缓存不影响读取、普通发布不扫描运行任务以及恢复维护仍拒绝未知处理状态。
-- 源码及部署脚本提交 `21951f5f16578b0ba8a633823e8e3bf4e2bdae17` 已推送远端 `test`，包含先前画像改动 `8f232aaa56544749709d41f554ab50b806ef79d4`。构建 Actions [36289692279](https://github.com/jianify/memoia/actions/runs/36289692279) 成功，linux/amd64、linux/arm64 manifest、匿名拉取及源码身份检查通过。
+- 源码及部署脚本提交 `21951f5f16578b0ba8a633823e8e3bf4e2bdae17` 已推送远端 `test`，包含先前画像改动 `8f232aaa56544749709d41f554ab50b806ef79d4`。构建 Actions [36289692279](https://github.com/jianify-llc/memoia/actions/runs/36289692279) 成功，linux/amd64、linux/arm64 manifest、匿名拉取及源码身份检查通过。
 - 总 manifest：`ghcr.io/jianify/memoia@sha256:530c87475dce7a235db8b1aadafe2387a0f6201292d7775d057dd9d635527b39`。构建成功后启用 `MEMOIA_TEST_DEPLOY_ENABLED=true`；online 仍为 false。
-- `reverify-test` Actions [36290017074](https://github.com/jianify/memoia/actions/runs/36290017074) 成功，复用同一 manifest，没有重新构建；直连 SSH、专用 github 用户、严格 host key、sudo、API 更新、公网健康/鉴权/用户 CRUD、finalize 和 GitHub Deployment 成功记录均通过。Deployment `6687300802` 只声明基础验收，不冒充完整记忆测试。
+- `reverify-test` Actions [36290017074](https://github.com/jianify-llc/memoia/actions/runs/36290017074) 成功，复用同一 manifest，没有重新构建；直连 SSH、专用 github 用户、严格 host key、sudo、API 更新、公网健康/鉴权/用户 CRUD、finalize 和 GitHub Deployment 成功记录均通过。Deployment `6687300802` 只声明基础验收，不冒充完整记忆测试。
 - 切换后 PostgreSQL、Redis 的容器完整 ID 和固定数据挂载与切换前逐项相同；Tunnel MainPID=529、启动时间和四条当前活动连接不变。API healthy、OOM=false、RestartCount=0，只映射 `127.0.0.1:8000`。本次未重建或升级数据库、Redis、Tunnel，不再生成 standalone 标记。
 - 额外真实 SDK 验收：小批量显式 flush 15.68 秒，大批量自动处理 17.46 秒，两个最终事件 ID、13 条画像；真实 query embedding 搜索返回两个事件。缺失/错误 Bearer 均被 HTTP401 拒绝。API 正常退出 exit0 后启动同一容器，原事件、画像和 embedding 查询仍通过；随后仅删除本次专用探针事件和用户，确认不可查询，没有重放写入。
 - 后续补齐当前 C 的跨镜像恢复：重新建立专用 SDK 探针，两个最终事件、12 条画像和真实 embedding 查询先在 C 通过，再使用 C 的 `restore-api` 明确恢复上一已验收 B。B 上鉴权及原事件/画像/向量查询通过后 finalize，run 高水位仍为 `36290017074`；未恢复数据库快照。
-- Actions [36290622309](https://github.com/jianify/memoia/actions/runs/36290622309) 随后成功复用 C 原 digest，经 prepare/公网基础验收/finalize 切回 C。原探针的事件、画像和真实 embedding 查询再次通过，最终删除事件和用户并确认不可查询。C→B→C 的 PG/Redis 完整容器 ID、固定挂载、Tunnel 进程均未改变；最终 run 高水位为 `36290622309`，pending 已清除。没有把同镜像重启冒充跨版本恢复。
+- Actions [36290622309](https://github.com/jianify-llc/memoia/actions/runs/36290622309) 随后成功复用 C 原 digest，经 prepare/公网基础验收/finalize 切回 C。原探针的事件、画像和真实 embedding 查询再次通过，最终删除事件和用户并确认不可查询。C→B→C 的 PG/Redis 完整容器 ID、固定挂载、Tunnel 进程均未改变；最终 run 高水位为 `36290622309`，pending 已清除。没有把同镜像重启冒充跨版本恢复。
 - B 读取曾缓存该专用探针的画像；C 删除用户后，仅清理经精确探针 UUID 和既有 key 格式核对的一个遗留画像缓存键，并确认不存在。没有批量清 Redis 或修改业务用户缓存。
 - 本次没有重做配套数据恢复，既有隔离 PG/RDB→AOF 恢复证据保留；未扩大为容量压测或 Luvel Worker 业务验收。
 - Luvel 重跑无数据库 preload 的记忆写入边界 19 项、memory service 60 项以及 Memoia 终态观测 2 项，全部通过；未修改其数据库、提交其他 Agent 的工作区改动或发布 Worker。当前 test Worker 健康接口仍报告 `982f06ba8cc34a7f412fcfd3b90043089d44d562`；本地配置提交与完整业务候选须由 Luvel 发布负责人协调升级。

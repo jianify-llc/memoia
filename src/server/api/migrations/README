@@ -11,6 +11,13 @@ memoia_server.schema.check_schema() 校验 revision 和 embedding 维度、初�
   0003_profile_history  画像版本、差异及来源关联。
   0004_key_scopes_search 撤销/到期/权限 key 与 PostgreSQL 词法检索索引。
   0005_user_tombstones  永久遗忘的项目／用户身份，仅保存 UUID 与遗忘时间。
+  0006_source_blob_messages 外部 Source 分组、Blob 批次、无正文消息身份与证据归属约束。
+  0007_event_time_evidence 可空事件时间证据 JSONB 与原消息 IANA 时区，不回填旧事件日期。
+
+0006 不猜测旧 dialog 归属，旧批次保持 legacy:<UUID> 来源。完成输入原文被清理，事实和
+回执保留；未完成输入迁移后临时保留 7 天。Source/Blob 不再保存 payload。该清理不可逆，
+不覆盖旧迁移；v2 调用方须协调升级到 0.3 契约，v1 不获得真实外部消息 ID 保证。
+迁移不清理离机备份、WAL 或历史快照，旧快照不得覆盖当前已删除状态。
 
 0005 是前向迁移，不改写既有记忆；墓碑仅外键关联 projects，不关联 users，用户数据
 级联删除不能解除遗忘。`DELETE /api/v2/users/{user_id}` 原子写墓碑并清理用户数据，重复
@@ -39,3 +46,5 @@ v1 create 和 v2 import/retry 均拒绝复建。墓碑不能靠降级、恢复�
 
 模型声明用于下一版本的 review/autogenerate 辅助，不把自动生成 diff 直接当安全迁移；
 手工检查表达式索引、冻结 baseline、约束及数据兼容性后再运行真实 PostgreSQL 测试。
+
+0007 与 API／SDK 0.4 配套：occurred_at 保留来源记录时间语义，event_time 单独保存事件日期及证据。年月范围不代表精确日期。旧记录为空，不从摘要或创建时间补猜；已保存证据不可通过 downgrade 删除。

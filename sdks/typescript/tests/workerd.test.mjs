@@ -16,8 +16,8 @@ const forgetMarkers = Object.fromEntries(Object.entries(forgetUsers).map(([marke
 const complete = (externalId) => ({
   operation_id: "22222222-2222-4222-8222-222222222222",
   status: "completed",
-  source_id: "33333333-3333-4333-8333-333333333333",
-  external_id: externalId,
+  blob_id: "33333333-3333-4333-8333-333333333333",
+  source_id: externalId,
   result: { event_ids: [], profile_ids: [] },
   error: null,
 });
@@ -56,9 +56,9 @@ export default {
         ? await client.getOperationByKey(${JSON.stringify(userId)}, marker)
         : action === "forget"
         ? await client.forgetUser(${JSON.stringify(forgetUsers)}[marker])
-        : await client.importSource(${JSON.stringify(userId)}, {
+        : await client.importBlob(${JSON.stringify(userId)}, {
             idempotency_key: "probe:" + marker,
-            external_id: "probe:" + marker,
+            source_id: "probe:" + marker,
             messages: [{
               message_id: "1", role: "user",
               content: "never-forward-body:" + marker,
@@ -95,7 +95,7 @@ export default {
       const input = body ? JSON.parse(body) : null;
       const pathId = decodeURIComponent(url.pathname.split("/").at(-1));
       const marker = input
-        ? input.external_id.slice("probe:".length)
+        ? input.source_id.slice("probe:".length)
         : forgetMarkers[pathId] ?? pathId;
       calls.push({
         marker, origin: url.origin, method: request.method,
@@ -116,13 +116,13 @@ export default {
       }
       if (marker.startsWith("unknown-transport")) {
         await new Promise((resolve) => setTimeout(resolve, 500));
-        return request.method === "DELETE" ? json({ user_id: pathId, forgotten: true }) : json(complete(input.external_id));
+        return request.method === "DELETE" ? json({ user_id: pathId, forgotten: true }) : json(complete(input.source_id));
       }
       if (request.method === "GET") {
         return json({ detail: { code: "operation_not_found", message: "not found", retryable: false } }, 404);
       }
       if (request.method === "DELETE") return json({ user_id: pathId, forgotten: true });
-      return json(complete(input.external_id));
+      return json(complete(input.source_id));
     },
   }));
   await runtime.ready;

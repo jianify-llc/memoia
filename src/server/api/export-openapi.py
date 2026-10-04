@@ -12,7 +12,7 @@ os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 from memoia_server.api_layer.source import router
 from memoia_server.api_layer.project_v2 import router as project_router
 
-app = FastAPI(title="Memoia V2 API", version="0.2.0")
+app = FastAPI(title="Memoia V2 API", version="0.4.0")
 app.include_router(router)
 app.include_router(project_router)
 schema = app.openapi()

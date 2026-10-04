@@ -3,7 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Request, Query, HTTPException, Response
 from ..models.source import (
-    ImportSource, RetractMessages, Operation, Operations, Source, Sources, Profiles, Profile,
+    ImportSource, DeleteMessages, Operation, Operations, Source, Sources, Profiles, Profile, Blob,
     SearchResult, SearchEvent, History, HistoryEntry,
     ForgottenUser,
 )
@@ -33,7 +33,7 @@ async def forget_user(user_id: UUID, request: Request):
         translate(error)
 
 
-@router.post("/users/{user_id}/sources", response_model=Operation, operation_id="importSource")
+@router.post("/users/{user_id}/blobs", response_model=Operation, operation_id="importBlob")
 async def import_source(user_id: UUID, body: ImportSource, request: Request, response: Response):
     from ..controllers import source
     try:
@@ -94,17 +94,17 @@ async def retry_operation(user_id: UUID, operation_id: UUID, request: Request, r
     return result
 
 
-@router.get("/users/{user_id}/sources/by-external-id/{external_id}", response_model=Source, operation_id="getSourceByExternalId")
-async def get_source_by_external_id(user_id: UUID, external_id: str, request: Request):
+@router.get("/users/{user_id}/blobs/{blob_id}", response_model=Blob, operation_id="getBlob")
+async def get_blob(user_id: UUID, blob_id: UUID, request: Request):
     from ..controllers import source
     try:
-        return source.get_source(user_id, project_id(request), external_id=external_id)
+        return source.get_blob(user_id, project_id(request), blob_id)
     except source.SourceError as error:
         translate(error)
 
 
 @router.get("/users/{user_id}/sources/{source_id}", response_model=Source, operation_id="getSource")
-async def get_source(user_id: UUID, source_id: UUID, request: Request):
+async def get_source(user_id: UUID, source_id: str, request: Request):
     from ..controllers import source
     try:
         return source.get_source(user_id, project_id(request), source_id=source_id)
@@ -112,11 +112,11 @@ async def get_source(user_id: UUID, source_id: UUID, request: Request):
         translate(error)
 
 
-@router.post("/users/{user_id}/sources/{source_id}/retract", response_model=Operation, operation_id="retractMessages")
-async def retract_messages(user_id: UUID, source_id: UUID, body: RetractMessages, request: Request, response: Response):
+@router.delete("/users/{user_id}/sources/{source_id}/messages", response_model=Operation, operation_id="deleteMessages")
+async def delete_messages(user_id: UUID, source_id: str, body: DeleteMessages, request: Request, response: Response):
     from ..controllers import source
     try:
-        result = await source.retract_messages(user_id, project_id(request), source_id, body)
+        result = await source.delete_messages(user_id, project_id(request), source_id, body)
     except source.SourceError as error:
         translate(error)
     if result.status == "processing":

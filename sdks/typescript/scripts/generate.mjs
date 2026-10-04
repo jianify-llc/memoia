@@ -15,9 +15,10 @@ const route = "/api/v2/users/{user_id}";
 const targets = {
   validateForgetUserPath: ["delete", route, "path"],
   validateForgottenUser: ["delete", route, "response"],
-  validateOperation: ["post", `${route}/sources`, "response"],
-  validateImport: ["post", `${route}/sources`, "request"],
-  validateRetraction: ["post", `${route}/sources/{source_id}/retract`, "request"],
+  validateOperation: ["post", `${route}/blobs`, "response"],
+  validateImport: ["post", `${route}/blobs`, "request"],
+  validateBlob: ["get", `${route}/blobs/{blob_id}`, "response"],
+  validateMessageDeletion: ["delete", `${route}/sources/{source_id}/messages`, "request"],
   validateSources: ["get", `${route}/sources`, "response"],
   validateSource: ["get", `${route}/sources/{source_id}`, "response"],
   validateProfiles: ["get", `${route}/profiles`, "response"],

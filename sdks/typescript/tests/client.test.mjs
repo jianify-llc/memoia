@@ -5,27 +5,87 @@ import { MemoiaClient, MemoiaError } from "../dist/index.js";
 const user = "11111111-1111-4111-8111-111111111111";
 const sourceId = "22222222-2222-4222-8222-222222222222";
 const eventId = "33333333-3333-4333-8333-333333333333";
-const complete = { operation_id: "44444444-4444-4444-8444-444444444444", status: "completed", source_id: sourceId, external_id: "luvel:memory_store_logs:1", result: { event_ids: [eventId], profile_ids: [] }, error: null };
-const source = { idempotency_key: "luvel:batch:1", external_id: "luvel:memory_store_logs:1", messages: [{ message_id: "1", role: "user", content: "Tokyo", occurred_at: "2026-10-02T00:00:00Z" }] };
+const complete = { operation_id: "44444444-4444-4444-8444-444444444444", status: "completed", source_id: sourceId, blob_id: "55555555-5555-4555-8555-555555555555", result: { event_ids: [eventId], profile_ids: [] }, error: null };
+const source = { idempotency_key: "luvel:batch:1", source_id: sourceId, messages: [{ message_id: "1", role: "user", content: "Tokyo", occurred_at: "2026-10-02T00:00:00Z" }] };
 const json = (body, status = 200) => Response.json(body, { status });
 const client = (fetch, options = {}) => new MemoiaClient({ baseUrl: "https://memoia.example", apiKey: "private-project-token", fetch, ...options });
 
+describe("event time evidence contract", () => {
+  it("sends source timezone and keeps it distinct from event dates", async () => {
+    let posted;
+    const api = client(async (_url, init) => { posted = JSON.parse(init.body); return json({ ...complete, source_id: posted.source_id }); });
+    const input = { idempotency_key: "time-import", source_id: "dialog-1", messages: [
+      { message_id: "1", role: "user", content: "去年四月住京都", occurred_at: "2026-01-01T00:30:00+08:00", time_zone: "Asia/Shanghai" },
+    ] };
+    await api.importBlob(user, input);
+    assert.deepEqual(posted, input);
+  });
+
+  it("preserves precision, original time expression and source recording evidence", async () => {
+    const evidence = { fact_id: eventId, blob_id: complete.blob_id, content: "Kyoto hotel", topic: "life_event", sub_topic: "travel", support_groups: [["1"]],
+      event_time: { start: "2025-04-01", end: "2025-04-30", precision: "month", evidence: [{ message_id: "1", expression: "去年四月" }] },
+      source_messages: [{ message_id: "1", recorded_at: "2026-01-01T00:30:00+08:00", time_zone: "Asia/Shanghai" }] };
+    const body = { events: [{ id: eventId, content: "Kyoto hotel", source_id: "dialog-1", blob_id: complete.blob_id,
+      score: .03, occurred_at: "2026-01-01T00:30:00+08:00", evidence: [evidence] }] };
+    const api = client(async () => json(body));
+    assert.deepEqual(await api.search(user, "Kyoto hotel 2025-04"), body);
+    evidence.event_time.start = "invented-date";
+    await assert.rejects(api.search(user, "Kyoto"), (error) => error instanceof MemoiaError);
+  });
+});
+
 describe("fixed source identity and acknowledgement", () => {
+  it("queries the server-owned Blob separately and deletes messages with a fixed key", async () => {
+    const blob = { blob_id: complete.blob_id, source_id: "dialog-1", status: "active", message_ids: ["1"], event_ids: [eventId], created_at: "2026-10-02T00:00:00Z" };
+    const deletion = { idempotency_key: "delete-1", message_ids: ["1"] };
+    const calls = [];
+    const api = client(async (url, init) => {
+      calls.push({ url, init });
+      return json(init.method === "GET" ? blob : { ...complete, source_id: "dialog-1", blob_id: null });
+    });
+    assert.deepEqual(await api.getBlob(user, complete.blob_id), blob);
+    assert.equal((await api.deleteMessages(user, "dialog-1", deletion)).status, "completed");
+    assert.equal(calls[0].url, `https://memoia.example/api/v2/users/${user}/blobs/${complete.blob_id}`);
+    assert.equal(calls[1].url, `https://memoia.example/api/v2/users/${user}/sources/dialog-1/messages`);
+    assert.equal(calls[1].init.method, "DELETE");
+    assert.deepEqual(JSON.parse(calls[1].init.body), deletion);
+  });
+
+  it("does not replay a message deletion with a lost acknowledgement", async () => {
+    let calls = 0;
+    const api = client(async () => { calls++; throw new TypeError("connection closed"); });
+    await assert.rejects(api.deleteMessages(user, "dialog-1", { idempotency_key: "d", message_ids: ["1"] }),
+      (error) => error.outcome === "unknown");
+    assert.equal(calls, 1);
+  });
+
+  it("rejects valid-shaped acknowledgements for another source or blob", async () => {
+    const wrong = { ...complete, source_id: "another-dialog" };
+    await assert.rejects(client(async () => json(wrong)).importBlob(user, source),
+      (error) => error.code === "INVALID_RESPONSE" && error.outcome === "unknown");
+    await assert.rejects(client(async () => json(wrong)).deleteMessages(user, sourceId,
+      { idempotency_key: "d", message_ids: ["1"] }),
+      (error) => error.code === "INVALID_RESPONSE" && error.outcome === "unknown");
+    const blob = { blob_id: eventId, source_id: sourceId, status: "active", message_ids: ["1"], event_ids: [], created_at: "2026-10-02T00:00:00Z" };
+    await assert.rejects(client(async () => json(blob)).getBlob(user, complete.blob_id),
+      (error) => error.code === "INVALID_RESPONSE");
+  });
+
   it("validates final UUID IDs and sends the origin-only v2 path", async () => {
     let sent;
     const api = client(async (url, init) => { sent = { url, init }; return json(complete); });
-    assert.deepEqual(await api.importSource(user, source), complete);
-    assert.equal(sent.url, `https://memoia.example/api/v2/users/${user}/sources`);
+    assert.deepEqual(await api.importBlob(user, source), complete);
+    assert.equal(sent.url, `https://memoia.example/api/v2/users/${user}/blobs`);
     assert.equal(sent.init.redirect, "manual");
     assert.equal(sent.init.headers.Authorization, "Bearer private-project-token");
     assert.deepEqual(JSON.parse(sent.init.body), source);
   });
 
   it("does not turn processing or a legal event-free completion into an error", async () => {
-    const pending = { ...complete, status: "processing", source_id: null, result: null };
-    assert.equal((await client(async () => json(pending, 202)).importSource(user, source)).status, "processing");
+    const pending = { ...complete, status: "processing", result: null };
+    assert.equal((await client(async () => json(pending, 202)).importBlob(user, source)).status, "processing");
     const empty = { ...complete, result: { event_ids: [], profile_ids: [] } };
-    assert.deepEqual((await client(async () => json(empty)).importSource(user, source)).result.event_ids, []);
+    assert.deepEqual((await client(async () => json(empty)).importBlob(user, source)).result.event_ids, []);
   });
 
   it("rejects malformed final IDs and impossible completed states as unknown writes", async () => {
@@ -35,7 +95,7 @@ describe("fixed source identity and acknowledgement", () => {
       { ...complete, result: { event_ids: ["blob-id"], profile_ids: [] } },
       { ...complete, result: { event_ids: null, profile_ids: [] } },
     ]) {
-      await assert.rejects(client(async () => json(broken)).importSource(user, source), (error) => error.code === "INVALID_RESPONSE" && error.outcome === "unknown");
+      await assert.rejects(client(async () => json(broken)).importBlob(user, source), (error) => error.code === "INVALID_RESPONSE" && error.outcome === "unknown");
     }
   });
 
@@ -47,7 +107,7 @@ describe("fixed source identity and acknowledgement", () => {
       assert.match(url, /operations\/by-key\/luvel%3Abatch%3A1$/);
       return json(complete);
     });
-    await assert.rejects(api.importSource(user, source), (error) => error instanceof MemoiaError && error.outcome === "unknown");
+    await assert.rejects(api.importBlob(user, source), (error) => error instanceof MemoiaError && error.outcome === "unknown");
     assert.deepEqual(await api.getOperationByKey(user, source.idempotency_key), complete);
     assert.deepEqual(methods, ["POST", "GET"]);
   });
@@ -58,7 +118,7 @@ describe("fixed source identity and acknowledgement", () => {
       bodies.push(init.body);
       return bodies.length === 1 ? json({ detail: { code: "PROVIDER_RATE_LIMIT", retryable: true } }, 429) : json(complete);
     });
-    assert.equal((await api.importSource(user, source)).status, "completed");
+    assert.equal((await api.importBlob(user, source)).status, "completed");
     assert.equal(bodies.length, 2);
     assert.equal(bodies[0], bodies[1]);
   });
@@ -66,14 +126,14 @@ describe("fixed source identity and acknowledgement", () => {
   it("preserves recoverable ownership conflicts with one attempt, then resumes the durable operation", async () => {
     for (const code of ["lease_lost", "write_conflict"]) {
       const calls = [];
-      const failed = { ...complete, status: "failed", source_id: null, result: null, error: { code, retryable: true } };
+      const failed = { ...complete, status: "failed", result: null, error: { code, retryable: true } };
       const api = client(async (url, init) => {
         calls.push({ path: new URL(url).pathname, method: init.method, body: init.body });
         if (calls.length === 1) return json({ detail: { code, retryable: true } }, 409);
         if (init.method === "GET") return json(failed);
         return json(complete);
       }, { maxAttempts: 1 });
-      await assert.rejects(api.importSource(user, source), (error) =>
+      await assert.rejects(api.importBlob(user, source), (error) =>
         error instanceof MemoiaError && error.status === 409 && error.code === code &&
         error.retryable === true && error.outcome === "rejected");
       assert.equal(calls.length, 1);
@@ -94,7 +154,7 @@ describe("fixed source identity and acknowledgement", () => {
         bodies.push(init.body);
         return bodies.length === 1 ? json({ detail: { code, retryable: true } }, 409) : json(complete);
       }, { maxAttempts: 2 });
-      assert.deepEqual(await api.importSource(user, source), complete);
+      assert.deepEqual(await api.importBlob(user, source), complete);
       assert.equal(bodies.length, 2);
       assert.deepEqual(JSON.parse(bodies[0]), source);
       assert.equal(bodies[0], bodies[1]);
@@ -111,7 +171,7 @@ describe("fixed source identity and acknowledgement", () => {
     ]) {
       let count = 0;
       const api = client(async () => { count++; return json(detail === undefined ? {} : { detail }, 409); });
-      await assert.rejects(api.importSource(user, source), (error) =>
+      await assert.rejects(api.importBlob(user, source), (error) =>
         error instanceof MemoiaError && error.status === 409 && error.retryable === false);
       assert.equal(count, 1);
     }
@@ -120,7 +180,7 @@ describe("fixed source identity and acknowledgement", () => {
   it("does not retry parameter/auth failures even if the server requests it", async () => {
     for (const status of [400, 401, 403, 409, 422]) {
       let count = 0;
-      await assert.rejects(client(async () => { count++; return json({ detail: { code: "DENIED", retryable: true } }, status); }).importSource(user, source));
+      await assert.rejects(client(async () => { count++; return json({ detail: { code: "DENIED", retryable: true } }, status); }).importBlob(user, source));
       assert.equal(count, 1);
     }
   });
@@ -137,7 +197,7 @@ describe("fixed source identity and acknowledgement", () => {
 
   it("does not misclassify an unstructured server failure as a rejected write", async () => {
     let calls = 0;
-    await assert.rejects(client(async () => { calls++; return json({ detail: "unexpected error" }, 500); }).importSource(user, source), (error) => error.outcome === "unknown");
+    await assert.rejects(client(async () => { calls++; return json({ detail: "unexpected error" }, 500); }).importBlob(user, source), (error) => error.outcome === "unknown");
     assert.equal(calls, 1);
   });
 
@@ -249,7 +309,7 @@ describe("permanent account forgetting", () => {
     for (const action of ["import", "retry"]) {
       let calls = 0;
       const api = client(async () => { calls++; return json({ detail: { code: "user_forgotten", retryable: false } }, 410); });
-      await assert.rejects(action === "import" ? api.importSource(user, source) : api.retryOperation(user, complete.operation_id), (error) =>
+      await assert.rejects(action === "import" ? api.importBlob(user, source) : api.retryOperation(user, complete.operation_id), (error) =>
         error.code === "user_forgotten" && error.status === 410 && error.retryable === false && error.outcome === "rejected");
       assert.equal(calls, 1);
     }
@@ -266,7 +326,7 @@ describe("bounded transport", () => {
           assert.equal(init.redirect, "manual");
           return new Response("private response", { status, headers: { Location: "https://other.example/?secret=private-project-token" } });
         });
-        const request = method === "GET" ? api.getProfiles(user) : method === "DELETE" ? api.forgetUser(user) : api.importSource(user, source);
+        const request = method === "GET" ? api.getProfiles(user) : method === "DELETE" ? api.forgetUser(user) : api.importBlob(user, source);
         await assert.rejects(request, (error) =>
           error instanceof MemoiaError && error.code === "REDIRECT_REJECTED" &&
           error.status === status && error.retryable === false &&
@@ -355,7 +415,7 @@ describe("bounded transport", () => {
   it("stops a hung mutation at its timeout without starting another attempt", async () => {
     let count = 0;
     const api = client((_url, { signal }) => new Promise((_resolve, reject) => { count++; signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }); }), { writeTimeoutMs: 15 });
-    await assert.rejects(api.importSource(user, source), (error) => error.outcome === "unknown");
+    await assert.rejects(api.importBlob(user, source), (error) => error.outcome === "unknown");
     assert.equal(count, 1);
   });
 
@@ -365,12 +425,12 @@ describe("bounded transport", () => {
     }
     let count = 0;
     const api = client(async () => { count++; return json(complete); });
-    await assert.rejects(async () => api.importSource(user, { ...source, idempotency_key: "" }), /INVALID_INPUT/);
+    await assert.rejects(async () => api.importBlob(user, { ...source, idempotency_key: "" }), /INVALID_INPUT/);
     assert.equal(count, 0);
   });
 
   it("never includes provider bodies or the project key in returned errors", async () => {
     const api = client(async () => json({ detail: { code: "token private-project-token", message: "private content", retryable: false } }, 500));
-    await assert.rejects(api.importSource(user, source), (error) => error.message === "Memoia request failed: HTTP_ERROR");
+    await assert.rejects(api.importBlob(user, source), (error) => error.message === "Memoia request failed: HTTP_ERROR");
   });
 });
