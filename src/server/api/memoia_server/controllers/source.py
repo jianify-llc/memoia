@@ -471,11 +471,14 @@ def _record_revision(session, user_id, project_id, op, source_id, before):
         removed=[p for p in before if p["id"] not in new_ids]))
 
 
-def _scrub_history(session, user_id, project_id, removed_fact_ids):
-    if not removed_fact_ids:
+def _scrub_history(session, user_id, project_id, changed_fact_ids, affected_topics=()):
+    if not changed_fact_ids and not affected_topics:
         return
     for row in session.execute(select(revisions).where(_scope(revisions, user_id, project_id))).mappings():
-        cleaned = {field: [p for p in row[field] if not removed_fact_ids.intersection(p["fact_ids"])]
+        # A surviving fact can lose its latest/temporal support. Historical derived
+        # text in the closed reconciliation scope is no longer a safe read fallback.
+        cleaned = {field: [p for p in row[field] if not changed_fact_ids.intersection(p["fact_ids"])
+                          and _topic(p["topic"]) not in affected_topics]
                    for field in ("profiles", "added", "removed")}
         session.execute(update(revisions).where(revisions.c.id == row["id"]).values(**cleaned))
 
@@ -535,7 +538,7 @@ def _write_event(session, user_id, project_id, source_row, source_facts, content
     return str(event_id)
 
 
-def _register(user_id, project_id, key, kind, request, source_id):
+def _register(user_id, project_id, key, kind, request, source_id, *, legacy_buffers=None):
     request_hash = _hash({"kind": kind, "request": request})
     with Session.begin() as session:
         assert_user_active(session, user_id, project_id)
@@ -558,9 +561,22 @@ def _register(user_id, project_id, key, kind, request, source_id):
             blob_id = uuid4()
             session.execute(insert(blobs).values(id=blob_id, user_id=user_id, project_id=project_id,
                 source_id=source_id, message_ids=[m["message_id"] for m in request["messages"]], status="active"))
+        stored_request = dict(request)
+        if legacy_buffers:
+            # Server-owned cleanup identities are durable, but are not part of the
+            # public input/hash. Recovery must commit cleanup with the original receipt.
+            stored_request["legacy_buffers"] = {
+                "buffer_ids": [str(value) for value in legacy_buffers[0]],
+                "blob_ids": [str(value) for value in legacy_buffers[1]],
+            }
+            if previous and previous["status"] != "completed" and "legacy_buffers" not in previous["request"]:
+                # A v1 flush can attach missing cleanup proof to its already accepted
+                # original operation; never change its public hash or established proof.
+                session.execute(update(operations).where(operations.c.id == previous["id"])
+                    .values(request={**previous["request"], "legacy_buffers": stored_request["legacy_buffers"]}))
         session.execute(insert(operations).values(
             id=uuid4(), user_id=user_id, project_id=project_id, idempotency_key=key,
-            kind=kind, request_hash=request_hash, request=request, source_id=source_id, blob_id=blob_id, status="processing",
+            kind=kind, request_hash=request_hash, request=stored_request, source_id=source_id, blob_id=blob_id, status="processing",
             input_expires_at=datetime.now(timezone.utc) + timedelta(seconds=CONFIG.source_input_retention_seconds)
                 if kind == "import" else None,
         ).on_conflict_do_nothing(index_elements=["user_id", "project_id", "idempotency_key"]))
@@ -645,7 +661,8 @@ async def import_source(user_id, project_id, request: ImportSource, *, legacy_bu
     for message in payload["messages"]:
         if message.get("time_zone") is None:
             message.pop("time_zone", None)
-    op = _register(user_id, project_id, request.idempotency_key, "import", payload, request.source_id)
+    op = _register(user_id, project_id, request.idempotency_key, "import", payload, request.source_id,
+                   legacy_buffers=legacy_buffers)
     if op["status"] == "completed":
         return _operation(op)
     if op["status"] == "failed" and not op["error"]["retryable"] and not (
@@ -660,9 +677,30 @@ async def import_source(user_id, project_id, request: ImportSource, *, legacy_bu
                 if current["status"] == "completed":
                     return _operation(current)
                 _fence_snapshot(session, user_id, project_id, lease)
+                cleanup = current["request"].get("legacy_buffers")
+                legacy_group = session.scalar(select(sources.c.legacy).where(
+                    _scope(sources, user_id, project_id), sources.c.source_id == request.source_id))
+                if cleanup is None and legacy_group and request.source_id.startswith("legacy:") \
+                        and request.idempotency_key.startswith("v1-flush:"):
+                    # Adopt pending pre-extension v1 receipts using their synthetic
+                    # blobUUID:index identity, and only rows owned by this user/project.
+                    from ..models.database import BufferZone
+                    raw_ids = []
+                    for message in request.messages:
+                        try:
+                            raw_ids.append(UUID(message.message_id.split(":", 1)[0]))
+                        except ValueError:
+                            continue
+                    old = session.query(BufferZone).filter(BufferZone.user_id == user_id,
+                        BufferZone.project_id == project_id, BufferZone.blob_type == "chat",
+                        BufferZone.blob_id.in_(raw_ids)).all()
+                    if old:
+                        cleanup = {"buffer_ids": [str(row.id) for row in old],
+                                   "blob_ids": sorted({str(row.blob_id) for row in old})}
+                stored_payload = {**payload, **({"legacy_buffers": cleanup} if cleanup else {})}
                 session.execute(update(operations).where(operations.c.id == op["id"])
                                 .values(generation=lease.generation, status="processing", error=None,
-                                    request=payload, input_expires_at=current["input_expires_at"]
+                                    request=stored_payload, input_expires_at=current["input_expires_at"]
                                         if current["input_expires_at"] and current["input_expires_at"] > datetime.now(timezone.utc)
                                         else datetime.now(timezone.utc) + timedelta(seconds=CONFIG.source_input_retention_seconds)))
                 known = _accept_messages(session, user_id, project_id, request)
@@ -715,11 +753,11 @@ async def import_source(user_id, project_id, request: ImportSource, *, legacy_bu
                                         request={"source_id": request.source_id, "idempotency_key": request.idempotency_key},
                                         input_expires_at=None))
                     _record_revision(session, user_id, project_id, op, request.source_id, before)
-                    if legacy_buffers:
+                    if cleanup:
                         from ..models.database import BufferZone, GeneralBlob
-                        session.execute(update(BufferZone).where(BufferZone.id.in_(legacy_buffers[0]),
+                        session.execute(update(BufferZone).where(BufferZone.id.in_(cleanup["buffer_ids"]),
                                         BufferZone.user_id == user_id, BufferZone.project_id == project_id).values(status="done"))
-                        session.execute(delete(GeneralBlob).where(GeneralBlob.id.in_(legacy_buffers[1]),
+                        session.execute(delete(GeneralBlob).where(GeneralBlob.id.in_(cleanup["blob_ids"]),
                                         GeneralBlob.user_id == user_id, GeneralBlob.project_id == project_id,
                                         GeneralBlob.blob_type == "chat"))
                 return get_operation(user_id, project_id, operation_id=op["id"])
@@ -749,7 +787,8 @@ async def retry_operation(user_id, project_id, operation_id):
         if not op["input_expires_at"] or op["input_expires_at"] <= datetime.now(timezone.utc):
             purge_expired_inputs()
             raise SourceError("input_required", "Temporary input expired; query the receipt before resupplying the same batch and key", 409)
-        return await import_source(user_id, project_id, ImportSource.model_validate(op["request"]), resume_budget=budget_failure)
+        body = {key: value for key, value in op["request"].items() if key != "legacy_buffers"}
+        return await import_source(user_id, project_id, ImportSource.model_validate(body), resume_budget=budget_failure)
     return await delete_messages(user_id, project_id, op["source_id"], DeleteMessages.model_validate({
         k: op["request"][k] for k in ("idempotency_key", "message_ids")
     }), resume_budget=budget_failure)
@@ -840,7 +879,6 @@ async def delete_messages(user_id, project_id, source_id, request: DeleteMessage
                 affected = set(current["request"].get("affected_blobs", [])) | {
                     str(b["id"]) for b in batch_rows if set(b["message_ids"]).intersection(request.message_ids)}
                 batch_rows = [b for b in batch_rows if str(b["id"]) in affected]
-                removed_fact_ids = set()
                 for fact in [f for f in old_facts if f["source_id"] == source_id]:
                     groups = retained_groups(fact["support_groups"], withdrawn)
                     if groups:
@@ -848,15 +886,16 @@ async def delete_messages(user_id, project_id, source_id, request: DeleteMessage
                             support_groups=groups, occurred_at=evidence_time(groups, message_rows),
                             event_time=supported_event_time(fact.get("event_time"), groups)))
                     else:
-                        removed_fact_ids.add(str(fact["id"]))
                         session.execute(delete(facts).where(facts.c.id == fact["id"]))
                 session.execute(update(blobs).where(blobs.c.id.in_([b["id"] for b in batch_rows])).values(status="rebuilding"))
-                # A failed rebuild must not leak the old derived text from any v1/context read.
+                # Even surviving facts have changed support/time. Hide the whole
+                # closed scope before await; failure/cancellation must not expose
+                # a stale winner, or let history return the old derived conclusion.
                 for p in session.query(UserProfile).filter(UserProfile.user_id == user_id, UserProfile.project_id == project_id,
                     UserProfile.attributes.contains({"memoia_v2": True})).all():
-                    if removed_fact_ids.intersection(p.attributes.get("fact_ids", [])):
+                    if _topic(p.attributes.get("topic", "")) in scope.topics:
                         session.delete(p)
-                _scrub_history(session, user_id, project_id, removed_fact_ids)
+                _scrub_history(session, user_id, project_id, {str(f["id"]) for f in changed_facts}, scope.topics)
                 session.execute(delete(UserEvent).where(UserEvent.id.in_([b["event_id"] for b in batch_rows if b["event_id"]]),
                                                         UserEvent.user_id == user_id, UserEvent.project_id == project_id))
                 session.execute(update(operations).where(operations.c.id == op["id"])

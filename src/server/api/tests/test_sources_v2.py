@@ -197,7 +197,9 @@ async def test_failed_rebuild_is_hidden_and_recoverable(source_user, models, mon
     with pytest.raises(source.SourceError):
         await source.delete_messages(source_user, "__root__", inserted.source_id, DeleteMessages(idempotency_key="remove1", message_ids=["1"]))
     assert not (await event.get_user_events(source_user, "__root__")).data().events
-    assert [p.content for p in (await profile.get_user_profiles(source_user, "__root__")).data().profiles] == ["I enjoy chess"]
+    # Both fixture facts belong to the same closed reconciliation topic. Its
+    # old derived profiles stay hidden until recovery, not just the deleted fact.
+    assert not (await profile.get_user_profiles(source_user, "__root__")).data().profiles
     assert all("Tokyo" not in p.content for h in source.get_history(source_user, "__root__") for p in h.profiles)
     receipt = source.get_operation(source_user, "__root__", key="remove1")
     monkeypatch.setattr(source, "reconcile_facts", original)

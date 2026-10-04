@@ -128,6 +128,21 @@ def upgrade():
     op.execute("ALTER TABLE memory_operations ADD FOREIGN KEY(blob_id,user_id,project_id,source_id) REFERENCES memory_blobs(id,user_id,project_id,source_id) ON DELETE CASCADE")
     op.execute("ALTER TABLE memory_profile_revisions ADD FOREIGN KEY(operation_id,user_id,project_id,source_id) REFERENCES memory_operations(id,user_id,project_id,source_id) ON DELETE CASCADE")
     op.execute("CREATE INDEX idx_memory_blobs_group ON memory_blobs(user_id,project_id,source_id,created_at,id)")
+    # Old imports could return a second completed receipt for the same accepted
+    # batch. Preserve every identity/result as an immutable alias, not a second
+    # executor. Incomplete duplicates still fail instead of guessing their outcome.
+    op.execute("ALTER TABLE memory_operations DROP CONSTRAINT memory_operations_kind_check")
+    op.execute("ALTER TABLE memory_operations ADD CONSTRAINT memory_operations_kind_check CHECK (kind IN ('import','retract','legacy_import'))")
+    op.execute("""WITH ranked AS (
+        SELECT id, row_number() OVER(PARTITION BY blob_id ORDER BY created_at,id) AS ordinal
+        FROM memory_operations WHERE kind='import' AND blob_id IS NOT NULL)
+        UPDATE memory_operations m SET kind='legacy_import' FROM ranked r
+        WHERE m.id=r.id AND r.ordinal>1 AND m.status='completed'
+            AND NOT EXISTS (SELECT 1 FROM memory_operations other
+                WHERE other.kind='import' AND other.blob_id=m.blob_id AND other.status!='completed')""")
+    op.execute("""ALTER TABLE memory_operations ADD CONSTRAINT memory_operations_legacy_receipt_check
+        CHECK (kind!='legacy_import' OR (status='completed' AND blob_id IS NOT NULL
+            AND result IS NOT NULL AND error IS NULL AND NOT (request ? 'messages')))""")
     op.execute("CREATE UNIQUE INDEX uq_memory_import_blob ON memory_operations(blob_id) WHERE kind='import'")
     # JSON groups are the single evidence representation. A database constraint
     # trigger validates every member against the same owner/source/message ledger,
