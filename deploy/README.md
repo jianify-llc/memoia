@@ -33,6 +33,8 @@ quick 每次固定运行 `scripts/verify_local.py` 的离线名单，包含来�
 
 本地使用排除业务 `.env`、真实 `config.yaml` 的临时源码；云端 `--checkout` 要求干净 checkout，直接验证候选，不再复制源码。Git 历史提前获取，checkout 不保留凭据；业务子进程使用环境白名单，不继承平台/部署密钥。部署夹具与虚构业务连接配置分层，数据库只用本批独占 PostgreSQL/Redis 随机回环端口。JUnit/覆盖率写入忽略的 `.local-ci-results/<批次>/`，不是检查缓存。部署夹具使用官方 SHA-256 校验的 jq 1.8.1，容器无网络；依赖下载仅保留无认证代理。总预算 20 分钟；只清理本批资源，失败/超时/取消/清理异常均不得报告通过。
 
+环境白名单保留 pnpm 的工具目录 `PNPM_HOME`，使实际安装与 `setup-node` 查询的 package store 路径一致；这不传递 registry、平台或业务凭据。
+
 Test 长检查先于 Git 连接，hook 按目标 ref 验证本次提交和远端基线；源码／基线改变即重新检查。直接 Test push、force push、删除 Test、脏树或手工复用内部证明均不允许。安装入口遇到已有 hook 管理器停止，不覆盖。仓库文件存在不代表 hook 已安装，也不代表默认分支的手动 workflow 已注册；这些须在合入后核对，不以创建一个 Actions run 验证普通触发规则。
 
 手动 Test 流程在 Verify／镜像构建前核对选择的是当前 test 提交，后续 stale-deployment 检查继续保留。`MEMOIA_TEST_DEPLOY_ENABLED` 仍决定是否执行真实部署；手动启动并不绕过这个门禁、GHCR 匿名拉取或正常恢复要求。
