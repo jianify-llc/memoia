@@ -96,17 +96,40 @@ class PublicationContract(unittest.TestCase):
         self.assertEqual(test["jobs"]["verify"]["uses"], "./.github/workflows/verify.yml")
         self.assertEqual(online["jobs"]["verify"]["uses"], "./.github/workflows/verify.yml")
         self.assertEqual(online["jobs"]["verify"]["needs"], "validate-tag")
-        self.assertEqual(online["jobs"]["build-online"]["needs"], "verify")
+        self.assertEqual(online["jobs"]["build-platforms"]["needs"], "verify")
+        self.assertEqual(online["jobs"]["build-online"]["needs"], "build-platforms")
         self.assertEqual(online["jobs"]["deploy-online"]["needs"], "build-online")
         self.assertIn("refs/heads/release", online["jobs"]["validate-tag"]["steps"][-1]["run"])
-        build_step = next(step for step in online["jobs"]["build-online"]["steps"] if step.get("name", "").startswith("Build the Online image"))
+        build_step = next(step for step in online["jobs"]["build-platforms"]["steps"] if step.get("name", "").startswith("Build this architecture"))
         self.assertTrue(build_step["with"]["push"])
-        self.assertEqual(build_step["with"]["tags"], "ghcr.io/${{ github.repository }}:${{ github.ref_name }}")
+        self.assertIn("push-by-digest=true", build_step["with"]["outputs"])
         self.assertIn("@${MANIFEST_DIGEST}", online["jobs"]["deploy-online"]["steps"][1]["run"])
         self.assertEqual(online["jobs"]["deploy-online"]["environment"]["name"], "online")
         for name, job in online["jobs"].items():
             if name != "deploy-online":
                 self.assertNotIn("environment", job)
+
+    def test_platform_and_clean_checkout_contracts(self):
+        test = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+        online = yaml.safe_load(ONLINE_WORKFLOW.read_text())["jobs"]
+        platforms = online["build-platforms"]["strategy"]["matrix"]["include"]
+        self.assertEqual(platforms, [{"arch": "amd64", "runner": "ubuntu-24.04"}, {"arch": "arm64", "runner": "ubuntu-24.04-arm"}])
+        build = next(step for step in test["publish-test"]["steps"] if "docker/build-push-action" in step.get("uses", ""))
+        self.assertEqual(build["with"]["platforms"], "linux/amd64")
+        source = WORKFLOW.read_text()
+        self.assertNotIn("setup-qemu", source + ONLINE_WORKFLOW.read_text())
+        self.assertIn('platforms:["linux/amd64"]', source)
+        self.assertIn("for arch in amd64; do", source)
+        for workflow in (WORKFLOW, ONLINE_WORKFLOW, VERIFY_WORKFLOW):
+            for job in yaml.safe_load(workflow.read_text())["jobs"].values():
+                for step in job.get("steps", []):
+                    if "uses" in step and not step["uses"].startswith("./"):
+                        self.assertRegex(step["uses"], r"@[0-9a-f]{40}$")
+                    if "actions/checkout" in step.get("uses", ""):
+                        self.assertFalse(step["with"]["persist-credentials"])
+        verify = yaml.safe_load(VERIFY_WORKFLOW.read_text())["jobs"]["verify"]
+        self.assertNotIn("environment", verify)
+        self.assertNotIn("secrets.", VERIFY_WORKFLOW.read_text())
 
     def test_deployment_gate_uses_repository_variable_before_environment_start(self):
         job = yaml.safe_load(WORKFLOW.read_text())["jobs"]["deploy-test"]
@@ -129,6 +152,72 @@ class PublicationContract(unittest.TestCase):
         step = next(step for step in job["steps"] if step.get("name") == "Record successful test deployment")
         self.assertIn("Basic acceptance: API health, auth and user CRUD passed", step["run"])
         self.assertIn("not full memory acceptance", step["run"])
+
+
+class NativeManifestContract(unittest.TestCase):
+    def test_assembly_executes_validated_identity_and_fails_closed(self):
+        workflow = yaml.safe_load(ONLINE_WORKFLOW.read_text())["jobs"]
+        script = next(step["run"] for step in workflow["build-online"]["steps"] if step.get("id") == "identity")
+        cases = ("new", "existing", "attested", "registry_error", "wrong_sha", "wrong_manifest", "missing_arch", "schema_missing", "schema_conflict")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                platforms = root / "platforms"
+                platforms.mkdir()
+                for arch, digit in (("amd64", "a"), ("arm64", "b")):
+                    data = dict(arch=arch, digest="sha256:" + digit * 64, source_commit=SHA, schema="e" * 64)
+                    if case == "wrong_sha" and arch == "arm64":
+                        data["source_commit"] = "f" * 40
+                    if case == "schema_conflict" and arch == "arm64":
+                        data["schema"] = "f" * 64
+                    if case == "schema_missing":
+                        data.pop("schema")
+                    (platforms / (arch + ".json")).write_text(json.dumps(data))
+                docker = root / "docker"
+                docker.write_text("#!" + sys.executable + "\n" + r'''
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ["RUNNER_TEMP"])
+case = os.environ["CASE"]
+args = sys.argv[1:]
+image = "ghcr.io/fixture/memoia"
+version = image + ":v1.2.3"
+def manifests(digits):
+    return {"manifests": [{"platform": {"os": "linux", "architecture": arch}, "digest": "sha256:" + digit * 64} for arch, digit in digits]}
+if args[:3] == ["buildx", "imagetools", "create"]:
+    assert args[3:] == ["--tag", version, image + "@sha256:" + "a"*64, image + "@sha256:" + "b"*64]
+    (root / "created").touch()
+elif "--format" in args:
+    print(json.dumps({"digest": "sha256:" + "c"*64}))
+elif "--raw" in args:
+    if args[3] == image + "@sha256:" + "c"*64:
+        digits = [("amd64", "d" if case == "attested" else "a"), ("arm64", "b")]
+        if case == "wrong_manifest": digits[0] = ("amd64", "f")
+        if case == "missing_arch": digits.pop()
+        print(json.dumps(manifests(digits)))
+    elif args[3] == image + "@sha256:" + "a"*64 and case == "attested":
+        print(json.dumps(manifests([("amd64", "d")])))
+    else:
+        sys.exit(1)
+elif args == ["buildx", "imagetools", "inspect", version]:
+    if case == "registry_error":
+        sys.stderr.write("ERROR: registry connection timed out\n")
+        sys.exit(1)
+    if case not in ("existing",) and not (root / "created").exists():
+        sys.stderr.write("ERROR: " + version + ": not found\n")
+        sys.exit(1)
+else:
+    sys.exit("Unexpected Docker invocation")
+''')
+                docker.chmod(0o755)
+                env = dict(PATH=str(root) + os.pathsep + os.environ["PATH"], RUNNER_TEMP=str(root),
+                           REGISTRY="ghcr.io", IMAGE_NAME="fixture/memoia", GITHUB_REF_NAME="v1.2.3",
+                           GITHUB_SHA=SHA, GITHUB_OUTPUT=str(root / "output"), GITHUB_STEP_SUMMARY=str(root / "summary"), CASE=case)
+                result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode == 0, case in ("new", "existing", "attested"), result.stderr)
+                if case == "existing" or case in ("registry_error", "wrong_sha", "schema_missing", "schema_conflict"):
+                    self.assertFalse((root / "created").exists())
+                if result.returncode == 0:
+                    self.assertIn("digest=sha256:" + "c"*64, (root / "output").read_text())
 
 
 class DirectSSHWorkflow(unittest.TestCase):

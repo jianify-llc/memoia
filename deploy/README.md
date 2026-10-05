@@ -10,14 +10,26 @@ Agent 操作远端服务器前，必须阅读相邻仓库 `../Jianify-LLC/ops/se
 
 ```bash
 python3 scripts/test_push.py install
-python3 scripts/verify_local.py
+python3 scripts/verify_local.py --mode quick --base <远端Test基线SHA>
+python3 scripts/verify_local.py --mode full
 # 提交自己的改动后，在准确提交的干净 worktree 中同步 Test：
 python3 scripts/test_push.py push
 # 仅在负责人明确要求 Test 验收后运行，不是日常 push 的后续步骤：
 gh workflow run deploy-test.yml --ref test --repo jianify-llc/memoia
 ```
 
-本地与远端 Verify 使用同一个 `scripts/verify_local.py`：要求 Python 3、uv（提供 Python 3.12）、Node.js、pnpm 10.12.4、ShellCheck、curl 和本机 Docker。冻结安装在临时源码目录完成，源码快照不复制业务 `.env` 或真实 `config.yaml`；仅使用虚构模型设置及本批独占 PostgreSQL／Redis 随机回环端口。所有原有部署夹具、API/schema/OpenAPI、SDK 生成与测试保留，禁止共享数据库、真实模型或远端平台调用。JUnit／覆盖率写入忽略的 `.local-ci-results/<批次>/`，不作为检查缓存。部署夹具使用经官方 SHA-256 校验的 jq 1.8.1 静态二进制，容器无网络；依赖下载仅继承不带认证的本机代理配置。总检查上限 20 分钟，退出时只清理本批容器及其匿名卷；缺依赖、失败、超时或取消都阻止推送。
+本地与云端共用 `scripts/verify_local.py`；默认 `full`。各模式职责：
+
+| 模式 | 业务验证 | 工具验证 |
+| --- | --- | --- |
+| quick | 明确列出的纯计算/mock Python、OpenAPI、SDK 生成与 Node 测试；测试进程禁止真实网络、数据库和模型连接 | 按可靠 base 选择 hook、部署、legacy 和 schema；schema 改动才增加隔离数据库检查 |
+| full | 全部 API、迁移、schema、OpenAPI、Node/Workers SDK | 全部工具和部署夹具 |
+| publish | 固定的完整业务验证；只用于明确发布批次 | 不推断历史基线，不运行工具回归 |
+| pr | 完整业务验证 | 按 PR/merge queue 的 base 选择；基线缺失/不可读取时扩大检查 |
+
+`push` 入口取得远端 Test 精确 SHA 后调用 quick；普通业务 diff 不要求 Docker。无可靠 base 的 quick 会扩大检查，不能当成纯离线检查。依赖为 Python 3、uv/Python 3.12、Node、pnpm 10.12.4；工具/集成模式按需要求 ShellCheck、curl、Docker。依赖下载和公开词表准备不属于离线测试。
+
+本地使用排除业务 `.env`、真实 `config.yaml` 的临时源码；云端 `--checkout` 要求干净 checkout，直接验证候选，不再复制源码。Git 历史提前获取，checkout 不保留凭据；业务子进程使用环境白名单，不继承平台/部署密钥。部署夹具与虚构业务连接配置分层，数据库只用本批独占 PostgreSQL/Redis 随机回环端口。JUnit/覆盖率写入忽略的 `.local-ci-results/<批次>/`，不是检查缓存。部署夹具使用官方 SHA-256 校验的 jq 1.8.1，容器无网络；依赖下载仅保留无认证代理。总预算 20 分钟；只清理本批资源，失败/超时/取消/清理异常均不得报告通过。
 
 Test 长检查先于 Git 连接，hook 按目标 ref 验证本次提交和远端基线；源码／基线改变即重新检查。直接 Test push、force push、删除 Test、脏树或手工复用内部证明均不允许。安装入口遇到已有 hook 管理器停止，不覆盖。仓库文件存在不代表 hook 已安装，也不代表默认分支的手动 workflow 已注册；这些须在合入后核对，不以创建一个 Actions run 验证普通触发规则。
 
@@ -25,17 +37,15 @@ Test 长检查先于 Git 连接，hook 按目标 ref 验证本次提交和远端
 
 ### 既有工作流的切换顺序
 
-2026-10-04，为避免新规则合入前继续被普通 push 自动发布，既有 Test 工作流已临时停用；Verify 和 Online 未停用。恢复 Test 入口前须：
-
-1. 按仓库授权提交并合入这些 workflow、脚本和 hook；在默认分支注册带 `workflow_dispatch` 的 Test 工作流，在 Test 分支保留同一部署契约。
+1. 按仓库授权合入 workflow、脚本和 hook；默认分支须包含 `workflow_dispatch` Test 入口，Test 分支保留匹配部署契约。入口注册不要求把未验收应用代码提前合入 main。
 2. 只读检查实际工作流源码：Test 无 `push` 触发，Verify 不含普通开发／Test PR 和归档后的重复 push 触发；检查 hook 安装及项目依赖。
 3. 确认新源码后执行 `gh workflow enable deploy-test.yml --repo jianify-llc/memoia`。禁止恢复旧 `on: push` 版本。启用本身不创建 run；只有获授权的验收批次才执行上面的手动命令。
 
-本地文件改完不等于远端默认分支已切换；在合入完成前，远端旧 Verify 触发语义仍可能存在。本批不以实际部署验证静态触发规则。
+本地通过、默认分支入口注册、Test 真实发布分别验收；仅注册入口不能证明候选脚本、迁移或业务已上线。
 
 ## GitHub Organization 与镜像归属
 
-源码仓库为 `jianify-llc/memoia`，当前 Test 已验收镜像仍在 `ghcr.io/jianify/memoia`。工作流使用 `github.repository`，迁移后的新候选将发布到 `ghcr.io/jianify-llc/memoia`；上线该候选前须确认 package 关联 `jianify-llc/memoia`、该仓库的 Actions 有写权限、package 可匿名拉取，并通过 AMD64/ARM64 产物身份与服务器验收。仓库可见性不等于 package 可见性。
+源码仓库为 `jianify-llc/memoia`，历史 Test 镜像仍在 `ghcr.io/jianify/memoia`。工作流使用 `github.repository` 发布新候选到 `ghcr.io/jianify-llc/memoia`；须确认 package 关联仓库、Actions 写权限及匿名拉取。Test 验证 AMD64；Online 验证 AMD64/ARM64。仓库可见性不等于 package 可见性。
 
 部署与 schema 指纹脚本仅接受上述两个 namespace 的完整 digest；恢复仍须匹配已验收记录及源码身份。不要把旧 digest 的 owner 字符串改成新 owner；不要删除旧 package，直到历史 digest、新镜像发布、服务器拉取及恢复链路均已确认。以下旧 namespace 示例代表现有镜像，实际部署地址以验收记录为准。
 
@@ -136,7 +146,9 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 
 ## GitHub Actions
 
-`verify.yml` 提供共用 CI，也验证归档到 `main` 的 PR 和 merge queue，不构建 Docker 镜像；`deploy-test.yml` 仅在明确手动选择当前 `test` 的验收批次执行验证、双架构发布、匿名拉取及受门禁控制的部署；`release` push 不触发 workflow。只有指向当前 `release` HEAD 的稳定 `v*` 标签才触发 `deploy-online.yml`：先验 Tag 来源，再验证、构建一次双架构版本镜像、核对源码标签和 digest，等待 `online` Environment 审批后只部署同一 digest。不同 SHA 不宣称 Test 与 Online 是同一镜像；既有版本标签若已存在，重跑仅验证并复用，不重新构建。GHCR 需 Public；服务器没有 GitHub 写权限凭据。Online 的 Secrets、主机和恢复路径尚未配置/验收，因此本轮不得批准 Online 部署。
+`verify.yml` 验证 main PR/merge queue，并供发布调用，不构建 Memoia Docker 镜像。手动 `deploy-test.yml` 核对当前 test → publish 验证 → AMD64 发布/匿名拉取 → 受门禁控制的部署；无 QEMU。历史多架构镜像可复用，但 AMD64、源码和 schema 必须通过验证。`release` push 不运行 Actions。
+
+只有当前 release HEAD 的稳定 `v*` tag 才进入 Online：publish 验证 → AMD64/ARM64 原生 runner 各构建一次 → 校验架构、源码、真实 schema 指纹 → 汇总并核对同一 manifest digest → online 审批 → 部署该 digest；审批后不重建。已存在版本只校验/复用；注册表错误不能当作不存在。平台回执限定当前 run，失败重跑仅替换该架构回执，汇总仍检查 SHA/digest/schema。不同 SHA 不假设 Test/Online 镜像相同。GHCR 必须 Public，服务器不持有 GitHub 写权限。Online 主机/凭据/恢复和真实模型验收仍独立，不因 CI 通过而自动视为完成。
 
 首次安装/业务验收前，仓库级 `MEMOIA_TEST_DEPLOY_ENABLED` 保持关闭；当前测试环境已完成初装，该门闩按实际状态启用。test Environment 限 test 分支，online Environment 限 `v*` 标签并配置 Required Reviewer。GitHub Actions 直接连接服务器公网 SSH，不再经过 Cloudflare Tunnel 或依赖 Access Service Token；业务 HTTPS API 继续使用宿主机 Tunnel。
 

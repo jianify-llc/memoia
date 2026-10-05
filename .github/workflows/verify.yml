@@ -2,6 +2,11 @@ name: Memoia · Verify
 
 on:
   workflow_call:
+    inputs:
+      mode:
+        type: string
+        default: publish
+  workflow_dispatch:
   pull_request:
     branches: [main]
   merge_group:
@@ -15,10 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@v6
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
       - name: Set up Python
         run: uv python install 3.12
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -29,9 +35,12 @@ jobs:
           node-version: 24
           cache: pnpm
           cache-dependency-path: sdks/typescript/pnpm-lock.yaml
-      - name: Run the same isolated checks as local Test pushes
-        run: python3 scripts/verify_local.py
-      - uses: actions/upload-artifact@v4
+      - name: Verify the exact clean candidate
+        env:
+          VERIFY_MODE: ${{ github.event_name == 'pull_request' && 'pr' || github.event_name == 'merge_group' && 'pr' || inputs.mode || 'full' }}
+          VERIFY_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || '' }}
+        run: python3 scripts/verify_local.py --mode "$VERIFY_MODE" --base "$VERIFY_BASE" --checkout
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ always() }}
         with:
           name: pytest-results-3.12
