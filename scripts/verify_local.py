@@ -66,7 +66,8 @@ def selections(mode, base=None):
             groups["deploy"] = True
         if name.startswith("deploy/cutover/"):
             groups["legacy"] = True
-        if name in ("deploy/schema-maintenance.py", "deploy/schema-fingerprint.sh"):
+        if name in ("deploy/schema-maintenance.py", "deploy/schema-fingerprint.sh",
+                    "deploy/recovery.py", "deploy/tests/test_recovery.py"):
             groups["schema"] = True
         if name.startswith(("src/server/api/migrations/", "src/server/api/memoia_server/models/",
                             "src/server/api/memoia_server/schema.py", "src/server/api/memoia_server/connectors.py")) or name.endswith(("alembic.ini", "test_schema_adoption.py", "test_db.py")):

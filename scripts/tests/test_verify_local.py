@@ -91,6 +91,12 @@ class LocalVerificationContract(unittest.TestCase):
             scope = module.selections("full", "a" * 40)
             self.assertTrue(scope["schema"])
             self.assertFalse(scope["business"])
+        for path in ("deploy/recovery.py", "deploy/tests/test_recovery.py"):
+            with patch.object(module, "run", side_effect=diff(path)):
+                scope = module.selections("full", "a" * 40)
+                self.assertTrue(scope["schema"])
+                self.assertTrue(scope["deploy"])
+                self.assertFalse(scope["business"])
         with patch.object(module, "run", side_effect=subprocess.CalledProcessError(1, "git")):
             self.assertTrue(all(module.selections("full", "a" * 40).values()))
         with patch.object(module, "run", return_value=" M dirty-business.py"):
