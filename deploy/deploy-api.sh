@@ -106,6 +106,7 @@ active=$("${compose[@]}" exec -T postgres sh -c \
 [[ "$active" == 0 ]] || { echo 'Processing or failed buffers block deployment' >&2; exit 1; }
 project_id=$("${compose[@]}" config --format json | jq -r '.services.memoia.environment.PROJECT_ID')
 for prefix in memobase:user_lock memobase:user_buffer_queue; do
+  # shellcheck disable=SC2016 # Redis 环境变量须由容器内的 sh 展开，主机只注入 prefix。
   count=$("${compose[@]}" exec -T -e PROJECT_ID="$project_id" redis sh -c \
     'REDISCLI_AUTH="$REDIS_PASSWORD" redis-cli --scan --pattern "'$prefix':${PROJECT_ID}:*" | wc -l' \
     | tr -d '[:space:]')
@@ -140,7 +141,7 @@ MEMOIA_IMAGE="$image" "${compose[@]}" pull memoia
 "${compose[@]}" stop --timeout 90 memoia
 MEMOIA_IMAGE="$image" "${compose[@]}" up -d --no-deps --no-build memoia
 container=$("${compose[@]}" ps -q memoia)
-for attempt in $(seq 1 36); do
+for _attempt in $(seq 1 36); do
   status=$(docker inspect --format '{{.State.Health.Status}}' "$container")
   [[ "$status" == healthy ]] && exit 0
   [[ "$status" == unhealthy ]] && break

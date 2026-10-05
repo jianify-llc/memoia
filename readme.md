@@ -10,6 +10,7 @@ The internal server package is `memoia_server`. Existing Memobase SDK packages,
 HTTP `/api/v1` routes, bearer authentication, response envelopes, stored data, and
 deployment identities remain compatible. This repository does not publish renamed SDKs.
 
+- [CI 与本地验证](./docs/guide/ci-local.md)
 - [Run or develop the Memoia server](./src/server/readme.md)
 - [Release, drain, upgrade, and rollback](./docs/guide/memoia-release.md)
 - [Report a Memoia issue](https://github.com/jianify/memoia/issues)

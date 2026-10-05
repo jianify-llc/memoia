@@ -322,3 +322,5 @@ dist
 # act
 .actrc
 event.json
+# 本地隔离验证报告
+.local-ci-results/

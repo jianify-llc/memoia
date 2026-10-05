@@ -8,27 +8,11 @@ public Actions artifacts.
 
 ## Release gates
 
-1. A PR or ordinary branch push tests and builds AMD64 only, without publishing.
-2. A `test` push tests, builds the AMD64/ARM64 candidate once per SHA, checks
-   that it can be pulled anonymously. Only when the repository variable
-   `MEMOIA_TEST_DEPLOY_ENABLED=true` does it then deploy the API to the Japanese
-   test host. Keep this flag unset until image publication and first host
-   installation are separately accepted. A successful GitHub Deployment is created **after** the remote API
-   and read/write/delete smoke checks pass.
-3. A `release` branch update must point to a SHA with a successful test
-   Deployment. A `v*` tag must point to the current `release` HEAD; it adds a
-   version tag to the **same accepted manifest digest**, without rebuilding.
-4. There is intentionally no online deployment job or enabled online credential
-   path yet. Configuring the United States host and enabling production requires
-   a separate change and acceptance.
+当前 CI 与本地验证见[统一入口](../docs/guide/ci-local.md)。普通 push 不启动 Actions；Test 只手动 AMD64 构建，正式标签仍使用原生双架构与 online 审批。main PR/合并队列/手动 Verify 的 verify 仅执行真实候选镜像构建、身份及包导入。
 
-Use `ghcr.io/jianify/memoia@sha256:...`, never `latest`, in deployment records.
-The candidate artifact and successful test Deployment identify source SHA,
-manifest digest and config commit. A rerun reuses an existing `sha-$SHA` image;
-the workflow refuses to overwrite an existing version tag with a different
-digest. GHCR packages may initially be private even when this repository is
-public: set package visibility to Public after its first push, then rerun the
-candidate to prove an anonymous pull.
+**本分支仍是旧发布实现，不能作为当前平台发布操作手册。** 其 Dockerfile 未打包 migrations/alembic.ini；现有 workflow 引用的 deploy-memoia.sh、schema-fingerprint.sh、recovery.py、schema-maintenance.py 和 docker-compose.yml 在本分支不存在。工作流在镜像发布或任何 SSH/上传前显式拒绝缺实现的路径。本次仅切换 CI/hook，不补业务部署或新数据库实现；须待相应源码正常归档后才具备发布能力。
+
+下面旧独立 PostgreSQL/目录/Tunnel 安装步骤仅说明本分支原始实现，不代表现役 Test 服务器状态，也不能用于重新安装或恢复现役服务。镜像构建成功不等于允许执行这些步骤。
 
 ## First installation: operator procedure
 
