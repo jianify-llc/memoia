@@ -121,7 +121,10 @@ def test_v2_upgrade_adds_only_persistent_identity_tombstones(legacy_schema):
         assert connection.execute(text("SELECT count(*) FROM memory_user_tombstones WHERE user_id=:uid"), {"uid": uid}).scalar_one() == 0
 
 
-def test_group_upgrade_scrubs_completed_copies_preserves_pending_and_manual_metadata(legacy_schema):
+@pytest.mark.parametrize("target,support_message", [
+    ("0006_source_blob_messages", "m1"), ("head", "m1"), ("head", "missing"),
+])
+def test_group_upgrade_scrubs_completed_copies_preserves_pending_and_manual_metadata(legacy_schema, target, support_message):
     engine, url = legacy_schema
     install_legacy(engine)
     assert migrate(url, "0005_user_tombstones").returncode == 0
@@ -140,7 +143,8 @@ def test_group_upgrade_scrubs_completed_copies_preserves_pending_and_manual_meta
                  "blob": blob if status == "completed" else None, "status": status,
                  "result": json.dumps({"event_ids": [], "profile_ids": []}) if status == "completed" else None})
         connection.execute(text("""INSERT INTO memory_facts(id,user_id,project_id,source_id,content,topic,sub_topic,support_groups,occurred_at)
-            VALUES(:id,:uid,'upgrade',:blob,'Concise fact','work','city','[["m1"]]','2026-01-01')"""), {"id": uuid4(), "uid": uid, "blob": blob})
+            VALUES(:id,:uid,'upgrade',:blob,'Concise fact','work','city',CAST(:support AS jsonb),'2026-01-01')"""),
+            {"id": uuid4(), "uid": uid, "blob": blob, "support": json.dumps([[support_message]])})
         connection.execute(text("""INSERT INTO user_profiles(id,user_id,project_id,content,attributes)
             VALUES(:id,:uid,'upgrade','Manual profile',CAST(:attributes AS jsonb))"""),
             {"id": manual, "uid": uid, "attributes": json.dumps({"source_id": "manual-origin", "source_ids": ["manual-origin"]})})
@@ -150,11 +154,21 @@ def test_group_upgrade_scrubs_completed_copies_preserves_pending_and_manual_meta
                 VALUES(:id,:uid,'upgrade','chat',CAST(:body AS jsonb))"""), {"id": bid, "uid": uid, "body": json.dumps({"messages": [message]})})
             connection.execute(text("""INSERT INTO buffer_zones(id,user_id,project_id,blob_type,blob_id,token_size,status)
                 VALUES(:id,:uid,'upgrade','chat',:blob,10,:status)"""), {"id": uuid4(), "uid": uid, "blob": bid, "status": status})
-    # This fixture verifies the irreversible 0006 adoption boundary independently
-    # of later migrations being developed by other tasks.
-    upgraded = migrate(url, "0006_source_blob_messages")
+    # 分别验证单版接纳和带旧事实的连续升级，不能只用空库证明迁移链可执行。
+    upgraded = migrate(url, target)
+    if support_message == "missing":
+        assert upgraded.returncode != 0 and "support outside active source messages" in upgraded.stderr
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0005_user_tombstones"
+            assert connection.scalar(text("SELECT payload FROM memory_sources WHERE id=:id"), {"id": blob}) == body
+            assert connection.scalar(text("SELECT request FROM memory_operations WHERE id=:id"),
+                                     {"id": completed})["messages"] == [message]
+            assert connection.scalar(text("SELECT to_regclass(current_schema() || '.memory_blobs')")) is None
+        return
     assert upgraded.returncode == 0, upgraded.stderr
     with engine.connect() as connection:
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+            EXPECTED_REVISION if target == "head" else target)
         done = connection.execute(text("SELECT * FROM memory_operations WHERE id=:id"), {"id": completed}).mappings().one()
         assert "messages" not in done["request"] and done["input_expires_at"] is None
         unfinished = connection.execute(text("SELECT * FROM memory_operations WHERE id=:id"), {"id": pending}).mappings().one()
