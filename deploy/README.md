@@ -180,7 +180,9 @@ Actions 只上传脚本到 .deploy/candidates，不覆盖 Compose/.env/YAML。su
 
 `restore-api /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256` 只接受 previous-accepted 中的上一已验收版本，要求当前配置、schema 和持久化处理协议兼容；按同一服务停止/启动流程切换，随后公网验收并 finalize。恢复不会降低 run 高水位，也不恢复旧数据库快照。恢复不是失败后的自动动作。
 
-`backup /opt/memoia` 不依赖 standalone-mode，但仍要求当前已验收、无 pending/处理中或失败 buffer/锁队列，以及无 v2 processing 操作或 rebuilding 来源。这是配套备份的静止切点要求，不是日常发布门禁。正常停 API、复查静止切点后从公司 PostgreSQL 容器只导出 `memoia` 数据库，再同步 Redis SAVE 并确认 OK；API 停止期间业务写入不可用，不另查消费者身份。配套数据、配置、哈希、表行数、固定 PG 镜像身份与持久 Redis 探针保存在 .deploy/backups/唯一目录。公司实例备份不能代替这份 PG／Redis 配套恢复。仅切点成功才恢复同一 API；失败保留 pending-maintenance 与停写状态，人工核查，不自动重试。备份含秘密，必须保护并导出服务器外，不能放公开 artifact。
+`backup /opt/memoia` 不依赖 standalone-mode，但仍要求当前已验收、无 pending/处理中或失败 buffer/锁队列，以及无 v2 处理中操作或处理／重建中的批次。这是配套备份的静止切点要求，不是日常发布门禁。正常停 API、复查静止切点后从公司 PostgreSQL 容器只导出 `memoia` 数据库，再同步 Redis SAVE 并确认 OK；API 停止期间业务写入不可用，不另查消费者身份。配套数据、配置、哈希、表行数、固定 PG 镜像身份与持久 Redis 探针保存在 .deploy/backups/唯一目录。公司实例备份不能代替这份 PG／Redis 配套恢复。仅切点成功才恢复同一 API；失败保留 pending-maintenance 与停写状态，人工核查，不自动重试。备份含秘密，必须保护并导出服务器外，不能放公开 artifact。
+
+备份仍由操作员手动触发，不新增定时任务。备份与 schema 维护共用只读静止检查：明确识别 0006 前的 Source 状态模型和 0006 后的 Blob 状态模型，分别阻断处理中操作及处理／重建中的批次；字段缺失、两种模型混杂或未知结构直接失败，不清理任务或跳过检查。`test_schema_adoption.py` 在真实隔离 PostgreSQL 上覆盖迁移前后模型、处理／重建状态和结构漂移，不能替代真实配套备份与恢复演练。
 
 `restore-data /opt/memoia BACKUP_DIRECTORY /opt/memoia/rehearsals/restore-UNIQUE` 只接受完整校验通过的本地配套备份及从未存在的目标目录；空但已存在的目录也拒绝。使用备份记录的 PG 镜像临时启动独立 PostgreSQL，给予它隔离网络内的 `jianify-postgres` 别名，绝不接入正式 `jianify-data`；Redis 和 API 同样使用独立 project/network/config/data，显式 --project-name 防止 .env 的正式 project 名覆盖隔离身份。不挂 Tunnel，不映射任何主机端口，检查解析后的连接目标及实际挂载。DB 和 Redis 使用 internal 网络；只有隔离 API 可通过自己的独立 ingress 网络外连模型，启动时仍需真实模型／embedding 检查，不能完全断网却宣称应用恢复通过。先关闭 AOF 加载 RDB，验证持久探针及 PG 表行数；再启用 AOF、等重写完成、正常停止、按正式 AOF 配置重启后再次验证，最后启动隔离 API 并验证健康及实际连接／网络。全部完成才写 root:root 0600 的 restore-verified.json，绑定备份 manifest 哈希、API digest、表行数、project、挂载、连接身份及 AOF 重启证明，供 schema 维护读取。失败不写成功回执，保留隔离数据供排查；不覆盖、清空或恢复当前业务库。
 

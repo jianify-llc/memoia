@@ -68,10 +68,21 @@ def check_quiet(command, config, postgres_container):
         if run(redis_command(command, "--scan", "--pattern", f"{prefix}:{project}:*")):
             raise RuntimeError("Redis execution state blocks maintenance")
     base = postgres_command(postgres_container, "psql", "-U", "jianify_app", "-d", "memoia", "-Atc")
-    for table, predicate in (("memory_operations", "status='processing'"), ("memory_sources", "status='rebuilding'")):
-        if run(base + [f"SELECT to_regclass('public.{table}')"]):
-            if run(base + [f"SELECT count(*) FROM {table} WHERE {predicate}"]) != "0":
-                raise RuntimeError("Unfinished v2 operations block maintenance; resolve without clearing state")
+    # 0006 将批次状态从 Source 移到 Blob；维护入口迁移前后都要用，未知结构不能跳过。
+    layout = set(run(base + ["""SELECT table_name || '.' || column_name FROM information_schema.columns
+        WHERE table_schema=current_schema() AND table_name IN ('memory_sources','memory_blobs','memory_operations')
+        AND column_name IN ('source_id','status') ORDER BY 1"""]).splitlines())
+    operation_columns = {"memory_operations.source_id", "memory_operations.status"}
+    if layout == operation_columns | {"memory_sources.status"}:
+        batches = "memory_sources"
+    elif layout == operation_columns | {"memory_sources.source_id", "memory_blobs.source_id", "memory_blobs.status"}:
+        batches = "memory_blobs"
+    else:
+        raise RuntimeError("Unknown memory schema blocks maintenance; verify migrations without clearing state")
+    for table, predicate in (("memory_operations", "status='processing'"),
+                             (batches, "status IN ('processing','rebuilding')")):
+        if run(base + [f"SELECT count(*) FROM {table} WHERE {predicate}"]) != "0":
+            raise RuntimeError("Unfinished v2 operations block maintenance; resolve without clearing state")
 
 
 def wait_healthy(command, service):

@@ -12,6 +12,8 @@ from unittest.mock import patch
 SPEC = importlib.util.spec_from_file_location("memoia_recovery", Path(__file__).parents[1] / "recovery.py")
 recovery = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(recovery)
+LEGACY_LAYOUT = "memory_operations.source_id\nmemory_operations.status\nmemory_sources.status"
+BLOB_LAYOUT = "memory_blobs.source_id\nmemory_blobs.status\nmemory_operations.source_id\nmemory_operations.status\nmemory_sources.source_id"
 
 
 class BackupBoundary(unittest.TestCase):
@@ -52,11 +54,19 @@ class BackupBoundary(unittest.TestCase):
 
     def test_v2_unknown_operation_or_hidden_rebuild_blocks_backup(self):
         config = {"services": {"memoia": {"environment": {"PROJECT_ID": "fixture"}}}}
-        for results in (["0", "", "", "memory_operations", "1"],
-                        ["0", "", "", "memory_operations", "0", "memory_sources", "1"]):
-            with self.subTest(results=results), patch.object(recovery, "run", side_effect=results):
-                with self.assertRaisesRegex(RuntimeError, "Unfinished v2"):
+        for layout in (LEGACY_LAYOUT, BLOB_LAYOUT):
+            for counts in (["1"], ["0", "1"]):
+                with self.subTest(layout=layout, counts=counts), patch.object(recovery, "run", side_effect=["0", "", "", layout, *counts]):
+                    with self.assertRaisesRegex(RuntimeError, "Unfinished v2"):
+                        recovery.check_quiet(["docker", "compose"], config, "company-postgres")
+
+    def test_unknown_or_incomplete_memory_schema_is_not_silently_skipped(self):
+        config = {"services": {"memoia": {"environment": {"PROJECT_ID": "fixture"}}}}
+        for layout in ("", "memory_operations.status", BLOB_LAYOUT + "\nmemory_sources.status"):
+            with self.subTest(layout=layout), patch.object(recovery, "run", side_effect=["0", "", "", layout]) as command:
+                with self.assertRaisesRegex(RuntimeError, "Unknown memory schema"):
                     recovery.check_quiet(["docker", "compose"], config, "company-postgres")
+                self.assertEqual(command.call_count, 4)
 
     def test_paired_backup_dumps_only_memoia_database_and_redis_at_one_cutpoint(self):
         (self.root / "api").mkdir()
@@ -83,6 +93,8 @@ class BackupBoundary(unittest.TestCase):
             if args[0] == "bash":
                 return "current-fingerprint"
             if args[:3] == ["docker", "exec", "-i"]:
+                if "information_schema.columns" in args[-1]:
+                    return LEGACY_LAYOUT
                 if "pg_dump" in args:
                     output.write(b"pg-dump")
                     return None
