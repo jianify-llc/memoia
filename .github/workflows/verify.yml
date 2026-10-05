@@ -2,10 +2,12 @@ name: Memoia · Verify
 
 on:
   workflow_call:
-  push:
-    branches: [main]
+    inputs:
+      mode:
+        type: string
+        default: publish
   pull_request:
-    branches: [main, test, release]
+    branches: [main]
   merge_group:
 
 permissions:
@@ -21,6 +23,8 @@ jobs:
       REDIS_LOCATION: /tmp/memoia-main-${{ github.run_id }}-${{ github.run_attempt }}-redis
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v6
       - name: Install frozen dependencies and verify package
         working-directory: src/server/api

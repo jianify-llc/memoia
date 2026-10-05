@@ -445,6 +445,15 @@ Or just [email us](mailto:contact@memobase.io) ❤️
 
 
 
+## Workflow entry points
+
+Ordinary branch pushes do not start Test publication. Run `deploy-test.yml` manually
+with the current `test` branch selected; any other branch or stale commit is rejected
+before verification or publication. The default-branch definition registers this
+entry point, but the selected Test commit supplies the workflow and application code.
+Main archive PRs and merge queues retain the required `verify` check. This workflow-only
+update does not archive Test application code, change Online approval, or deploy a service.
+
 ## License
 
 This project remains licensed under Apache-2.0; see [LICENSE](./LICENSE).
