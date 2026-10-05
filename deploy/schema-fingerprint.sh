@@ -2,7 +2,7 @@
 set -euo pipefail
 
 image=${1:?manifest-addressed Memoia image}
-[[ "$image" =~ ^ghcr\.io/jianify/memoia@sha256:[0-9a-f]{64}$ ]] || exit 2
+[[ "$image" =~ ^ghcr\.io/jianify(-llc)?/memoia@sha256:[0-9a-f]{64}$ ]] || exit 2
 # 只读取镜像中的建表/ORM/迁移源码，不导入应用、不连接 DB，也不注入任何配置。
 docker run --rm --network none --entrypoint /app/.venv/bin/python "$image" -c '
 import hashlib

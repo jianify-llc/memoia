@@ -1,6 +1,6 @@
 # Memoia 配置与发布
 
-仓库维护模板/脚本，服务器不构建源码。test/online 使用相同路径，实际值由操作员填写。脚本可创建目录、设置配置权限、生成缺失模板；不生成密钥、不覆盖已有值。日常发布不得改写配置。本轮只验收 test；Online 工作流已准备，主机配置、凭据和恢复验收仍须另行完成。
+仓库维护模板/脚本，服务器不构建源码。test/online 使用相同路径，实际值由操作员填写。脚本可创建目录、设置配置权限、生成缺失模板；不生成密钥、不覆盖已有值。日常发布不得改写配置。此前 Test 验证见历史验证记录；本批 CI-only 切换未执行远端部署或业务验收。Online 工作流保留，主机配置、凭据和恢复验收仍须另行完成。
 
 Agent 操作远端服务器前，必须阅读相邻仓库 `../Jianify-LLC/ops/server/agent-operations.md` 的“Agent 可见运维”。共享终端及既有部署脚本的执行边界以该规范为准。
 
@@ -65,7 +65,9 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 
 ## GitHub Actions
 
-`verify.yml` 提供共用 CI，也直接验证 `main` push、PR 和 merge queue，不构建 Docker 镜像；`deploy-test.yml` 仅在 `test` push 后执行验证、双架构发布、匿名拉取和自动部署；`release` push 不触发 workflow。只有指向当前 `release` HEAD 的稳定 `v*` 标签才触发 `deploy-online.yml`：先验 Tag 来源，再验证、构建一次双架构版本镜像、核对源码标签和 digest，等待 `online` Environment 审批后只部署同一 digest。不同 SHA 不宣称 Test 与 Online 是同一镜像；既有版本标签若已存在，重跑仅验证并复用，不重新构建。GHCR 需 Public；服务器没有 GitHub 写权限凭据。Online 的 Secrets、主机和恢复路径尚未配置/验收，因此本轮不得批准 Online 部署。
+当前 CI 与本地验证见[统一入口](../docs/guide/ci-local.md)。`verify.yml` 只在 main PR、merge queue 和手动启动时构建实际 AMD64 候选、验证 revision 与包导入，不运行云端业务测试，也不发布镜像。普通开发、Test、release push 均不触发 workflow。Test 明确手动发布，原生 AMD64 构建/既有 digest 复用后继续原两阶段部署。Online 仍由当前 release HEAD 的稳定 v* 标签触发，原生 AMD64/ARM64 分别构建验证、同一不可变 manifest 等待 online 审批。GHCR 新候选使用 jianify-llc/memoia；现有 jianify/memoia 已验收 digest 保留恢复兼容。缓存按架构隔离，mode=min。
+
+本分支现有共享数据库发布、备份和恢复实现继续保留；未引入 Test 新业务或 0006/0007 迁移。真实模型、首次安装、非兼容 schema 变更及恢复验收仍须单独完成，不由镜像构建或基础 smoke 替代。Online 的实际凭据/主机/恢复验收未在本批执行，不批准或声称 Online 上线。
 
 首次安装/业务验收前，仓库级 `MEMOIA_TEST_DEPLOY_ENABLED` 保持关闭；当前测试环境已完成初装，该门闩按实际状态启用。test Environment 限 test 分支，online Environment 限 `v*` 标签并配置 Required Reviewer。GitHub Actions 直接连接服务器公网 SSH，不再经过 Cloudflare Tunnel 或依赖 Access Service Token；业务 HTTPS API 继续使用宿主机 Tunnel。
 

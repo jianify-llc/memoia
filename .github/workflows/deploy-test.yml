@@ -1,20 +1,15 @@
-# Memoia Test verification, image publication, and deployment.
+# Memoia Test image publication and deployment; business validation runs locally.
 name: Memoia · Test
 
 on:
-  push:
-    branches: [test]
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  verify:
-    uses: ./.github/workflows/verify.yml
-
   publish-test:
-    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 75
     concurrency:
@@ -26,11 +21,25 @@ jobs:
     outputs:
       digest: ${{ steps.identity.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Require the selected current Test branch
+        env:
+          SELECTED_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          [[ "$SELECTED_REF" == refs/heads/test ]] || { echo 'Select the Test branch explicitly' >&2; exit 1; }
+          [[ "$(git ls-remote origin refs/heads/test | cut -f1)" == "$GITHUB_SHA" ]] || { echo 'A newer Test commit exists' >&2; exit 1; }
+      - name: Require this branch's image verification implementation
+        run: |
+          set -euo pipefail
+          for file in deploy/deploy-memoia.sh deploy/infra-fingerprint.sh deploy/schema-fingerprint.sh deploy/recovery.py deploy/docker-compose.yml deploy/smoke-api.sh; do
+            test -f "$file" || { echo "This branch lacks deployment implementation: $file; archive the approved deployment source before deploying" >&2; exit 1; }
+          done
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Authenticate for publication only
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -38,26 +47,28 @@ jobs:
       - name: Find existing Test image
         id: existing
         run: |
+          set -euo pipefail
           tag="${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}"
-          if docker buildx imagetools inspect "$tag" >/dev/null 2>&1; then
+          if docker buildx imagetools inspect "$tag" >/dev/null 2> "$RUNNER_TEMP/registry-error"; then
             digest=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' | jq -r .digest)
             echo "digest=$digest" >> "$GITHUB_OUTPUT"
             echo 'exists=true' >> "$GITHUB_OUTPUT"
           else
+            grep -Fx "ERROR: $tag: not found" "$RUNNER_TEMP/registry-error" >/dev/null || { cat "$RUNNER_TEMP/registry-error" >&2; exit 1; }
             echo 'exists=false' >> "$GITHUB_OUTPUT"
           fi
-      - name: Build both architectures exactly once per source SHA
+      - name: Build Test AMD64 exactly once per source SHA
         if: ${{ steps.existing.outputs.exists != 'true' }}
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: ./src/server/api
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ghcr.io/${{ github.repository }}:sha-${{ github.sha }}
           build-args: VCS_REF=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha
+          cache-from: type=gha,scope=test-amd64
+          cache-to: type=gha,scope=test-amd64,mode=min
           provenance: mode=max
       - name: Verify manifest, source label, and anonymous pull
         id: identity
@@ -72,8 +83,9 @@ jobs:
           docker buildx imagetools inspect "$image" --raw > "$RUNNER_TEMP/manifest.json"
           cp "$RUNNER_TEMP/manifest.json" manifest.json
           anonymous_config=$(mktemp -d)
+          trap 'rm -rf -- "$anonymous_config"' EXIT
           schema=''
-          for arch in amd64 arm64; do
+          for arch in amd64; do
             # shellcheck disable=SC2016 # jq variables are resolved by jq, not Bash.
             platform_digest=$(jq -er --arg arch "$arch" '
               [.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest]
@@ -83,6 +95,7 @@ jobs:
             ' "$RUNNER_TEMP/manifest.json")
             platform_image="${REGISTRY}/${IMAGE_NAME}@${platform_digest}"
             DOCKER_CONFIG="$anonymous_config" docker pull --platform "linux/$arch" "$platform_image"
+            docker image inspect "$platform_image" --format '{{.Os}}/{{.Architecture}}' | grep -Fx "linux/$arch"
             # shellcheck disable=SC2016 # Docker template is intentionally literal.
             docker image inspect "$platform_image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' | grep -Fx "$GITHUB_SHA"
             docker run --rm --platform "linux/$arch" --entrypoint /app/.venv/bin/python "$platform_image" -c 'import memoia_server; print(memoia_server.__version__)'
@@ -92,12 +105,13 @@ jobs:
           done
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           # shellcheck disable=SC2016 # jq variables are resolved by jq, not Bash.
-          jq -n --arg sha "$GITHUB_SHA" --arg image "$image" --arg config "$GITHUB_SHA" --arg schema "$schema" '{source_commit:$sha,image:$image,config_commit:$config,schema_source_sha256:$schema,platforms:["linux/amd64","linux/arm64"]}' > release.json
+          jq -n --arg sha "$GITHUB_SHA" --arg image "$image" --arg config "$GITHUB_SHA" --arg schema "$schema" '{source_commit:$sha,image:$image,config_commit:$config,schema_source_sha256:$schema,platforms:["linux/amd64"]}' > release.json
           printf 'Source: %s\nImage: %s\n' "$GITHUB_SHA" "$image" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload candidate identity
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: memoia-candidate-${{ github.sha }}-${{ github.run_id }}
+          overwrite: true
           path: |
             release.json
             manifest.json
@@ -128,6 +142,12 @@ jobs:
       MANIFEST_DIGEST: ${{ needs.publish-test.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
+      - name: Require this branch's deployment implementation
+        run: |
+          set -euo pipefail
+          for file in deploy/deploy-memoia.sh deploy/infra-fingerprint.sh deploy/schema-fingerprint.sh deploy/recovery.py deploy/docker-compose.yml deploy/smoke-api.sh; do
+            test -f "$file" || { echo "This branch lacks deployment implementation: $file; archive the approved deployment source before deploying" >&2; exit 1; }
+          done
       - name: Deploy over direct SSH and smoke test the public API
         run: |
           set -euo pipefail

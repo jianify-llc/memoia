@@ -11,7 +11,7 @@ import unittest
 
 SOURCE = Path(__file__).resolve().parents[1]
 ROOT = Path("/opt/memoia")
-IMAGE = "ghcr.io/jianify/memoia@sha256:" + "e" * 64
+IMAGE = "ghcr.io/jianify-llc/memoia@sha256:" + "e" * 64
 OLD_IMAGE = "ghcr.io/jianify/memoia@sha256:" + "a" * 64
 SHA = "d" * 40
 
@@ -89,6 +89,12 @@ else:
     def actions(self):
         file = Path(self.fixture.name) / "actions"
         return [json.loads(line) for line in file.read_text().splitlines()] if file.exists() else []
+
+    def test_wrong_repository_is_rejected_before_platform_mutation(self):
+        for image in ("ghcr.io/other/memoia@sha256:" + "e" * 64, "ghcr.io/jianify-llc/other@sha256:" + "e" * 64):
+            result = self.run_command("bash", str(SOURCE / "deploy-memoia.sh"), "prepare", str(ROOT), image, SHA, "200", self.compose_sha)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(self.actions(), [])
 
     def test_init_creates_templates_with_empty_secrets_and_preserves_values(self):
         for file in self.managed:
@@ -267,6 +273,18 @@ else:
         self.assertNotEqual(self.deploy().returncode, 0)
         self.assertTrue((self.state / "pending-deploy").exists())
         self.assertFalse(any("up" in a["args"] for a in self.actions()))
+
+    def test_old_namespace_previous_digest_can_be_restored(self):
+        config_sha = self.run_command("bash", "-c", "sha256sum /opt/memoia/.env /opt/memoia/api/config.yaml | sha256sum | cut -d' ' -f1").stdout.strip()
+        accepted = f"99 {SHA} {OLD_IMAGE} {self.compose_sha} {config_sha}\n"
+        (self.state / "previous-accepted").write_text(accepted)
+        (self.state / "accepted").mkdir()
+        (self.state / "accepted" / SHA).write_text(accepted)
+        (Path(self.fixture.name) / "image").write_text(IMAGE)
+        (self.state / "deploy-state").write_text(f"100 {'b' * 40} {IMAGE}\n")
+        result = self.run_command("bash", str(SOURCE / "deploy-memoia.sh"), "restore-api", str(ROOT), OLD_IMAGE, SHA, "99", self.compose_sha)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.actions()[-1]["image"], OLD_IMAGE)
 
     def test_recovery_is_explicit_and_preserves_run_high_water(self):
         self.assertNotEqual(self.deploy("restore-api", run="99").returncode, 0)

@@ -1,11 +1,9 @@
 name: Memoia · Verify
 
 on:
-  workflow_call:
-  push:
-    branches: [main]
+  workflow_dispatch:
   pull_request:
-    branches: [main, test, release]
+    branches: [main]
   merge_group:
 
 permissions:
@@ -15,59 +13,28 @@ jobs:
   verify:
     name: verify
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      DATABASE_LOCATION: /tmp/memoia-test-${{ github.run_id }}-${{ github.run_attempt }}-postgres
-      REDIS_LOCATION: /tmp/memoia-test-${{ github.run_id }}-${{ github.run_attempt }}-redis
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
-      - uses: astral-sh/setup-uv@v6
-      - name: Set up Python
-        run: uv python install 3.12
-      - name: Install frozen dependencies and check package identity
-        working-directory: ./src/server/api
-        run: |
-          uv sync --frozen
-          uv lock --check
-          uv run --frozen python -c 'import memoia_server; print(memoia_server.__version__)'
-          test -f LICENSE && test -f NOTICE && test -f Dockerfile
-          ! grep -q 'memobase_server' Dockerfile
-      - name: Validate deployment layout and mocked safety contracts
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build the candidate AMD64 image without publication
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./src/server/api
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: memoia-verification:${{ github.sha }}
+          build-args: VCS_REF=${{ github.sha }}
+          cache-from: type=gha,scope=verify-amd64
+          cache-to: type=gha,scope=verify-amd64,mode=min
+      - name: Check the built image identity and import
         run: |
           set -euo pipefail
-          shellcheck deploy/*.sh
-          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_compose.py -v
-          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_workflow.py -v
-          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_recovery.py -v
-          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/cutover -p verify_legacy_patch.py -v
-          uv run --project ./src/server/api --frozen python -m unittest discover -s deploy/tests -p test_sdk_probe.py -v
-          docker run --rm -e MEMOIA_DEPLOY_TEST_ISOLATED=1 \
-            --mount "type=bind,source=$GITHUB_WORKSPACE/deploy,target=/work/deploy,readonly" \
-            --entrypoint /bin/bash \
-            python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e \
-            -c 'set -e; apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=20 update -qq; apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=20 install -y -qq jq >/dev/null; python -m unittest discover -s /work/deploy/tests -p test_deploy.py -v'
-      - name: Start test dependencies
-        working-directory: ./src/server
-        run: |
-          cp .env.example .env
-          cp api/config.yaml.example api/config.yaml
-          docker compose config --quiet
-          docker compose up -d --wait --wait-timeout 120 memobase-server-db memobase-server-redis
-      - name: Test with pytest
-        working-directory: ./src/server/api
-        run: |
-          cp .env.example .env
-          uv run --frozen -m pytest --junit-xml=junit/test-results-3.12.xml --cov=memoia_server --cov-report=xml:coverage-3.12.xml tests/ -s -v
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
-        with:
-          name: pytest-results-3.12
-          path: |
-            ./src/server/api/junit/test-results-3.12.xml
-            ./src/server/api/coverage-3.12.xml
-      - name: Stop test dependencies
-        working-directory: ./src/server
-        if: ${{ always() }}
-        run: docker compose down
+          image="memoia-verification:$GITHUB_SHA"
+          docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}' | grep -Fx 'linux/amd64'
+          docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' | grep -Fx "$GITHUB_SHA"
+          docker run --rm --network none --entrypoint /app/.venv/bin/python "$image" -c 'import memoia_server; print(memoia_server.__version__)'
+          printf 'Built source %s for linux/amd64; package import checked. No publication or business tests.\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
