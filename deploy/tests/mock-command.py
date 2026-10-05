@@ -85,13 +85,15 @@ elif command == "docker":
     elif args[0] == "exec":
         if os.getenv("FIXTURE_DB_UNAVAILABLE"):
             sys.exit("Company database query failed")
-        if "to_regclass" in args[-1]:
+        if "information_schema.columns" in args[-1]:
+            output(os.getenv("FIXTURE_MEMORY_LAYOUT", "memory_blobs.source_id\nmemory_blobs.status\nmemory_operations.source_id\nmemory_operations.status\nmemory_sources.source_id"))
+        elif "to_regclass" in args[-1]:
             output("memory_table" if os.getenv("FIXTURE_V2_TABLES") else "")
         elif "buffer_zones" in args[-1]:
             actions = (fixture / "actions").read_text() if (fixture / "actions").exists() else ""
             stopped = '"stop"' in actions
             output(os.getenv("FIXTURE_ACTIVE_BUFFER_AFTER_STOP", "0") if stopped else os.getenv("FIXTURE_ACTIVE_BUFFER", "0"))
-        elif "memory_operations" in args[-1] or "memory_sources" in args[-1]:
+        elif any(table in args[-1] for table in ("memory_operations", "memory_sources", "memory_blobs")):
             output(os.getenv("FIXTURE_V2_UNFINISHED", "0"))
         elif "pg_extension" in args[-1]:
             output("1")

@@ -1,6 +1,7 @@
 """Adopt real legacy tables without rebuilding them; reject partial/drifted contracts."""
 import os
 import json
+import importlib.util
 from pathlib import Path
 import subprocess
 import sys
@@ -48,6 +49,88 @@ def migrate(url, target="head"):
     # Never echo the subprocess environment or connection URL.
     return subprocess.run([sys.executable, "-m", "alembic", "upgrade", target], cwd=ROOT, env=env,
                           capture_output=True, text=True)
+
+
+@pytest.mark.parametrize("target", ["0005_user_tombstones", "head"])
+def test_maintenance_quiet_check_uses_real_old_and_new_schema(legacy_schema, monkeypatch, target):
+    engine, url = legacy_schema
+    install_legacy(engine)
+    result = migrate(url, target)
+    assert result.returncode == 0, result.stderr
+    spec = importlib.util.spec_from_file_location("recovery", ROOT.parents[2] / "deploy/recovery.py")
+    recovery = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(recovery)
+
+    def query(args):
+        if "--scan" in args:
+            return ""
+        assert args[:4] == ["docker", "exec", "-i", "fixture-postgres"]
+        with engine.connect() as connection:
+            return "\n".join(str(row[0]) for row in connection.execute(text(args[-1])))
+
+    monkeypatch.setattr(recovery, "run", query)
+    config = {"services": {"memoia": {"environment": {"PROJECT_ID": "fixture"}}}}
+
+    def quiet():
+        recovery.check_quiet(["docker", "compose"], config, "fixture-postgres")
+
+    quiet()
+    uid, batch = uuid4(), uuid4()
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO projects(id,project_id,project_secret,status) VALUES(:id,'backup','fixture','active')"), {"id": uuid4()})
+        connection.execute(text("INSERT INTO users(id,project_id) VALUES(:uid,'backup')"), {"uid": uid})
+        if target == "head":
+            connection.execute(text("INSERT INTO memory_sources(user_id,project_id,source_id) VALUES(:uid,'backup','dialog')"), {"uid": uid})
+            connection.execute(text("INSERT INTO memory_messages(user_id,project_id,source_id,message_id,content_hash,role,occurred_at) VALUES(:uid,'backup','dialog','m1',repeat('a',64),'user',now())"), {"uid": uid})
+            connection.execute(text("INSERT INTO memory_blobs(id,user_id,project_id,source_id,message_ids,status) VALUES(:id,:uid,'backup','dialog','[\"m1\"]','active')"), {"id": batch, "uid": uid})
+        else:
+            connection.execute(text("INSERT INTO memory_sources(id,user_id,project_id,external_id,payload,request_hash,status) VALUES(:id,:uid,'backup','batch','{}',repeat('a',64),'active')"), {"id": batch, "uid": uid})
+    quiet()
+    table = "memory_blobs" if target == "head" else "memory_sources"
+    with engine.begin() as connection:
+        connection.execute(text(f"UPDATE {table} SET status='rebuilding' WHERE id=:id"), {"id": batch})
+    with pytest.raises(RuntimeError, match="Unfinished v2"):
+        quiet()
+    with engine.begin() as connection:
+        assert connection.execute(text(f"SELECT status FROM {table} WHERE id=:id"), {"id": batch}).scalar_one() == "rebuilding"
+        connection.execute(text(f"UPDATE {table} SET status='active' WHERE id=:id"), {"id": batch})
+        if target == "head":
+            connection.execute(text("INSERT INTO memory_operations(id,user_id,project_id,idempotency_key,kind,request_hash,request,source_id,blob_id,status) VALUES(:id,:uid,'backup','attempt','import',repeat('a',64),'{}','dialog',:blob,'processing')"), {"id": uuid4(), "uid": uid, "blob": batch})
+        else:
+            connection.execute(text("INSERT INTO memory_operations(id,user_id,project_id,idempotency_key,kind,request_hash,request,external_id,source_id,status) VALUES(:id,:uid,'backup','attempt','import',repeat('a',64),'{}','batch',:blob,'processing')"), {"id": uuid4(), "uid": uid, "blob": batch})
+    with pytest.raises(RuntimeError, match="Unfinished v2"):
+        quiet()
+    with engine.begin() as connection:
+        assert connection.execute(text("SELECT status FROM memory_operations")).scalar_one() == "processing"
+        connection.execute(text("DELETE FROM memory_operations"))
+    quiet()
+
+
+@pytest.mark.parametrize("drift", ["missing_status", "mixed_layout"])
+def test_maintenance_rejects_drifted_real_memory_schema(legacy_schema, monkeypatch, drift):
+    engine, url = legacy_schema
+    install_legacy(engine)
+    result = migrate(url)
+    assert result.returncode == 0, result.stderr
+    spec = importlib.util.spec_from_file_location("recovery", ROOT.parents[2] / "deploy/recovery.py")
+    recovery = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(recovery)
+    with engine.begin() as connection:
+        if drift == "missing_status":
+            connection.execute(text("ALTER TABLE memory_blobs RENAME COLUMN status TO drifted_status"))
+        else:
+            connection.execute(text("ALTER TABLE memory_sources ADD COLUMN status TEXT"))
+
+    def query(args):
+        if "--scan" in args:
+            return ""
+        with engine.connect() as connection:
+            return "\n".join(str(row[0]) for row in connection.execute(text(args[-1])))
+
+    monkeypatch.setattr(recovery, "run", query)
+    config = {"services": {"memoia": {"environment": {"PROJECT_ID": "fixture"}}}}
+    with pytest.raises(RuntimeError, match="Unknown memory schema"):
+        recovery.check_quiet(["docker", "compose"], config, "fixture-postgres")
 
 
 def test_event_time_extension_preserves_old_facts_without_invented_backfill(legacy_schema):
