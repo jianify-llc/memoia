@@ -1,11 +1,13 @@
 """源码快照及缺依赖反例，不读实际业务配置或启动共享服务。"""
 import importlib.util
+import io
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from contextlib import contextmanager, redirect_stderr
 
 SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE))
@@ -137,6 +139,57 @@ class LocalVerificationContract(unittest.TestCase):
             guard.pytest_sessionfinish(session, 0)
         self.assertEqual(session.exitstatus, 1)
         self.assertIs(socket.create_connection, original)
+
+    def test_cleanup_failure_preserves_primary_command_and_fails_successful_run(self):
+        api = self.source / "src/server/api"
+        for name in ("LICENSE", "NOTICE", "Dockerfile", "openapi-v2.json"):
+            (api / name).write_text("")
+        @contextmanager
+        def tree(*_):
+            yield self.source
+
+        for failed in (True, False):
+            with self.subTest(primary_failed=failed):
+                stderr = io.StringIO()
+                def run(command, **kwargs):
+                    if command[:2] == ["docker", "context"]:
+                        return "unix:///fixture.sock"
+                    if command[:3] == ["docker", "container", "ls"]:
+                        return "owned-id"
+                    if command[:2] == ["docker", "rm"]:
+                        raise subprocess.CalledProcessError(1, ["docker", "rm", "fixture-owned"])
+                    if len(command) > 1 and command[1] == "export-openapi.py":
+                        Path(command[2]).write_text("")
+                    return ""
+
+                def business(step, container, source, *_):
+                    container("fixture-owned", [], source)
+                    if failed:
+                        raise subprocess.CalledProcessError(7, ["pytest", "fixture-primary"])
+
+                with patch.object(module, "source_tree", tree), patch.object(module.shutil, "which", return_value="fixture"), patch.object(module, "run", side_effect=run), patch.object(module, "business_tests", side_effect=business), patch.object(module, "local_env", return_value={}), redirect_stderr(stderr):
+                    if failed:
+                        with self.assertRaises(subprocess.CalledProcessError) as original:
+                            module.verify("publish")
+                        self.assertEqual(original.exception.returncode, 7)
+                        self.assertEqual(original.exception.cmd, ["pytest", "fixture-primary"])
+                        self.assertIn("LOCAL_CI_CLEANUP_FAILED", stderr.getvalue())
+                    else:
+                        with self.assertRaisesRegex(ValueError, "LOCAL_CI_CLEANUP_FAILED"):
+                            module.verify("publish")
+
+    def test_reports_are_written_outside_clean_source_not_copied_back(self):
+        commands = []
+        def step(command, cwd, capture=False):
+            commands.append(command)
+            return "127.0.0.1:12345" if command[:2] == ["docker", "port"] else ""
+        with patch.object(module, "ROOT", self.source):
+            module.business_tests(step, lambda *_: None, self.source, self.source, "fixture-python",
+                                  {}, "fixture-report", "publish", module.time.monotonic() + 60)
+        pytest = next(command for command in commands if "pytest" in command)
+        for prefix in ("--junit-xml=", "--cov-report=xml:"):
+            path = Path(next(argument[len(prefix):] for argument in pytest if argument.startswith(prefix)))
+            self.assertEqual(path.parent, self.source / ".local-ci-results/fixture-report")
 
 
 if __name__ == "__main__":

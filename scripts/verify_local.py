@@ -193,7 +193,11 @@ def verify(mode="full", base=None, checkout=False):
             except (OSError, subprocess.SubprocessError) as error:
                 cleanup_errors.append(str(error))
         if cleanup_errors:
-            raise ValueError("LOCAL_CI_CLEANUP_FAILED: " + "; ".join(cleanup_errors))
+            message = "LOCAL_CI_CLEANUP_FAILED: " + "; ".join(cleanup_errors)
+            if sys.exc_info()[1] is not None:
+                print(message, file=sys.stderr)
+            else:
+                raise ValueError(message)
     print(f"Memoia {mode} CI 全部通过；未部署或连接共享业务服务。", flush=True)
 
 
@@ -238,17 +242,11 @@ def business_tests(step, container, source, api, python, env, suffix, mode, dead
                ACCESS_TOKEN="secret", PROJECT_ID="memobase_dev")
     step([python, "-m", "alembic", "upgrade", "head"], api)
     step([python, "-c", "from memoia_server.schema import check_schema; check_schema()"], api)
-    try:
-        tests = ["tests/test_db.py", "tests/test_schema_adoption.py"] if mode == "quick" else ["tests/"]
-        step([python, "-m", "pytest", "--junit-xml=junit/test-results-3.12.xml",
-              "--cov=memoia_server", "--cov-report=xml:coverage-3.12.xml", *tests, "-v"], api)
-    finally:
-        reports = ROOT / ".local-ci-results" / suffix
-        for name in ("junit/test-results-3.12.xml", "coverage-3.12.xml"):
-            if (api / name).is_file():
-                target = reports / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(api / name, target)
+    reports = ROOT / ".local-ci-results" / suffix
+    reports.mkdir(parents=True, exist_ok=True)
+    tests = ["tests/test_db.py", "tests/test_schema_adoption.py"] if mode == "quick" else ["tests/"]
+    step([python, "-m", "pytest", f"--junit-xml={reports / 'test-results-3.12.xml'}",
+          "--cov=memoia_server", f"--cov-report=xml:{reports / 'coverage-3.12.xml'}", *tests, "-v"], api)
 
 
 def cancel(*_):
