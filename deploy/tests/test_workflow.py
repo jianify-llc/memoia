@@ -50,9 +50,20 @@ if command == "bash" and os.getenv("FIXTURE_SMOKE_FAIL"):
 
 
 class PublicationContract(unittest.TestCase):
-    def test_shared_verification_and_runner_budgets(self):
+    def test_cloud_only_builds_images_and_keeps_runner_budgets(self):
         verify_source = VERIFY_WORKFLOW.read_text()
-        self.assertIn("python3 scripts/verify_local.py", verify_source)
+        for path in (WORKFLOW, ONLINE_WORKFLOW, VERIFY_WORKFLOW):
+            self.assertNotIn("scripts/verify_local.py", path.read_text())
+            self.assertNotIn("pytest", path.read_text())
+            self.assertNotIn("pnpm test", path.read_text())
+            self.assertNotIn("setup-node", path.read_text())
+        build = next(step for step in yaml.safe_load(verify_source)["jobs"]["verify"]["steps"] if "docker/build-push-action" in step.get("uses", ""))
+        self.assertFalse(build["with"]["push"])
+        self.assertTrue(build["with"]["load"])
+        self.assertEqual(build["with"]["context"], "./src/server/api")
+        self.assertEqual(build["with"]["platforms"], "linux/amd64")
+        self.assertIn("import memoia_server", verify_source)
+        self.assertIn("--network none", verify_source)
         local = (WORKFLOW.parents[2] / "scripts/verify_local.py").read_text()
         for name in ("test_compose.py", "test_recovery.py", "test_sdk_probe.py", "test_deploy.py", "pytest", "check:generated"):
             self.assertIn(name, local)
@@ -63,7 +74,7 @@ class PublicationContract(unittest.TestCase):
                     self.assertLessEqual(job["timeout-minutes"], 75)
 
     def test_manual_selector_rejects_wrong_ref_and_changed_head(self):
-        step = yaml.safe_load(WORKFLOW.read_text())["jobs"]["validate-test"]["steps"][-1]
+        step = next(step for step in yaml.safe_load(WORKFLOW.read_text())["jobs"]["publish-test"]["steps"] if step.get("name") == "Require the selected current Test branch")
         with tempfile.TemporaryDirectory() as directory:
             git = Path(directory) / "git"
             git.write_text('#!/bin/sh\nprintf "%s\\trefs/heads/test\\n" "$FIXTURE_HEAD"\n')
@@ -86,21 +97,19 @@ class PublicationContract(unittest.TestCase):
         self.assertEqual(selection["type"], "boolean")
         self.assertTrue(selection["default"])
         self.assertIn("inputs.deploy", test["jobs"]["deploy-test"]["if"])
-        guard = test["jobs"]["validate-test"]
-        self.assertEqual(test["jobs"]["verify"]["needs"], "validate-test")
-        self.assertIn('"$SELECTED_REF" == refs/heads/test', guard["steps"][-1]["run"])
+        self.assertEqual(set(test["jobs"]), {"publish-test", "deploy-test"})
+        guard = next(step for step in test["jobs"]["publish-test"]["steps"] if step.get("name") == "Require the selected current Test branch")
+        self.assertIn('"$SELECTED_REF" == refs/heads/test', guard["run"])
         self.assertEqual(online[True], {"push": {"tags": ["v*"]}})
-        self.assertIn("workflow_call", verify[True])
+        self.assertNotIn("workflow_call", verify[True])
         self.assertNotIn("push", verify[True])
         self.assertEqual(verify[True]["pull_request"], {"branches": ["main"]})
         self.assertIn("merge_group", verify[True])
         self.assertNotIn("build", verify["jobs"])
-        self.assertNotIn("docker/build-push-action", VERIFY_WORKFLOW.read_text())
+        self.assertIn("docker/build-push-action", VERIFY_WORKFLOW.read_text())
         self.assertFalse(VERIFY_WORKFLOW.with_name("main-verify.yaml").exists())
-        self.assertEqual(test["jobs"]["verify"]["uses"], "./.github/workflows/verify.yml")
-        self.assertEqual(online["jobs"]["verify"]["uses"], "./.github/workflows/verify.yml")
-        self.assertEqual(online["jobs"]["verify"]["needs"], "validate-tag")
-        self.assertEqual(online["jobs"]["build-platforms"]["needs"], "verify")
+        self.assertNotIn("verify", online["jobs"])
+        self.assertEqual(online["jobs"]["build-platforms"]["needs"], "validate-tag")
         self.assertEqual(online["jobs"]["build-online"]["needs"], "build-platforms")
         self.assertEqual(online["jobs"]["deploy-online"]["needs"], "build-online")
         self.assertIn("refs/heads/release", online["jobs"]["validate-tag"]["steps"][-1]["run"])
@@ -131,6 +140,9 @@ class PublicationContract(unittest.TestCase):
                         self.assertRegex(step["uses"], r"@[0-9a-f]{40}$")
                     if "actions/checkout" in step.get("uses", ""):
                         self.assertFalse(step["with"]["persist-credentials"])
+                    if "docker/build-push-action" in step.get("uses", ""):
+                        self.assertIn("mode=min", step["with"]["cache-to"])
+                        self.assertIn("scope=", step["with"]["cache-to"])
         verify = yaml.safe_load(VERIFY_WORKFLOW.read_text())["jobs"]["verify"]
         self.assertNotIn("environment", verify)
         self.assertNotIn("secrets.", VERIFY_WORKFLOW.read_text())

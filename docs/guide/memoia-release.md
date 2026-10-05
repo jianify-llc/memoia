@@ -47,9 +47,8 @@ previously interrupted flush is safe to replay.
 
 ## Build and record a release
 
-The shared [`verify` workflow](../../.github/workflows/verify.yml)
-runs the same isolated local verification entry on pull requests archiving to `main` without building
-a Docker image. `deploy-test.yml` handles explicit manual Test batches (AMD64);
+The [`verify` workflow](../../.github/workflows/verify.yml)
+builds an AMD64 candidate image without publication for `main` pull requests, merge queues and explicit manual checks. It checks source identity, Python import and migration source presence; full API/SDK and isolated migration tests run locally before Test pushes. `deploy-test.yml` handles explicit manual Test batches (AMD64);
 `deploy-online.yml` handles version tags at Release HEAD on native AMD64/ARM64
 runners. Neither is triggered by a `main` or `release` branch push. Promoting
 code to `release` and deploying online remain separate decisions. A successful

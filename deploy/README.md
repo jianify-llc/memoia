@@ -10,7 +10,8 @@ Agent 操作远端服务器前，必须阅读相邻仓库 `../Jianify-LLC/ops/se
 
 ```bash
 python3 scripts/test_push.py install
-python3 scripts/verify_local.py --mode quick --base <远端Test基线SHA>
+python3 scripts/verify_local.py --mode quick
+python3 scripts/verify_local.py --mode full --base <远端Test基线SHA>
 python3 scripts/verify_local.py --mode full
 # 提交自己的改动后，在准确提交的干净 worktree 中同步 Test：
 python3 scripts/test_push.py push
@@ -18,26 +19,25 @@ python3 scripts/test_push.py push
 gh workflow run deploy-test.yml --ref test --repo jianify-llc/memoia
 ```
 
-本地与云端共用 `scripts/verify_local.py`；默认 `full`。各模式职责：
+本地业务检查使用 `scripts/verify_local.py`，默认 `full`；Actions 只构建镜像并核对身份，不运行此入口。各模式职责：
 
 | 模式 | 业务验证 | 工具验证 |
 | --- | --- | --- |
-| quick | 明确列出的纯计算/mock Python、OpenAPI、SDK 生成与 Node 测试；测试进程禁止真实网络、数据库和模型连接 | 按可靠 base 选择 hook、部署、legacy 和 schema；schema 改动才增加隔离数据库检查 |
-| full | 全部 API、迁移、schema、OpenAPI、Node/Workers SDK | 全部工具和部署夹具 |
-| publish | 固定的完整业务验证；只用于明确发布批次 | 不推断历史基线，不运行工具回归 |
-| pr | 完整业务验证 | 按 PR/merge queue 的 base 选择；基线缺失/不可读取时扩大检查 |
+| quick | 固定的纯计算/mock Python、OpenAPI、SDK 生成与 Node 测试；测试进程禁止真实网络、数据库和模型连接 | 始终不启动数据库、Redis 或部署夹具，不代替推送前 full |
+| full --base | API、SDK、manifest/lock、构建配置等影响同一部署单元时，运行完整 API、隔离迁移/schema、OpenAPI、Node/Workers SDK；只改文档或工具不无条件运行全套业务 | 按可靠 base 选择 hook、部署、legacy；schema 维护工具改动保留定向隔离数据库检查 |
+| full（无 base） | 全部业务验证 | 全部工具、历史迁移和部署夹具 |
 
-`push` 入口取得远端 Test 精确 SHA 后调用 quick；普通业务 diff 不要求 Docker。无可靠 base 的 quick 会扩大检查，不能当成纯离线检查。依赖为 Python 3、uv/Python 3.12、Node、pnpm 10.12.4；工具/集成模式按需要求 ShellCheck、curl、Docker。依赖下载和公开词表准备不属于离线测试。
+`push` 入口取得远端 Test 精确 SHA 后调用 `full --base`。基线缺失、不可读取、不是候选提交的祖先，或手动检查的工作区有未提交改动时扩大到全量；不使用历史成功记录或上一条提交猜基线。文档改动使用 Git 差异检查，hook 改动运行工具回归；部署探针依赖的 `src/client/memobase/` Python SDK 改动也执行业务和部署工具验证。业务 full 使用本批独占 PostgreSQL/Redis。依赖按所选范围要求 Python 3、uv/Python 3.12、Node、pnpm 10.12.4、ShellCheck、curl 和 Docker。依赖下载和公开词表准备不属于离线测试。
 
-quick 每次固定运行 `scripts/verify_local.py` 的离线名单，包含来源提取/证据质量的纯计算与 MockTransport 回归，以及时间解析、渲染、校验和时区锚定回归；不按业务文件差异跳过。`test_temporal_evidence.py` 同时包含数据库测试，因此只列入其中五个离线测试节点；存储、检索和撤回等集成行为仍由 full／publish／pr 验证。新增有价值的离线回归时同步维护此名单，并在网络禁令下验证。
+quick 每次固定运行 `scripts/verify_local.py` 的离线名单，包含来源提取/证据质量的纯计算与 MockTransport 回归，以及时间解析、渲染、校验和时区锚定回归；不按业务文件差异跳过。`test_temporal_evidence.py` 同时包含数据库测试，因此只列入其中五个离线测试节点；存储、检索和撤回等集成行为由本地 full 验证。新增有价值的离线回归时同步维护此名单，并在网络禁令下验证。
 
-本地使用排除业务 `.env`、真实 `config.yaml` 的临时源码；云端 `--checkout` 要求干净 checkout，直接验证候选，不再复制源码。Git 历史提前获取，checkout 不保留凭据；业务子进程使用环境白名单，不继承平台/部署密钥。部署夹具与虚构业务连接配置分层，数据库只用本批独占 PostgreSQL/Redis 随机回环端口。JUnit/覆盖率写入忽略的 `.local-ci-results/<批次>/`，不是检查缓存。部署夹具使用官方 SHA-256 校验的 jq 1.8.1，容器无网络；依赖下载仅保留无认证代理。总预算 20 分钟；只清理本批资源，失败/超时/取消/清理异常均不得报告通过。
+本地使用排除业务 `.env`、真实 `config.yaml` 的临时源码与不含凭据的 Git 对象；业务子进程使用环境白名单，不继承平台/部署密钥。部署夹具与虚构业务连接配置分层，数据库只用本批独占 PostgreSQL/Redis 随机回环端口。JUnit/覆盖率写入忽略的 `.local-ci-results/<批次>/`，不是检查缓存。部署夹具使用官方 SHA-256 校验的 jq 1.8.1，容器无网络；依赖下载仅保留无认证代理。总预算 20 分钟；只清理本批资源，失败/超时/取消/清理异常均不得报告通过。
 
-环境白名单保留 pnpm 的工具目录 `PNPM_HOME`，使实际安装与 `setup-node` 查询的 package store 路径一致；这不传递 registry、平台或业务凭据。
+环境白名单保留 pnpm 的工具目录 `PNPM_HOME`，保持本地 package store 路径一致；不传递 registry、平台或业务凭据。Actions 不再安装宿主机业务依赖，Docker 的 GHA 缓存按用途/架构区分，导出明确使用 `mode=min`。
 
 Test 长检查先于 Git 连接，hook 按目标 ref 验证本次提交和远端基线；源码／基线改变即重新检查。直接 Test push、force push、删除 Test、脏树或手工复用内部证明均不允许。安装入口遇到已有 hook 管理器停止，不覆盖。仓库文件存在不代表 hook 已安装，也不代表默认分支的手动 workflow 已注册；这些须在合入后核对，不以创建一个 Actions run 验证普通触发规则。
 
-手动 Test 流程在 Verify／镜像构建前核对选择的是当前 test 提交，后续 stale-deployment 检查继续保留。`MEMOIA_TEST_DEPLOY_ENABLED` 仍决定是否执行真实部署；手动启动并不绕过这个门禁、GHCR 匿名拉取或正常恢复要求。
+手动 Test 流程在镜像 Job 首先核对选择的是当前 test 提交，后续 stale-deployment 检查继续保留。`MEMOIA_TEST_DEPLOY_ENABLED` 仍决定是否执行真实部署；手动启动并不绕过这个门禁、GHCR 匿名拉取或正常恢复要求。
 
 ### 既有工作流的切换顺序
 
@@ -152,9 +152,9 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 
 ## GitHub Actions
 
-`verify.yml` 验证 main PR/merge queue，并供发布调用，不构建 Memoia Docker 镜像。手动 `deploy-test.yml` 核对当前 test → publish 验证 → AMD64 发布/匿名拉取 → 受门禁控制的部署；无 QEMU。历史多架构镜像可复用，但 AMD64、源码和 schema 必须通过验证。`release` push 不运行 Actions。
+`verify.yml` 仅在 main PR/merge queue 或明确手动运行中构建 AMD64 镜像，不推送，检查源码身份、Python 导入和迁移源码存在；不安装宿主机业务依赖或启动业务 DB/Redis。手动 `deploy-test.yml` 在同一镜像 Job 核对当前 test → AMD64 构建/身份/schema 指纹/匿名拉取 → 受门禁控制的部署；无独立业务 Verify、无 QEMU。历史多架构镜像可复用，但 AMD64、源码和 schema 必须通过验证。`release` push 不运行 Actions。
 
-只有当前 release HEAD 的稳定 `v*` tag 才进入 Online：publish 验证 → AMD64/ARM64 原生 runner 各构建一次 → 校验架构、源码、真实 schema 指纹 → 汇总并核对同一 manifest digest → online 审批 → 部署该 digest；审批后不重建。已存在版本只校验/复用；注册表错误不能当作不存在。平台回执限定当前 run，失败重跑仅替换该架构回执，汇总仍检查 SHA/digest/schema。不同 SHA 不假设 Test/Online 镜像相同。GHCR 必须 Public，服务器不持有 GitHub 写权限。Online 主机/凭据/恢复和真实模型验收仍独立，不因 CI 通过而自动视为完成。
+只有当前 release HEAD 的稳定 `v*` tag 才进入 Online：tag 身份检查 → AMD64/ARM64 原生 runner 各构建一次 → 校验架构、源码、真实 schema 指纹 → 汇总并核对同一 manifest digest → online 审批 → 部署该 digest；审批后不重建。已存在版本只校验/复用；注册表错误不能当作不存在。平台回执限定当前 run，失败重跑仅替换该架构回执，汇总仍检查 SHA/digest/schema。不同 SHA 不假设 Test/Online 镜像相同。GHCR 必须 Public，服务器不持有 GitHub 写权限。Online 主机/凭据/恢复和真实模型验收仍独立，不因 CI 通过而自动视为完成。
 
 首次安装/业务验收前，仓库级 `MEMOIA_TEST_DEPLOY_ENABLED` 保持关闭；当前测试环境已完成初装，该门闩按实际状态启用。test Environment 限 test 分支，online Environment 限 `v*` 标签并配置 Required Reviewer。GitHub Actions 直接连接服务器公网 SSH，不再经过 Cloudflare Tunnel 或依赖 Access Service Token；业务 HTTPS API 继续使用宿主机 Tunnel。
 
@@ -170,7 +170,7 @@ test Environment 配置：
 
 Actions 只上传脚本到 .deploy/candidates，不覆盖 Compose/.env/YAML。sudo -n 执行，公网 smoke 成功再 finalize 和写成功 Deployment。SSH 使用严格 host key 校验、专用 identity、连接超时/保活，不读取 runner 的 SSH 配置或启用代理；成功与失败退出均清理临时私钥/known_hosts。仍须使用专用部署密钥实际验证非交互 SSH + sudo，并完成远端 Actions 验收；人工 ubuntu + PEM 直连不能代替它。
 
-需要显式 schema 维护时，手动 Test 工作流选择 `deploy=false`：仍完成 Verify、镜像发布、源码／架构／匿名拉取校验及候选记录，但不访问部署 Environment、不调用普通 prepare/finalize，也不标记成功 Deployment。随后使用同一 SHA／run／digest 的候选走上述维护入口；缺省 `deploy=true` 仍为普通部署。
+需要显式 schema 维护时，手动 Test 工作流选择 `deploy=false`：仍完成镜像发布、源码／架构／匿名拉取校验及候选记录，但不访问部署 Environment、不调用普通 prepare/finalize，也不标记成功 Deployment。随后使用同一 SHA／run／digest 的候选走上述维护入口；缺省 `deploy=true` 仍为普通部署。
 
 日常 smoke 只验收基础部署：健康、Bearer 正反例及探针用户创建/读取/删除。Deployment 状态与 Actions summary 明确记录此范围，不代表完整记忆业务通过。首次部署、修改记忆处理或模型/embedding 配置时，使用已有 verify-sdk.py 工具单独完成核心闭环并记录候选 digest；不在每次普通发布中自动运行全套真实模型探针，也不新增通用排空机制。
 

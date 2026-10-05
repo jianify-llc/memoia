@@ -55,31 +55,80 @@ class LocalVerificationContract(unittest.TestCase):
                 module.verify()
             run.assert_not_called()
 
-    def test_publish_has_fixed_business_scope_without_querying_a_baseline(self):
+    def test_full_without_a_baseline_checks_all_scopes_without_querying_history(self):
         with patch.object(module, "run") as run:
-            self.assertFalse(any(module.selections("publish").values()))
+            self.assertTrue(all(module.selections("full").values()))
             run.assert_not_called()
 
     def test_diff_selects_dependencies_and_missing_baseline_expands_checks(self):
-        with patch.object(module, "run", return_value="src/server/api/memoia_server/controllers/user.py\0"):
+        def diff(path):
+            return lambda command, **_: path + "\0" if "--name-only" in command else ""
+        with patch.object(module, "run") as run:
             self.assertFalse(any(module.selections("quick", "a" * 40).values()))
-        with patch.object(module, "run", return_value="src/server/api/migrations/versions/new.py\0"):
-            self.assertTrue(module.selections("quick", "a" * 40)["schema"])
-        with patch.object(module, "run", return_value="deploy/cutover/patch.py\0"):
-            self.assertTrue(module.selections("pr", "a" * 40)["legacy"])
+            self.assertFalse(any(module.selections("quick").values()))
+            run.assert_not_called()
+        for path in ("src/server/api/memoia_server/controllers/user.py", "sdks/typescript/pnpm-lock.yaml"):
+            with patch.object(module, "run", side_effect=diff(path)):
+                scope = module.selections("full", "a" * 40)
+                self.assertTrue(scope["business"])
+                self.assertFalse(scope["legacy"])
+        with patch.object(module, "run", side_effect=diff("src/server/api/migrations/versions/new.py")):
+            self.assertTrue(module.selections("full", "a" * 40)["schema"])
+        with patch.object(module, "run", side_effect=diff("deploy/cutover/patch.py")):
+            scope = module.selections("full", "a" * 40)
+            self.assertTrue(scope["legacy"])
+            self.assertFalse(scope["business"])
+        with patch.object(module, "run", side_effect=diff("scripts/test_push.py")):
+            scope = module.selections("full", "a" * 40)
+            self.assertTrue(scope["hook"])
+            self.assertFalse(scope["business"])
+        for path in ("src/client/memobase/network.py", "setup.py", "requirements.txt"):
+            with patch.object(module, "run", side_effect=diff(path)):
+                scope = module.selections("full", "a" * 40)
+                self.assertTrue(scope["business"])
+                self.assertTrue(scope["deploy"])
+        with patch.object(module, "run", side_effect=diff("deploy/schema-maintenance.py")):
+            scope = module.selections("full", "a" * 40)
+            self.assertTrue(scope["schema"])
+            self.assertFalse(scope["business"])
         with patch.object(module, "run", side_effect=subprocess.CalledProcessError(1, "git")):
-            self.assertTrue(all(module.selections("quick", "a" * 40).values()))
-        self.assertTrue(all(module.selections("quick").values()))
+            self.assertTrue(all(module.selections("full", "a" * 40).values()))
+        with patch.object(module, "run", return_value=" M dirty-business.py"):
+            self.assertTrue(all(module.selections("full", "a" * 40).values()))
 
-    def test_clean_checkout_is_used_directly_without_copy_or_credentials(self):
-        with patch.object(module, "ROOT", self.source), patch.object(module, "run", return_value=""), patch.object(module, "snapshot") as snapshot:
-            with module.source_tree(True, self.root) as source:
-                self.assertEqual(source, self.source)
-            snapshot.assert_not_called()
-        with patch.object(module, "run", return_value=" M business.py"):
-            with self.assertRaisesRegex(ValueError, "CI_CHECKOUT_MUST_BE_CLEAN"):
-                with module.source_tree(True, self.root):
-                    self.fail("dirty cloud checkout accepted")
+    def test_documentation_only_full_does_not_prepare_business_dependencies(self):
+        def run(command, **_):
+            return "deploy/README.md\0" if command[:2] == ["git", "diff"] and "--name-only" in command else ""
+        with patch.object(module, "run", side_effect=run), patch.object(module.shutil, "which") as dependencies, patch.object(module, "source_tree") as tree:
+            module.verify("full", "a" * 40)
+        dependencies.assert_not_called()
+        tree.assert_not_called()
+
+    def test_hook_only_full_does_not_run_api_database_or_sdk_tests(self):
+        @contextmanager
+        def tree(*_):
+            yield self.source
+        def run(command, **_):
+            return "scripts/test_push.py\0" if command[:2] == ["git", "diff"] else ""
+        with patch.object(module, "run", side_effect=run) as commands, patch.object(module.shutil, "which", return_value="fixture"), patch.object(module, "source_tree", tree), patch.object(module, "business_tests") as integration:
+            module.verify("full", "a" * 40)
+        integration.assert_not_called()
+        self.assertFalse(any(call.args[0][0] in ("docker", "pnpm") for call in commands.call_args_list))
+        self.assertTrue(any("unittest" in call.args[0] for call in commands.call_args_list))
+
+    def test_local_source_copy_keeps_uncommitted_source_but_not_config_or_git_credentials(self):
+        credential_url = "https://fixture-private:fixture-password@example.invalid/source.git"
+        subprocess.run(["git", "remote", "add", "origin", credential_url], cwd=self.source, check=True, timeout=5)
+        (self.source / "uncommitted.py").write_text("fixture source")
+        task_isolated = self.root / "isolated"
+        task_isolated.mkdir()
+        with patch.object(module, "ROOT", self.source):
+            with module.source_tree(task_isolated) as source:
+                self.assertNotEqual(source, self.source)
+                self.assertEqual((source / "uncommitted.py").read_text(), "fixture source")
+                self.assertFalse((source / ".env.local").exists())
+                self.assertFalse((source / "src/server/api/config.yaml").exists())
+                self.assertNotIn(credential_url, (source / ".git/config").read_text())
 
     def test_network_guard_fails_even_when_the_attempt_is_caught(self):
         guard = SOURCE / "offline-node.mjs"
@@ -208,16 +257,16 @@ class LocalVerificationContract(unittest.TestCase):
                     if failed:
                         raise subprocess.CalledProcessError(7, ["pytest", "fixture-primary"])
 
-                with patch.object(module, "source_tree", tree), patch.object(module.shutil, "which", return_value="fixture"), patch.object(module, "run", side_effect=run), patch.object(module, "business_tests", side_effect=business), patch.object(module, "local_env", return_value={}), redirect_stderr(stderr):
+                with patch.object(module, "source_tree", tree), patch.object(module.shutil, "which", return_value="fixture"), patch.object(module, "run", side_effect=run), patch.object(module, "business_tests", side_effect=business), patch.object(module, "selections", return_value=dict(business=True, hook=False, deploy=False, legacy=False, schema=False)), patch.object(module, "local_env", return_value={}), redirect_stderr(stderr):
                     if failed:
                         with self.assertRaises(subprocess.CalledProcessError) as original:
-                            module.verify("publish")
+                            module.verify("full")
                         self.assertEqual(original.exception.returncode, 7)
                         self.assertEqual(original.exception.cmd, ["pytest", "fixture-primary"])
                         self.assertIn("LOCAL_CI_CLEANUP_FAILED", stderr.getvalue())
                     else:
                         with self.assertRaisesRegex(ValueError, "LOCAL_CI_CLEANUP_FAILED"):
-                            module.verify("publish")
+                            module.verify("full")
 
     def test_reports_are_written_outside_clean_source_not_copied_back(self):
         commands = []
@@ -226,7 +275,7 @@ class LocalVerificationContract(unittest.TestCase):
             return "127.0.0.1:12345" if command[:2] == ["docker", "port"] else ""
         with patch.object(module, "ROOT", self.source):
             module.business_tests(step, lambda *_: None, self.source, self.source, "fixture-python",
-                                  {}, "fixture-report", "publish", module.time.monotonic() + 60)
+                                  {}, "fixture-report", False, module.time.monotonic() + 60)
         pytest = next(command for command in commands if "pytest" in command)
         for prefix in ("--junit-xml=", "--cov-report=xml:"):
             path = Path(next(argument[len(prefix):] for argument in pytest if argument.startswith(prefix)))

@@ -1,4 +1,4 @@
-"""本地与远端 Verify 共用入口；临时源码、独占数据库，无平台部署权限。"""
+"""本地业务验证；临时源码、独占数据库，无平台部署权限。"""
 import argparse
 from contextlib import contextmanager
 import hashlib
@@ -37,24 +37,37 @@ QUICK_TESTS = (
 
 
 def selections(mode, base=None):
-    groups = dict(hook=False, deploy=False, legacy=False, schema=False)
-    if mode == "publish":
+    groups = dict(business=False, hook=False, deploy=False, legacy=False, schema=False)
+    if mode == "quick":
         return groups
-    if mode == "full" or not base or base == "0" * 40:
+    if not base or base == "0" * 40:
         return dict.fromkeys(groups, True)
     if len(base) != 40 or any(c not in "0123456789abcdef" for c in base):
         raise ValueError("CI_BASE_INVALID")
     try:
+        if run(["git", "status", "--porcelain"], cwd=ROOT, capture=True, timeout=30):
+            return dict.fromkeys(groups, True)
+        run(["git", "merge-base", "--is-ancestor", base, "HEAD"], cwd=ROOT, capture=True, timeout=30)
         changed = run(["git", "diff", "--name-only", "-z", base, "HEAD"], cwd=ROOT, capture=True, timeout=30).split("\0")
     except subprocess.CalledProcessError:
         return dict.fromkeys(groups, True)
     for name in changed:
-        if name.startswith(("scripts/", ".githooks/", ".github/")):
-            groups = dict.fromkeys(groups, True)
+        if name.endswith((".md", ".mdx")):
+            continue
+        if name.startswith(("src/server/", "sdks/")):
+            groups["business"] = True
+        if name.startswith("src/client/memobase/") or name in ("setup.py", "requirements.txt"):
+            groups["business"] = groups["deploy"] = True
+        if name.startswith(("scripts/", ".githooks/")):
+            groups["hook"] = True
+        if name.startswith(".github/"):
+            groups["deploy"] = True
         if name.startswith("deploy/"):
             groups["deploy"] = True
         if name.startswith("deploy/cutover/"):
             groups["legacy"] = True
+        if name in ("deploy/schema-maintenance.py", "deploy/schema-fingerprint.sh"):
+            groups["schema"] = True
         if name.startswith(("src/server/api/migrations/", "src/server/api/memoia_server/models/",
                             "src/server/api/memoia_server/schema.py", "src/server/api/memoia_server/connectors.py")) or name.endswith(("alembic.ini", "test_schema_adoption.py", "test_db.py")):
             groups["schema"] = True
@@ -64,16 +77,11 @@ def selections(mode, base=None):
 
 
 @contextmanager
-def source_tree(checkout, temporary):
-    if checkout:
-        if run(["git", "status", "--porcelain"], cwd=ROOT, capture=True, timeout=30):
-            raise ValueError("CI_CHECKOUT_MUST_BE_CLEAN")
-        yield ROOT
-        return
+def source_tree(temporary):
     source = Path(temporary) / "source"
     source.mkdir()
     snapshot(ROOT, source)
-    # 仅本地保留隔离副本；共享对象但不复制真实仓库凭据。
+    # 共享对象，但不复制真实仓库凭据。
     run(["git", "clone", "--bare", "--shared", "--quiet", str(ROOT), str(source / ".git")], cwd=ROOT, env=local_env(), timeout=30)
     yield source
 
@@ -107,11 +115,18 @@ def snapshot(source, destination):
         shutil.copy2(origin, target)
 
 
-def verify(mode="full", base=None, checkout=False):
+def verify(mode="full", base=None):
     selected = selections(mode, base)
-    integration = mode != "quick" or selected["schema"]
+    business = mode == "quick" or selected["business"]
+    integration = mode == "full" and (business or selected["schema"])
     env = local_env()
-    commands = ["uv", "pnpm", "node"]
+    if not business and not any(selected.values()):
+        run(["git", "diff", "--check", base, "HEAD"], cwd=ROOT, env=env, timeout=30)
+        print("本地 CI：仅文档等非运行改动，Git 差异检查通过；未运行业务或工具验证。", flush=True)
+        return
+    commands = ["uv"]
+    if business or selected["deploy"]:
+        commands += ["pnpm", "node"]
     if selected["hook"] or selected["deploy"]:
         commands.append("shellcheck")
     if integration or selected["deploy"]:
@@ -138,18 +153,19 @@ def verify(mode="full", base=None, checkout=False):
         return step(["docker", "run", "--name", name, "--label", "jianify.local-ci=true", *arguments], cwd)
 
     try:
-        with tempfile.TemporaryDirectory(prefix="memoia-local-ci-") as temporary, source_tree(checkout, temporary) as source:
+        with tempfile.TemporaryDirectory(prefix="memoia-local-ci-") as temporary, source_tree(temporary) as source:
             env.update(NPM_CONFIG_USERCONFIG="/dev/null", NPM_CONFIG_GLOBALCONFIG="/dev/null",
                        UV_NO_CONFIG="true", PYTHON_DOTENV_DISABLED="1")
             api = source / "src/server/api"
             step(["uv", "sync", "--frozen", "--python", "3.12", "--project", str(api)], source)
             python = str(api / ".venv/bin/python")
             step(["uv", "lock", "--check", "--python", "3.12", "--project", str(api)], source)
-            step([python, "-c", "import memoia_server; print(memoia_server.__version__)"], api)
-            if any(not (api / name).is_file() for name in ("LICENSE", "NOTICE", "Dockerfile")):
-                raise ValueError("SERVER_PACKAGE_IDENTITY_MISSING")
-            if "memobase_server" in (api / "Dockerfile").read_text():
-                raise ValueError("SERVER_PACKAGE_IDENTITY_MISMATCH")
+            if business:
+                step([python, "-c", "import memoia_server; print(memoia_server.__version__)"], api)
+                if any(not (api / name).is_file() for name in ("LICENSE", "NOTICE", "Dockerfile")):
+                    raise ValueError("SERVER_PACKAGE_IDENTITY_MISSING")
+                if "memobase_server" in (api / "Dockerfile").read_text():
+                    raise ValueError("SERVER_PACKAGE_IDENTITY_MISMATCH")
             if selected["hook"]:
                 step(["shellcheck", str(source / ".githooks/pre-push")], source)
                 step([python, "-m", "unittest", "discover", "-s", "scripts/tests", "-v"], source)
@@ -170,25 +186,29 @@ def verify(mode="full", base=None, checkout=False):
                        MEMOBASE_LLM_BASE_URL="http://127.0.0.1:1/v1", MEMOBASE_EMBEDDING_BASE_URL="http://127.0.0.1:1/v1",
                        DATABASE_URL="postgresql://fixture:fixture@127.0.0.1:1/offline", REDIS_URL="redis://127.0.0.1:1",
                        ACCESS_TOKEN="secret", PROJECT_ID="memobase_dev")
-            # tiktoken 的公开词表属于依赖准备；测试进程随后禁止一切 socket 连接。
-            step([python, "-c", "import tiktoken; tiktoken.encoding_for_model('gpt-4o')"], api)
-            step([python, "export-openapi.py", str(Path(temporary) / "openapi-export.json")], api)
-            if (Path(temporary) / "openapi-export.json").read_bytes() != (api / "openapi-v2.json").read_bytes():
-                raise ValueError("SERVER_OPENAPI_STALE")
+            if business:
+                # tiktoken 的公开词表属于依赖准备；quick 测试进程随后禁止一切 socket 连接。
+                step([python, "-c", "import tiktoken; tiktoken.encoding_for_model('gpt-4o')"], api)
+                step([python, "export-openapi.py", str(Path(temporary) / "openapi-export.json")], api)
+                if (Path(temporary) / "openapi-export.json").read_bytes() != (api / "openapi-v2.json").read_bytes():
+                    raise ValueError("SERVER_OPENAPI_STALE")
             env["PYTHONPATH"] = str(source / "scripts")
             if mode == "quick":
                 step([python, "-m", "pytest", "-p", "offline_tests", *["tests/" + name for name in QUICK_TESTS], "-q"], api)
             if integration:
-                business_tests(step, container, source, api, python, env, suffix, mode, deadline)
+                business_tests(step, container, source, api, python, env, suffix, not business, deadline)
             sdk = source / "sdks/typescript"
-            step(["pnpm", "install", "--frozen-lockfile"], sdk)
-            step(["pnpm", "check:generated"], sdk)
+            if business or selected["deploy"]:
+                step(["pnpm", "install", "--frozen-lockfile"], sdk)
+                step(["pnpm", "check:generated"], sdk)
             if mode == "quick":
                 step(["pnpm", "build"], sdk)
                 step(["node", "--import", str(source / "scripts/offline-node.mjs"), "--test", "tests/client.test.mjs"], sdk)
-            else:
+            elif business:
                 step(["pnpm", "test"], sdk)
             if selected["deploy"]:
+                if not business:
+                    step(["pnpm", "build"], sdk)
                 step(["node", "--test", "deploy/tests/test_v2_sdk_probe.mjs"], source)
     finally:
         cleanup_errors = []
@@ -225,7 +245,7 @@ def deployment_fixtures(step, container, source, temporary, suffix):
               "python -m unittest discover -s /work/deploy/tests -p test_deploy.py -v"], source)
 
 
-def business_tests(step, container, source, api, python, env, suffix, mode, deadline):
+def business_tests(step, container, source, api, python, env, suffix, schema_only, deadline):
     pg, redis = "memoia-ci-pg-" + suffix, "memoia-ci-redis-" + suffix
     container(pg, ["-d", "-p", "127.0.0.1::5432", "-e", "POSTGRES_PASSWORD=fixture-only",
                   "-e", "POSTGRES_DB=memoia_ci", "pgvector/pgvector:pg17"], source)
@@ -251,7 +271,7 @@ def business_tests(step, container, source, api, python, env, suffix, mode, dead
     step([python, "-c", "from memoia_server.schema import check_schema; check_schema()"], api)
     reports = ROOT / ".local-ci-results" / suffix
     reports.mkdir(parents=True, exist_ok=True)
-    tests = ["tests/test_db.py", "tests/test_schema_adoption.py"] if mode == "quick" else ["tests/"]
+    tests = ["tests/test_db.py", "tests/test_schema_adoption.py"] if schema_only else ["tests/"]
     step([python, "-m", "pytest", f"--junit-xml={reports / 'test-results-3.12.xml'}",
           "--cov=memoia_server", f"--cov-report=xml:{reports / 'coverage-3.12.xml'}", *tests, "-v"], api)
 
@@ -264,11 +284,10 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, cancel)
     try:
         parser = argparse.ArgumentParser()
-        parser.add_argument("--mode", choices=("quick", "full", "publish", "pr"), default="full")
+        parser.add_argument("--mode", choices=("quick", "full"), default="full")
         parser.add_argument("--base")
-        parser.add_argument("--checkout", action="store_true")
         args = parser.parse_args()
-        verify(args.mode, args.base, args.checkout)
+        verify(args.mode, args.base)
     except (ValueError, OSError, subprocess.SubprocessError, KeyboardInterrupt) as error:
         print(str(error) or "LOCAL_CI_CANCELLED", file=sys.stderr)
         sys.exit(1)
