@@ -59,6 +59,13 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def validate_revision_constraints(ctx, **_):
+    # 同一事务连续升级时先验证延迟约束，避免待执行 trigger 阻挡下一版 ALTER TABLE。
+    # 不提前提交；恢复 deferred 语义，后续失败仍回滚整条升级链。
+    ctx.connection.exec_driver_sql("SET CONSTRAINTS ALL IMMEDIATE")
+    ctx.connection.exec_driver_sql("SET CONSTRAINTS ALL DEFERRED")
+
+
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode.
 
@@ -74,7 +81,8 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata,
-                          version_table_schema=connection.dialect.default_schema_name)
+                          version_table_schema=connection.dialect.default_schema_name,
+                          on_version_apply=validate_revision_constraints)
 
         with context.begin_transaction():
             context.run_migrations()

@@ -43,11 +43,17 @@ v1 create 和 v2 import/retry 均拒绝复建。墓碑不能靠降级、恢复�
 用独立 Compose project/network/config/data 恢复并验证，再停旧 API、复查在途状态、
 从候选镜像 upgrade head。不能在 import/startup 自动迁移，也不能用手工 schema.sha256
 跳过 schema 维护。具体受保护证据字段及验收见 deploy/README.md。
+开发阶段 Test 只有经操作员明确授权数据可丢弃时，才可使用 disposable-test 策略免备份／
+恢复；仍执行停机前后状态审计、候选身份校验及业务验收，不清空未知状态，不承诺可恢复。
 
 版本脚本是发布事实，不修改已执行迁移；必要变更新增前向版本。所有 downgrade 均拒绝
 删除业务表。schema 升级后旧 accepted API 仅归档；旧 snapshot 不覆盖产生新数据的当前
 数据库。需要退回时先明确 schema 兼容性或新增前向修复，在隔离环境验证恢复，不承诺
 通过切回旧 API 镜像即可撤销数据库升级。
+
+连续升级保留整链事务；Alembic 的 on_version_apply 在每版结束时执行延迟约束检查，
+再恢复 deferred 模式，避免旧数据检查留下 pending trigger 阻挡下一版 DDL。任何版本或
+约束失败均整体回滚。验收必须覆盖有旧事实数据的 0005→head，不只分别运行 0006／0007。
 
 模型声明用于下一版本的 review/autogenerate 辅助，不把自动生成 diff 直接当安全迁移；
 手工检查表达式索引、冻结 baseline、约束及数据兼容性后再运行真实 PostgreSQL 测试。

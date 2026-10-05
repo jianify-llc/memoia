@@ -81,7 +81,11 @@ class PublicationContract(unittest.TestCase):
         test = yaml.safe_load(WORKFLOW.read_text())
         online = yaml.safe_load(ONLINE_WORKFLOW.read_text())
         verify = yaml.safe_load(VERIFY_WORKFLOW.read_text())
-        self.assertEqual(test[True], {"workflow_dispatch": None})
+        self.assertEqual(set(test[True]), {"workflow_dispatch"})
+        selection = test[True]["workflow_dispatch"]["inputs"]["deploy"]
+        self.assertEqual(selection["type"], "boolean")
+        self.assertTrue(selection["default"])
+        self.assertIn("inputs.deploy", test["jobs"]["deploy-test"]["if"])
         guard = test["jobs"]["validate-test"]
         self.assertEqual(test["jobs"]["verify"]["needs"], "validate-test")
         self.assertIn('"$SELECTED_REF" == refs/heads/test', guard["steps"][-1]["run"])
@@ -134,7 +138,7 @@ class PublicationContract(unittest.TestCase):
     def test_deployment_gate_uses_repository_variable_before_environment_start(self):
         job = yaml.safe_load(WORKFLOW.read_text())["jobs"]["deploy-test"]
         guide = (WORKFLOW.parents[2] / "deploy/README.md").read_text()
-        self.assertEqual(job["if"], "${{ vars.MEMOIA_TEST_DEPLOY_ENABLED == 'true' }}")
+        self.assertEqual(job["if"], "${{ vars.MEMOIA_TEST_DEPLOY_ENABLED == 'true' && inputs.deploy }}")
         self.assertEqual(job["environment"]["name"], "test")
         self.assertIn("`MEMOIA_TEST_DEPLOY_ENABLED` 的设置入口", guide)
         self.assertIn("必须使用仓库级 Variable", guide)
