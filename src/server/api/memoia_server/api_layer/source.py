@@ -104,10 +104,16 @@ async def get_blob(user_id: UUID, blob_id: UUID, request: Request):
 
 
 @router.get("/users/{user_id}/sources/{source_id}", response_model=Source, operation_id="getSource")
-async def get_source(user_id: UUID, source_id: str, request: Request):
+async def get_source(user_id: UUID, source_id: str, request: Request,
+                     limit: int = Query(50, ge=1, le=100),
+                     message_offset: int = Query(0, ge=0),
+                     blob_offset: int = Query(0, ge=0),
+                     evidence_offset: int = Query(0, ge=0)):
     from ..controllers import source
     try:
-        return source.get_source(user_id, project_id(request), source_id=source_id)
+        return source.get_source(user_id, project_id(request), source_id=source_id, limit=limit,
+                                 message_offset=message_offset, blob_offset=blob_offset,
+                                 evidence_offset=evidence_offset)
     except source.SourceError as error:
         translate(error)
 

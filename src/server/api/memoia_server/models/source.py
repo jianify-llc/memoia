@@ -159,18 +159,24 @@ class Blob(StrictModel):
     created_at: datetime
 
 
-class Source(StrictModel):
+class SourceSummary(StrictModel):
     source_id: str
     legacy: bool
+    created_at: datetime
+
+
+class Source(SourceSummary):
     message_ids: list[str]
     deleted_message_ids: list[str]
-    created_at: datetime
     blobs: list[Blob]
     evidence: list[Evidence]
+    next_message_offset: int | None
+    next_blob_offset: int | None
+    next_evidence_offset: int | None
 
 
 class Sources(StrictModel):
-    sources: list[Source]
+    sources: list[SourceSummary]
 
 
 class Profile(StrictModel):

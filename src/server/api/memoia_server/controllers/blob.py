@@ -10,8 +10,9 @@ from ..connectors import Session
 async def insert_blob(user_id: str, project_id: str, blob: BlobData) -> Promise[IdData]:
     try:
         blob_parsed = blob.to_blob()
-    except pydantic.ValidationError as e:
-        return Promise.reject(CODE.BAD_REQUEST, f"Unable to parse blob: {e}")
+    except pydantic.ValidationError:
+        # ValidationError text includes input_value, which may be private chat text.
+        return Promise.reject(CODE.BAD_REQUEST, "Invalid blob data")
     with Session() as session:
         blob_db = GeneralBlob(
             blob_type=blob_parsed.type,

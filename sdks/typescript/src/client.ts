@@ -8,6 +8,7 @@ export type Operation = ResponseBody<paths["/api/v2/users/{user_id}/blobs"]["pos
 export type ForgottenUser = ResponseBody<paths["/api/v2/users/{user_id}"]["delete"]>;
 export type Operations = ResponseBody<paths["/api/v2/users/{user_id}/operations"]["get"]>;
 type SourcesQuery = NonNullable<paths["/api/v2/users/{user_id}/sources"]["get"]["parameters"]["query"]>;
+export type SourceQuery = NonNullable<paths["/api/v2/users/{user_id}/sources/{source_id}"]["get"]["parameters"]["query"]>;
 type HistoryQuery = NonNullable<paths["/api/v2/users/{user_id}/history"]["get"]["parameters"]["query"]>;
 type OperationsQuery = NonNullable<paths["/api/v2/users/{user_id}/operations"]["get"]["parameters"]["query"]>;
 export type BlobImport = RequestBody<paths["/api/v2/users/{user_id}/blobs"]["post"]>;
@@ -129,8 +130,13 @@ export class MemoiaClient {
     return this.request("GET", this.page(`${this.userPath(userId)}/sources`, options, validators.validateSourcesQuery), validators.validateSources, options);
   }
 
-  getSource(userId: string, sourceId: string, options?: RequestOptions): Promise<Source> {
-    return this.request("GET", `${this.userPath(userId)}/sources/${segment(sourceId)}`, validators.validateSource, options);
+  getSource(userId: string, sourceId: string, options?: RequestOptions, page?: SourceQuery): Promise<Source> {
+    if (!validators.validateSourceQuery(page ?? {})) throw new MemoiaError("INVALID_INPUT", null, false);
+    const query = new URLSearchParams(Object.entries(page ?? {}).filter(([, value]) => value !== undefined)
+      .map(([key, value]) => [key, String(value)]));
+    const path = `${this.userPath(userId)}/sources/${segment(sourceId)}`;
+    return this.request("GET", query.size ? `${path}?${query}` : path,
+      (value) => validators.validateSource(value) && (value as Source).source_id === sourceId, options);
   }
 
   getBlob(userId: string, blobId: string, options?: RequestOptions): Promise<Blob> {

@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { runProbe } from "../v2-sdk-probe.mjs";
 
 // These deterministic adapters test the acceptance tool, not Memoia or a model.
-async function fixture(mode = "complete", version = "0.3.0") {
+async function fixture(mode = "complete", version = "0.5.0") {
   const directory = await mkdtemp(join(tmpdir(), "memoia-v2-probe-"));
   const symbol = `memoia-probe-${randomUUID()}`;
   let sourceId = randomUUID();
@@ -40,6 +40,7 @@ async function fixture(mode = "complete", version = "0.3.0") {
   const blob = () => ({ blob_id: blobId, source_id: sourceId, status: phase === 3 ? "retracted" : "active",
     message_ids: ["name", "food"], event_ids: phase === 3 ? [] : [eventId], created_at: new Date().toISOString() });
   const source = () => ({ source_id: sourceId, blobs: [blob()], message_ids: ["name", "food"],
+    next_message_offset: null, next_blob_offset: null, next_evidence_offset: mode === "partial-source-page" ? 50 : null,
     deleted_message_ids: phase === 1 ? [] : phase === 2 ? ["name"] : ["name", "food"],
     evidence: phase === 1 ? [{ fact_id: nameId, support_groups: [["name"]] }, { fact_id: foodId, support_groups: [["food"]] }] :
       phase === 2 ? [{ fact_id: foodId, support_groups: [["food"]] }] : [] });
@@ -100,8 +101,8 @@ async function fixture(mode = "complete", version = "0.3.0") {
     async getOperation() { return imported; }
     async getBlob() { return blob(); }
     async getSource() { return source(); }
-    async listSources() { return { sources: [source(),
-      ...(mode === "replay-sources-grow" && counters.completedReplays ? [{ ...source(), source_id: extraId }] : [])] }; }
+    async listSources() { return { sources: [{ source_id: sourceId, legacy: false, created_at: new Date().toISOString() },
+      ...(mode === "replay-sources-grow" && counters.completedReplays ? [{ source_id: extraId, legacy: false, created_at: new Date().toISOString() }] : [])] }; }
     async getHistory() { return history(); }
     async search() { return { events: phase === 3 && mode !== "final-search-leak" ? [] : [{ source_id: sourceId }] }; }
     async deleteMessages(uid, sid, input) {
@@ -234,6 +235,14 @@ test("history exposing withdrawn evidence fails even when the mutation succeeded
   assert.equal(result.checks.cleanup, true);
   assert.equal(counters.deletes, 1);
   assert.equal(counters.forgets, 0);
+});
+
+test("a partial source page cannot prove complete replay or deletion", async () => {
+  const { result, counters } = await probe("partial-source-page");
+  assert.equal(result.success, false);
+  assert.equal(result.checks.source_evidence, false);
+  assert.equal(counters.completedReplays, 0);
+  assert.equal(counters.retracts, 0);
 });
 
 for (const mode of ["final-history-leak", "final-search-leak"]) {
@@ -471,7 +480,7 @@ test("CLI regular-file boundary survives process exit inside the first mutation"
   try {
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     await mkdir(join(directory, "dist"));
-    await writeFile(join(directory, "package.json"), JSON.stringify({ name: "@jianify/memoia", version: "0.3.0", type: "module" }));
+    await writeFile(join(directory, "package.json"), JSON.stringify({ name: "@jianify/memoia", version: "0.5.0", type: "module" }));
     await writeFile(join(directory, "dist/index.js"), `export class MemoiaError extends Error {}
       export class MemoiaClient {
         async getProfiles() { return { profiles: [] }; }

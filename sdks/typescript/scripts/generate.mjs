@@ -21,6 +21,7 @@ const targets = {
   validateMessageDeletion: ["delete", `${route}/sources/{source_id}/messages`, "request"],
   validateSources: ["get", `${route}/sources`, "response"],
   validateSource: ["get", `${route}/sources/{source_id}`, "response"],
+  validateSourceQuery: ["get", `${route}/sources/{source_id}`, "query"],
   validateProfiles: ["get", `${route}/profiles`, "response"],
   validateSearch: ["get", `${route}/search`, "response"],
   validateHistory: ["get", `${route}/history`, "response"],

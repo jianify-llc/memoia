@@ -10,6 +10,47 @@ const source = { idempotency_key: "luvel:batch:1", source_id: sourceId, messages
 const json = (body, status = 200) => Response.json(body, { status });
 const client = (fetch, options = {}) => new MemoiaClient({ baseUrl: "https://memoia.example", apiKey: "private-project-token", fetch, ...options });
 
+describe("bounded source pages", () => {
+  const detail = { source_id: "dialog-1", legacy: false, created_at: "2026-10-02T00:00:00Z",
+    message_ids: ["1"], deleted_message_ids: [], blobs: [], evidence: [],
+    next_message_offset: 2, next_blob_offset: null, next_evidence_offset: null };
+
+  it("lists summaries without loading historical collections", async () => {
+    const summary = { source_id: detail.source_id, legacy: detail.legacy, created_at: detail.created_at };
+    assert.deepEqual(await client(async () => json({ sources: [summary] })).listSources(user), { sources: [summary] });
+  });
+
+  it("keeps request options separate from independently selected page offsets", async () => {
+    let sent;
+    const api = client(async (url) => { sent = new URL(url); return json(detail); });
+    assert.deepEqual(await api.getSource(user, "dialog-1", { deadline: Date.now() + 5000 },
+      { limit: 2, message_offset: 10, evidence_offset: 4 }), detail);
+    assert.equal(sent.searchParams.get("limit"), "2");
+    assert.equal(sent.searchParams.get("message_offset"), "10");
+    assert.equal(sent.searchParams.get("evidence_offset"), "4");
+    assert.equal(sent.searchParams.has("deadline"), false);
+  });
+
+  it("does not mistake an old or wrong-source response for a complete page", async () => {
+    for (const broken of ["next_message_offset", "next_blob_offset", "next_evidence_offset"]) {
+      const value = { ...detail };
+      delete value[broken];
+      await assert.rejects(client(async () => json(value)).getSource(user, "dialog-1"),
+        (error) => error.code === "INVALID_RESPONSE");
+    }
+    await assert.rejects(client(async () => json({ ...detail, source_id: "other" })).getSource(user, "dialog-1"),
+      (error) => error.code === "INVALID_RESPONSE");
+  });
+
+  it("rejects invalid page arguments before fetching", async () => {
+    const api = client(async () => { assert.fail("invalid page must not reach fetch"); });
+    for (const page of [{ limit: 0 }, { limit: 101 }, { blob_offset: -1 }, { message_offset: 1.5 }]) {
+      assert.throws(() => api.getSource(user, "dialog-1", undefined, page),
+        (error) => error.code === "INVALID_INPUT");
+    }
+  });
+});
+
 describe("event time evidence contract", () => {
   it("sends source timezone and keeps it distinct from event dates", async () => {
     let posted;

@@ -178,7 +178,9 @@ async def test_out_of_scope_model_profile_cannot_commit_new_evidence(source_user
         await source.import_source(source_user, "__root__", request())
     assert error.value.code == "invalid_model_output"
     groups = source.list_sources(source_user, "__root__")
-    assert len(groups) == 1 and not groups[0].evidence and groups[0].blobs[0].status == "failed"
+    assert len(groups) == 1
+    detail = source.get_source(source_user, "__root__", source_id=groups[0].source_id)
+    assert not detail.evidence and detail.blobs[0].status == "failed"
     assert not (await profile.get_user_profiles(source_user, "__root__")).data().profiles
 
 

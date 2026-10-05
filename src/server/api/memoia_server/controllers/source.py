@@ -15,7 +15,7 @@ from ..connectors import Session
 from ..env import CONFIG, ProfileConfig
 from ..models.database import Project, User, UserProfile, UserEvent, UserEventGist, DEFAULT_PROJECT_ID
 from ..models.source import (
-    StrictModel, ImportSource, DeleteMessages, Operation, Source, Evidence, Blob,
+    StrictModel, ImportSource, DeleteMessages, Operation, Source, SourceSummary, Evidence, Blob,
     memory_sources as sources, memory_operations as operations,
     memory_blobs as blobs, memory_messages as messages,
     memory_facts as facts, user_memory_states as states,
@@ -794,54 +794,74 @@ async def retry_operation(user_id, project_id, operation_id):
     }), resume_budget=budget_failure)
 
 
-def _blob(session, row):
-    operation_status = session.scalar(select(operations.c.status).where(operations.c.blob_id == row["id"],
-        operations.c.kind == "import"))
+def _blob(row):
+    operation_status = row["operation_status"]
     status = operation_status if operation_status in {"processing", "failed"} else row["status"]
     return Blob(blob_id=row["id"], source_id=row["source_id"], status=status,
         message_ids=row["message_ids"], event_ids=[row["event_id"]] if row["event_id"] and not row["event_deleted"]
         and status not in {"processing", "failed", "rebuilding"} else [], created_at=row["created_at"])
 
 
+def _blob_query(user_id, project_id):
+    # The unique canonical import/Blob constraint makes this a one-row join.
+    return select(blobs, operations.c.status.label("operation_status")).outerjoin(
+        operations, and_(operations.c.blob_id == blobs.c.id, operations.c.kind == "import")
+    ).where(_scope(blobs, user_id, project_id))
+
+
 def get_blob(user_id, project_id, blob_id):
     with Session() as session:
-        row = session.execute(select(blobs).where(_scope(blobs, user_id, project_id),
-                                                 blobs.c.id == blob_id)).mappings().one_or_none()
+        row = session.execute(_blob_query(user_id, project_id).where(
+            blobs.c.id == blob_id)).mappings().one_or_none()
         if row is None:
             raise SourceError("blob_not_found", "Blob not found", 404)
-        return _blob(session, row)
+        return _blob(row)
 
 
-def _source(session, row):
+def _source(session, row, limit, message_offset, blob_offset, evidence_offset):
     uid, pid, sid = row["user_id"], row["project_id"], row["source_id"]
-    member_messages = _message_rows(session, uid, pid, sid)
-    batches = session.execute(select(blobs).where(_scope(blobs, uid, pid), blobs.c.source_id == sid)
-                              .order_by(blobs.c.created_at, blobs.c.id)).mappings().all()
+    member_messages = session.execute(select(messages).where(_scope(messages, uid, pid),
+        messages.c.source_id == sid).order_by(messages.c.message_id)
+        .limit(limit + 1).offset(message_offset)).mappings().all()
+    batches = session.execute(_blob_query(uid, pid).where(blobs.c.source_id == sid)
+        .order_by(blobs.c.created_at, blobs.c.id).limit(limit + 1).offset(blob_offset)).mappings().all()
     fact_rows = session.execute(select(facts).join(blobs, facts.c.blob_id == blobs.c.id).where(
-        _scope(facts, uid, pid), blobs.c.source_id == sid).order_by(facts.c.occurred_at, facts.c.id)).mappings().all()
+        _scope(facts, uid, pid), blobs.c.source_id == sid).order_by(facts.c.occurred_at, facts.c.id)
+        .limit(limit + 1).offset(evidence_offset)).mappings().all()
+    # Evidence observations must not be restricted to the independently paged
+    # message list, nor require reading every historical message in this Source.
+    support_ids = {mid for f in fact_rows[:limit] for group in f["support_groups"] for mid in group}
+    observations = session.execute(select(messages).where(_scope(messages, uid, pid),
+        messages.c.source_id == sid, messages.c.message_id.in_(support_ids))).mappings().all() if support_ids else []
     return Source(source_id=sid, legacy=row["legacy"],
-        message_ids=sorted(m["message_id"] for m in member_messages),
-        deleted_message_ids=sorted(m["message_id"] for m in member_messages if m["deleted"]),
-        created_at=row["created_at"], blobs=[_blob(session, b) for b in batches],
+        message_ids=[m["message_id"] for m in member_messages[:limit]],
+        deleted_message_ids=[m["message_id"] for m in member_messages[:limit] if m["deleted"]],
+        created_at=row["created_at"], blobs=[_blob(b) for b in batches[:limit]],
+        next_message_offset=message_offset + limit if len(member_messages) > limit else None,
+        next_blob_offset=blob_offset + limit if len(batches) > limit else None,
+        next_evidence_offset=evidence_offset + limit if len(fact_rows) > limit else None,
         evidence=[Evidence(fact_id=f["id"], blob_id=f["blob_id"], content=f["content"], topic=f["topic"],
                            sub_topic=f["sub_topic"], support_groups=f["support_groups"], event_time=f["event_time"],
-                           source_messages=source_observations(f["support_groups"], member_messages)) for f in fact_rows])
+                           source_messages=source_observations(f["support_groups"], observations)) for f in fact_rows[:limit]])
 
 
-def get_source(user_id, project_id, *, source_id):
+def get_source(user_id, project_id, *, source_id, limit=50, message_offset=0, blob_offset=0, evidence_offset=0):
+    if not 1 <= limit <= 100 or min(message_offset, blob_offset, evidence_offset) < 0:
+        raise SourceError("invalid_pagination", "Invalid source page", 400)
     with Session() as session:
         row = session.execute(select(sources).where(_scope(sources, user_id, project_id),
                                                     sources.c.source_id == source_id)).mappings().one_or_none()
         if row is None:
             raise SourceError("source_not_found", "Source not found", 404)
-        return _source(session, row)
+        return _source(session, row, limit, message_offset, blob_offset, evidence_offset)
 
 
 def list_sources(user_id, project_id, limit=50, offset=0):
     with Session() as session:
         rows = session.execute(select(sources).where(_scope(sources, user_id, project_id))
                                .order_by(sources.c.created_at, sources.c.source_id).limit(limit).offset(offset)).mappings().all()
-        return [_source(session, row) for row in rows]
+        return [SourceSummary(source_id=row["source_id"], legacy=row["legacy"], created_at=row["created_at"])
+                for row in rows]
 
 
 async def delete_messages(user_id, project_id, source_id, request: DeleteMessages, *, resume_budget=False):

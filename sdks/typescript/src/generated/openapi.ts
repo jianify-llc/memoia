@@ -644,19 +644,25 @@ export interface components {
             source_id: string;
             /** Legacy */
             legacy: boolean;
-            /** Message Ids */
-            message_ids: string[];
-            /** Deleted Message Ids */
-            deleted_message_ids: string[];
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
+            /** Message Ids */
+            message_ids: string[];
+            /** Deleted Message Ids */
+            deleted_message_ids: string[];
             /** Blobs */
             blobs: components["schemas"]["Blob"][];
             /** Evidence */
             evidence: components["schemas"]["Evidence"][];
+            /** Next Message Offset */
+            next_message_offset: number | null;
+            /** Next Blob Offset */
+            next_blob_offset: number | null;
+            /** Next Evidence Offset */
+            next_evidence_offset: number | null;
         };
         /** SourceMessage */
         SourceMessage: {
@@ -696,10 +702,22 @@ export interface components {
             /** Profile Ids */
             profile_ids: string[];
         };
+        /** SourceSummary */
+        SourceSummary: {
+            /** Source Id */
+            source_id: string;
+            /** Legacy */
+            legacy: boolean;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
         /** Sources */
         Sources: {
             /** Sources */
-            sources: components["schemas"]["Source"][];
+            sources: components["schemas"]["SourceSummary"][];
         };
         /** TimeEvidence */
         TimeEvidence: {
@@ -990,7 +1008,12 @@ export interface operations {
     };
     getSource: {
         parameters: {
-            query?: never;
+            query?: {
+                limit?: number;
+                message_offset?: number;
+                blob_offset?: number;
+                evidence_offset?: number;
+            };
             header?: never;
             path: {
                 user_id: string;

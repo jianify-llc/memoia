@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Memoia V2 API",
-    "version": "0.4.0"
+    "version": "0.5.0"
   },
   "paths": {
     "/api/v2/users/{user_id}": {
@@ -469,6 +469,51 @@
             "schema": {
               "type": "string",
               "title": "Source Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "message_offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Message Offset"
+            }
+          },
+          {
+            "name": "blob_offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Blob Offset"
+            }
+          },
+          {
+            "name": "evidence_offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Evidence Offset"
             }
           }
         ],
@@ -2025,6 +2070,11 @@
             "type": "boolean",
             "title": "Legacy"
           },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
           "message_ids": {
             "items": {
               "type": "string"
@@ -2039,11 +2089,6 @@
             "type": "array",
             "title": "Deleted Message Ids"
           },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Created At"
-          },
           "blobs": {
             "items": {
               "$ref": "#/components/schemas/Blob"
@@ -2057,6 +2102,39 @@
             },
             "type": "array",
             "title": "Evidence"
+          },
+          "next_message_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Message Offset"
+          },
+          "next_blob_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Blob Offset"
+          },
+          "next_evidence_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Evidence Offset"
           }
         },
         "additionalProperties": false,
@@ -2064,11 +2142,14 @@
         "required": [
           "source_id",
           "legacy",
+          "created_at",
           "message_ids",
           "deleted_message_ids",
-          "created_at",
           "blobs",
-          "evidence"
+          "evidence",
+          "next_message_offset",
+          "next_blob_offset",
+          "next_evidence_offset"
         ],
         "title": "Source"
       },
@@ -2182,11 +2263,36 @@
         ],
         "title": "SourceResult"
       },
+      "SourceSummary": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "legacy": {
+            "type": "boolean",
+            "title": "Legacy"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_id",
+          "legacy",
+          "created_at"
+        ],
+        "title": "SourceSummary"
+      },
       "Sources": {
         "properties": {
           "sources": {
             "items": {
-              "$ref": "#/components/schemas/Source"
+              "$ref": "#/components/schemas/SourceSummary"
             },
             "type": "array",
             "title": "Sources"

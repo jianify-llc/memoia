@@ -1,6 +1,6 @@
 # Memoia TypeScript SDK v2
 
-`@jianify/memoia@0.3.0` supports Node.js and Cloudflare Workers. Protocol types and runtime validators are generated from `src/server/api/openapi-v2.json`. This v2 revision changes Source from a processing batch to a caller-owned grouping; upgrade callers together with the server. The upstream v1 SDK and its event/user deletion contracts are unchanged.
+`@jianify/memoia@0.5.0` supports Node.js and Cloudflare Workers. Protocol types and runtime validators are generated from `src/server/api/openapi-v2.json`. This v2 revision changes Source from a processing batch to a caller-owned grouping; upgrade callers together with the server. The upstream v1 SDK and its event/user deletion contracts are unchanged.
 
 ```ts
 import { MemoiaClient } from "@jianify/memoia";
@@ -42,6 +42,14 @@ Requests use `redirect: "manual"`, which the Worker runtime supports, and reject
 `listSources()`, `listOperations()`, and `getHistory()` accept server-defined `limit`/`offset` pagination together with transport options. Operation listings allow an Inspector refresh to recover accepted work without storing a second browser session. History contains actual profile revisions and added/removed diffs; it excludes withdrawn evidence and is not a restore API. `retryOperation()` resumes the server's persisted request without resending message bodies.
 
 Administrative methods are `listProjects`, `createProject`, `updateProject`, `listKeys`, `createKey`, `revokeKey`, and the explicit `rotateLegacyToken`. Project/key pagination follows server OpenAPI. Authorization remains on the server: root creates/suspends projects; project administrators manage only their own keys. Key creation returns its token once, revocation returns no body, and lost administrative mutation acknowledgements are not silently replayed. Rotating a legacy token immediately invalidates clients using the prior token.
+
+## Bounded provenance reads (0.5)
+
+`listSources()` returns summaries only (`source_id`, `legacy`, `created_at`). Detail reads use `getSource(userId, sourceId, requestOptions?, page?)`; the third argument remains transport options. `page` accepts `limit` (default 50, maximum 100), `message_offset`, `blob_offset`, and `evidence_offset` (default 0).
+
+Each detail collection has its own required nullable `next_*_offset`. Only `null` means that collection is exhausted; missing pagination fields are an invalid response, not proof of completion. Message pages include active and deleted IDs, with `deleted_message_ids` as a subset of that same page. Evidence retains its supporting message observations even when they lie outside the message page. The SDK never traverses a whole source automatically.
+
+Ordering is message ID, Blob `(created_at, id)`, and evidence `(occurred_at, id)`. Offset pagination is bounded per response, not a snapshot or an O(1) deep-page guarantee; refresh after concurrent changes. This read-contract change requires coordinated server/consumer rollout but no new schema revision.
 
 ## Build and local consumption
 
