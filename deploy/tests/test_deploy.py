@@ -464,6 +464,15 @@ else:
         self.assertFalse((self.state / "pending-deploy").exists())
         self.assertFalse(any("stop" in a["args"] for a in self.actions()))
 
+    def test_unknown_memory_schema_blocks_maintenance_before_stop(self):
+        evidence = self.schema_evidence()
+        self.env["FIXTURE_MEMORY_LAYOUT"] = "memory_operations.status"
+        result = self.deploy("migrate-schema", evidence=evidence)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unknown memory schema", result.stderr)
+        self.assertFalse((self.state / "pending-maintenance").exists())
+        self.assertFalse(any("stop" in a["args"] for a in self.actions()))
+
     def test_new_unfinished_work_after_stop_blocks_migration_and_candidate(self):
         evidence = self.schema_evidence()
         self.env["FIXTURE_ACTIVE_BUFFER_AFTER_STOP"] = "1"
