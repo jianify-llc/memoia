@@ -385,6 +385,46 @@ else:
         self.assertFalse((self.state / "pending-deploy").exists())
         self.assertFalse(any("stop" in a["args"] for a in self.actions()))
 
+    def disposable_evidence(self, **changes):
+        evidence = self.state / "schema-preflight.json"
+        evidence.write_text(json.dumps({"image": IMAGE, "source_sha": SHA, "run_id": "200",
+                                       "data_policy": "disposable-test", "unknown_results_resolved": True,
+                                       **changes}))
+        evidence.chmod(0o600)
+        self.env["FIXTURE_SCHEMA"] = "a" * 64
+        return evidence
+
+    def test_disposable_test_migration_records_no_backup_and_requires_business_acceptance(self):
+        result = self.deploy("migrate-schema", evidence=self.disposable_evidence())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pending = json.loads((self.state / "pending-maintenance").read_text())
+        self.assertEqual(pending["data_policy"], "disposable-test")
+        self.assertIsNone(pending["backup_sha256"])
+        self.assertFalse((self.state / "backups").exists())
+        self.assertNotEqual(self.deploy("finalize").returncode, 0)
+        self.assertEqual(self.deploy("finalize-schema", evidence=self.schema_business_evidence()).returncode, 0)
+        self.assert_configs_unchanged()
+
+    def test_disposable_policy_cannot_bypass_identity_unknown_outcomes_or_quiescence(self):
+        for fields in ({"source_sha": "a" * 40}, {"unknown_results_resolved": False},
+                       {"data_policy": "skip-backup"}):
+            with self.subTest(fields=fields):
+                self.assertNotEqual(self.deploy("migrate-schema", evidence=self.disposable_evidence(**fields)).returncode, 0)
+        self.env.update(FIXTURE_V2_TABLES="1", FIXTURE_V2_UNFINISHED="1")
+        self.assertNotEqual(self.deploy("migrate-schema", evidence=self.disposable_evidence()).returncode, 0)
+        self.assertFalse(any("stop" in a["args"] for a in self.actions()))
+
+    def test_disposable_policy_still_blocks_unfinished_work_after_stop(self):
+        self.env["FIXTURE_ACTIVE_BUFFER_AFTER_STOP"] = "1"
+        self.assertNotEqual(self.deploy("migrate-schema", evidence=self.disposable_evidence()).returncode, 0)
+        self.assertTrue((self.state / "pending-maintenance").exists())
+        self.assertFalse(any("run" in a["args"] or "up" in a["args"] for a in self.actions()))
+
+    def test_disposable_policy_rejects_online(self):
+        self.env["FIXTURE_ENV"] = "online"
+        self.assertNotEqual(self.deploy("migrate-schema", evidence=self.disposable_evidence()).returncode, 0)
+        self.assertEqual(self.actions(), [])
+
     def test_schema_maintenance_success_archives_old_schema_and_only_updates_api(self):
         preflight = self.schema_evidence()
         (self.state / "previous-accepted").write_text("older-accepted-fixture")

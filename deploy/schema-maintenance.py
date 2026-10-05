@@ -26,9 +26,23 @@ def identity(document, image, sha, run_id):
 def preflight(root, image, sha, run_id, evidence_path):
     document = load(evidence_path)
     identity(document, image, sha, run_id)
+    policy = document.get("data_policy", "backup-required")
+    if policy not in ("backup-required", "disposable-test"):
+        raise RuntimeError("Unknown schema maintenance data policy")
+    state = root / ".deploy"
+    if policy == "disposable-test":
+        # 开发 Test 的显式不可恢复授权，不伪造备份；停机后的审计仍必须通过。
+        config = json.loads(run(compose(root, image) + ["config", "--format", "json"]))
+        if (config["name"] != "memoia-test"
+                or config["services"]["memoia"]["labels"].get("io.jianify.environment") != "test"):
+            raise RuntimeError("Disposable data policy is Test-only")
+        if document.get("unknown_results_resolved") is not True:
+            raise RuntimeError("Unknown outcomes must be resolved before migration")
+        return {"image": image, "source_sha": sha, "run_id": run_id, "mode": "migrate-schema",
+                "data_policy": policy, "evidence_sha256": digest(evidence_path),
+                "backup_sha256": None, "old_schema": (state / "schema.sha256").read_text().strip()}
     if document.get("writers_paused") is not True or document.get("unknown_results_resolved") is not True:
         raise RuntimeError("Operator must confirm paused writers and resolved unknown outcomes")
-    state = root / ".deploy"
     backup = Path(document["backup_directory"])
     restore = Path(document["restore_directory"])
     if backup.is_symlink() or backup.resolve().parent != (state / "backups").resolve():
@@ -67,6 +81,7 @@ def preflight(root, image, sha, run_id, evidence_path):
             or not connections.get("api_container_id")):
         raise RuntimeError("Isolated restore was not verified for this paired backup")
     return {"image": image, "source_sha": sha, "run_id": run_id, "mode": "migrate-schema",
+            "data_policy": policy,
             "evidence_sha256": digest(evidence_path), "backup_sha256": digest(backup / "backup.json"),
             "old_schema": manifest["schema"]}
 

@@ -3,6 +3,11 @@ name: Memoia · Test
 
 on:
   workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy the candidate (disable for explicit schema maintenance)
+        type: boolean
+        default: true
 
 env:
   REGISTRY: ghcr.io
@@ -128,7 +133,7 @@ jobs:
             manifest.json
 
   deploy-test:
-    if: ${{ vars.MEMOIA_TEST_DEPLOY_ENABLED == 'true' }}
+    if: ${{ vars.MEMOIA_TEST_DEPLOY_ENABLED == 'true' && inputs.deploy }}
     needs: publish-test
     runs-on: ubuntu-latest
     timeout-minutes: 30

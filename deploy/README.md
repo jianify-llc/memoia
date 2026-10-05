@@ -142,6 +142,8 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 
 这两项人工确认不能替代脚本前后两次的状态审计、备份校验和恢复证明。`BUSINESS_JSON` 使用相同 image/source_sha/run_id，附 `checks` 对象，键为 `authentication`、`source_replay`、`retract`、`profile_history`、`model`、`embedding`，各项只有真实通过才能为 true；另附非空 `evidence_files` 数组，每项为 `.deploy` 下 root:root 0600 证据文件的 `path` 和实际 `sha256`。模型 stub／本地测试不能填作真实调用通过。
 
+开发阶段 Test 数据明确可丢弃、且操作员单独授权不可恢复迁移时，`PREFLIGHT_JSON` 可显式使用 `data_policy: "disposable-test"`，省略备份／恢复目录和外部停写确认；身份与 `unknown_results_resolved: true` 仍必填。该策略不创建备份，不承诺恢复，记录 `backup_sha256: null`；仅接受 `memoia-test`／test 配置，仍正常停止 API、前后审计未完成处理、保留失败诊断及执行真实业务验收。不清空旧任务或未知结果。默认仍为 `backup-required`，不能自动判断数据不重要或将此例外用于 Online。
+
 迁移失败保留 pending、旧指纹和诊断，不自动清标记重入或启动可能不兼容的旧 API。成功后旧 accepted/schema 进入 `.deploy/schema-archives/RUN_ID`，不再作为普通 restore-api 的恢复目标；run 高水位不下降。已产生需保留的新数据时不能用旧快照覆盖当前库。需要特殊恢复时先确认数据库实际 revision 和兼容性，交付前向修复或隔离恢复方案。
 
 ## GitHub Actions
@@ -163,6 +165,8 @@ test Environment 配置：
 - 公网 SSH 端口必须在 Lightsail IPv4/IPv6 规则和主机防火墙中允许 runner 到达；不能只放行个人电脑 IP，也不关闭公网 SSH。若使用域名，它必须直接解析到服务器，不能使用 Cloudflare HTTP 代理或仍指向 Tunnel 的 SSH hostname。普通 GitHub 托管 runner 没有此项目专用的固定出口地址，接受公网入口风险并维护密钥、sshd 登录策略和系统安全更新；地址范围及允许列表边界见 [GitHub 官方说明](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#ip-addresses)。
 
 Actions 只上传脚本到 .deploy/candidates，不覆盖 Compose/.env/YAML。sudo -n 执行，公网 smoke 成功再 finalize 和写成功 Deployment。SSH 使用严格 host key 校验、专用 identity、连接超时/保活，不读取 runner 的 SSH 配置或启用代理；成功与失败退出均清理临时私钥/known_hosts。仍须使用专用部署密钥实际验证非交互 SSH + sudo，并完成远端 Actions 验收；人工 ubuntu + PEM 直连不能代替它。
+
+需要显式 schema 维护时，手动 Test 工作流选择 `deploy=false`：仍完成 Verify、镜像发布、源码／架构／匿名拉取校验及候选记录，但不访问部署 Environment、不调用普通 prepare/finalize，也不标记成功 Deployment。随后使用同一 SHA／run／digest 的候选走上述维护入口；缺省 `deploy=true` 仍为普通部署。
 
 日常 smoke 只验收基础部署：健康、Bearer 正反例及探针用户创建/读取/删除。Deployment 状态与 Actions summary 明确记录此范围，不代表完整记忆业务通过。首次部署、修改记忆处理或模型/embedding 配置时，使用已有 verify-sdk.py 工具单独完成核心闭环并记录候选 digest；不在每次普通发布中自动运行全套真实模型探针，也不新增通用排空机制。
 

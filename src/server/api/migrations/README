@@ -43,6 +43,8 @@ v1 create 和 v2 import/retry 均拒绝复建。墓碑不能靠降级、恢复�
 用独立 Compose project/network/config/data 恢复并验证，再停旧 API、复查在途状态、
 从候选镜像 upgrade head。不能在 import/startup 自动迁移，也不能用手工 schema.sha256
 跳过 schema 维护。具体受保护证据字段及验收见 deploy/README.md。
+开发阶段 Test 只有经操作员明确授权数据可丢弃时，才可使用 disposable-test 策略免备份／
+恢复；仍执行停机前后状态审计、候选身份校验及业务验收，不清空未知状态，不承诺可恢复。
 
 版本脚本是发布事实，不修改已执行迁移；必要变更新增前向版本。所有 downgrade 均拒绝
 删除业务表。schema 升级后旧 accepted API 仅归档；旧 snapshot 不覆盖产生新数据的当前
