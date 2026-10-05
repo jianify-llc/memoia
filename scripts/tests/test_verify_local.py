@@ -92,6 +92,47 @@ class LocalVerificationContract(unittest.TestCase):
                 module.verify("quick", "a" * 40)
             self.assertFalse(any(call.args[0][0] == "docker" for call in run.call_args_list))
 
+    def test_quick_keeps_source_and_temporal_offline_regressions_for_business_diffs(self):
+        api = self.source / "src/server/api"
+        for name in ("LICENSE", "NOTICE", "Dockerfile", "openapi-v2.json"):
+            (api / name).write_text("")
+
+        @contextmanager
+        def tree(*_):
+            yield self.source
+
+        temporal_tests = (
+            "test_calendar_precision_and_unknown_are_not_invented_dates",
+            "test_query_time_is_explicit_soft_evidence_and_unknown_stays_unknown",
+            "test_render_retains_precision_raw_expression_and_labels_recording_time",
+            "test_real_structured_validation_rejects_missing_or_invalid_time_without_echoing_content",
+            "test_extraction_anchors_each_message_in_its_recorded_zone_and_rejects_fake_quote",
+        )
+        for changed in ("temporal.py", "source_quality.py", "controllers/source.py"):
+            with self.subTest(changed=changed):
+                commands = []
+
+                def run(command, **kwargs):
+                    commands.append(command)
+                    if command[:2] == ["git", "diff"]:
+                        return "src/server/api/memoia_server/" + changed + "\0"
+                    if len(command) > 1 and command[1] == "export-openapi.py":
+                        Path(command[2]).write_text("")
+                    return ""
+
+                with patch.object(module, "source_tree", tree), patch.object(module.shutil, "which", return_value="fixture"), patch.object(module, "run", side_effect=run), patch.object(module, "business_tests") as integration, patch.object(module, "local_env", return_value={}):
+                    module.verify("quick", "a" * 40)
+                integration.assert_not_called()
+                self.assertFalse(any(command[0] == "docker" for command in commands))
+                pytest = next(command for command in commands if "pytest" in command)
+                self.assertIn("offline_tests", pytest)
+                self.assertIn("tests/test_source_quality.py", pytest)
+                for name in temporal_tests:
+                    self.assertIn("tests/test_temporal_evidence.py::" + name, pytest)
+                self.assertNotIn("tests/test_temporal_evidence.py", pytest)
+                nodes = [item for item in pytest if item.startswith("tests/")]
+                self.assertEqual(len(nodes), len(set(nodes)))
+
     def test_tool_checks_do_not_inherit_business_fixture_connection_settings(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)

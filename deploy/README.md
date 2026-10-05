@@ -29,6 +29,8 @@ gh workflow run deploy-test.yml --ref test --repo jianify-llc/memoia
 
 `push` 入口取得远端 Test 精确 SHA 后调用 quick；普通业务 diff 不要求 Docker。无可靠 base 的 quick 会扩大检查，不能当成纯离线检查。依赖为 Python 3、uv/Python 3.12、Node、pnpm 10.12.4；工具/集成模式按需要求 ShellCheck、curl、Docker。依赖下载和公开词表准备不属于离线测试。
 
+quick 每次固定运行 `scripts/verify_local.py` 的离线名单，包含来源提取/证据质量的纯计算与 MockTransport 回归，以及时间解析、渲染、校验和时区锚定回归；不按业务文件差异跳过。`test_temporal_evidence.py` 同时包含数据库测试，因此只列入其中五个离线测试节点；存储、检索和撤回等集成行为仍由 full／publish／pr 验证。新增有价值的离线回归时同步维护此名单，并在网络禁令下验证。
+
 本地使用排除业务 `.env`、真实 `config.yaml` 的临时源码；云端 `--checkout` 要求干净 checkout，直接验证候选，不再复制源码。Git 历史提前获取，checkout 不保留凭据；业务子进程使用环境白名单，不继承平台/部署密钥。部署夹具与虚构业务连接配置分层，数据库只用本批独占 PostgreSQL/Redis 随机回环端口。JUnit/覆盖率写入忽略的 `.local-ci-results/<批次>/`，不是检查缓存。部署夹具使用官方 SHA-256 校验的 jq 1.8.1，容器无网络；依赖下载仅保留无认证代理。总预算 20 分钟；只清理本批资源，失败/超时/取消/清理异常均不得报告通过。
 
 Test 长检查先于 Git 连接，hook 按目标 ref 验证本次提交和远端基线；源码／基线改变即重新检查。直接 Test push、force push、删除 Test、脏树或手工复用内部证明均不允许。安装入口遇到已有 hook 管理器停止，不覆盖。仓库文件存在不代表 hook 已安装，也不代表默认分支的手动 workflow 已注册；这些须在合入后核对，不以创建一个 Actions run 验证普通触发规则。
