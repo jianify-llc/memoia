@@ -18,7 +18,7 @@ async function fixture(mode = "complete", version = "0.7.0") {
   const extraId = randomUUID();
   const lateSourceId = randomUUID(), lateOperationId = randomUUID(), lateEventId = randomUUID(), lateProfileId = randomUUID();
   const counters = { imports: 0, retracts: 0, deletes: 0, keyReads: 0, calls: 0, completedReplays: 0,
-    forgets: 0, lateImports: 0 };
+    forgets: 0, lateImports: 0, sourceReads: 0 };
   let phase = 0, created = false, lastKey, userId, acceptedBody, completed = false;
   class MemoiaError extends Error {
     constructor(code, status, retryable, outcome = "rejected") {
@@ -42,7 +42,8 @@ async function fixture(mode = "complete", version = "0.7.0") {
   const source = () => ({ source_id: sourceId, blobs: [blob()], message_ids: ["name", "food"],
     deleted_message_ids: phase === 1 ? [] : phase === 2 ? ["name"] : ["name", "food"],
     evidence: phase === 1 ? [{ fact_id: nameId, support_groups: [["name"]] }, { fact_id: foodId, support_groups: [["food"]] }] :
-      phase === 2 ? [{ fact_id: foodId, support_groups: [["food"]] }] : [] });
+      phase === 2 ? [{ fact_id: foodId, support_groups: [["food"]] }] : [],
+    next_message_offset: null, next_blob_offset: null, next_evidence_offset: null });
   const MemoiaClient = class {
     constructor(options) { assert.equal(options.maxAttempts, 1); }
     async getProfiles() { return { profiles: phase === 1 ? [profile(nameId, "Renata Calder"), profile(foodId, "lemon risotto"),
@@ -100,9 +101,17 @@ async function fixture(mode = "complete", version = "0.7.0") {
     async getOperation() { return imported; }
     async getBlob() { return blob(); }
     async getEvents() { return { events: [{ id: eventId }, ...(mode === "replay-events-grow" && counters.completedReplays ? [{ id: extraId }] : [])] }; }
-    async getSource() { return source(); }
-    async listSources() { return { sources: [source(),
-      ...(mode === "replay-sources-grow" && counters.completedReplays ? [{ ...source(), source_id: extraId }] : [])] }; }
+    async getSource() {
+      counters.sourceReads++;
+      const result = source();
+      if (mode.startsWith("incomplete-source-")) result[mode.slice("incomplete-source-".length)] = 100;
+      return result;
+    }
+    async listSources() {
+      const summary = { source_id: sourceId, legacy: false, created_at: new Date().toISOString() };
+      return { sources: [summary,
+        ...(mode === "replay-sources-grow" && counters.completedReplays ? [{ ...summary, source_id: extraId }] : [])] };
+    }
     async getHistory() { return history(); }
     async search() { return { events: phase === 3 && mode !== "final-search-leak" ? [] : [{ source_id: sourceId }] }; }
     async deleteMessages(uid, sid, input) {
@@ -162,6 +171,16 @@ async function probe(mode, version, checkpoint) {
   } finally { await f.close(); }
 }
 
+for (const offset of ["next_message_offset", "next_blob_offset", "next_evidence_offset"]) {
+  test(`Source detail with ${offset} cannot prove complete evidence`, async () => {
+    const { result } = await probe(`incomplete-source-${offset}`);
+    assert.equal(result.success, false);
+    assert.equal(result.checks.source_evidence, false);
+    assert.equal(result.checks.cleanup, true);
+    assert.equal(result.outcome_unknown, false);
+  });
+}
+
 test("fixed SDK completes original checks before permanent forget, repeat receipt and rejected late import", async () => {
   const { result, counters } = await probe("complete");
   assert.equal(result.success, true);
@@ -180,6 +199,7 @@ test("fixed SDK completes original checks before permanent forget, repeat receip
   assert.equal(result.counts.sources_before_replay, result.counts.sources_after_replay);
   assert.equal(result.counts.profiles_before, result.counts.profiles_after_replay);
   assert.equal(result.counts.events_before_replay, result.counts.events_after_replay);
+  assert.equal(counters.sourceReads, 4, "Replay verifies detail rather than treating SourceSummary as Source");
 });
 
 for (const mode of ["processing", "lost-ack"]) {

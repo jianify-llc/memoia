@@ -132,6 +132,12 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
         { message_id: "name", role: "user", content: "My real name is Renata Calder. Please remember my name.", occurred_at: occurredAt },
         { message_id: "food", role: "user", content: "My favourite food is lemon risotto, and it has been my favourite for years.", occurred_at: occurredAt },
       ] };
+    const readSource = async () => {
+      const source = await client.getSource(uid, body.source_id, options());
+      requireTrue([source.next_message_offset, source.next_blob_offset, source.next_evidence_offset]
+        .every((offset) => offset === null));
+      return source;
+    };
     const imported = await complete("first_import", body.idempotency_key, () => client.importBlob(uid, body, options()));
     evidence.ids.source_id = imported.source_id;
     evidence.ids.import_operation_id = imported.operation_id;
@@ -139,7 +145,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     const queried = await client.getOperationByKey(uid, body.idempotency_key, options());
     const byId = await client.getOperation(uid, imported.operation_id, options());
     requireTrue(same(queried, imported) && same(byId, imported));
-    const stored = await client.getSource(uid, body.source_id, options());
+    const stored = await readSource();
     const storedBlob = await client.getBlob(uid, imported.blob_id, options());
     requireTrue(stored.source_id === body.source_id && stored.source_id === imported.source_id &&
       storedBlob.source_id === stored.source_id && storedBlob.status === "active" && stored.evidence.length > 0);
@@ -189,7 +195,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     evidence.counts.events_after_replay = eventsAfter.length;
     requireTrue(same(ids(sourcesAfter.sources, "source_id"), ids(sourcesBefore.sources, "source_id")) &&
       same(profileState(profilesAfter.profiles), profileState(profiles.profiles)) && same(ids(eventsAfter), ids(eventsBefore)));
-    const replaySource = sourcesAfter.sources[0];
+    const replaySource = await readSource();
     requireTrue(replaySource.source_id === body.source_id && replaySource.blobs.length === 1 &&
       replaySource.blobs[0].blob_id === imported.blob_id &&
       same(replaySource.message_ids, stored.message_ids) &&
@@ -200,7 +206,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     const partial = await complete("partial_retract", evidence.ids.partial_retract_key, () => client.deleteMessages(uid, imported.source_id,
       { idempotency_key: evidence.ids.partial_retract_key, message_ids: ["name"] }, options()));
     evidence.ids.partial_operation_id = partial.operation_id;
-    const remainingSource = await client.getSource(uid, imported.source_id, options());
+    const remainingSource = await readSource();
     const remainingProfiles = await client.getProfiles(uid, options());
     const remainingHistory = await client.getHistory(uid, options());
     requireTrue(remainingSource.deleted_message_ids.includes("name") && remainingSource.evidence.length > 0 &&
@@ -213,7 +219,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     const retracted = await complete("retract", evidence.ids.retract_key, () => client.deleteMessages(uid, imported.source_id,
       { idempotency_key: evidence.ids.retract_key, message_ids: ["food"] }, options()));
     evidence.ids.retract_operation_id = retracted.operation_id;
-    const finalSource = await client.getSource(uid, imported.source_id, options());
+    const finalSource = await readSource();
     requireTrue(finalSource.blobs.every((b) => b.status === "retracted") && finalSource.evidence.length === 0 &&
       ["name", "food"].every((id) => finalSource.deleted_message_ids.includes(id)));
     evidence.checks.retract = true;
