@@ -185,7 +185,7 @@ describe("Memoia SDK in the real workerd runtime", { concurrency: false }, () =>
       const [call] = received(marker);
       assert.equal(received(marker).length, 1);
       assert.equal(call.method, "DELETE");
-      assert.equal(call.path, `/api/v2/users/${forgetUsers[marker]}`);
+      assert.equal(call.path, `/api/users/${forgetUsers[marker]}`);
       assert.equal(call.body, "");
       assert.equal(call.authorization, `Bearer ${apiKey}`);
       assertOriginOnly();

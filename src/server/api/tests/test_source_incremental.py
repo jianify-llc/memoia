@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 
-from tests.test_sources_v2 import source_user, models, request
+from tests.test_sources import source_user, models, request
 from memoia_server.controllers import source, profile
 from memoia_server.connectors import Session
 from memoia_server.env import CONFIG

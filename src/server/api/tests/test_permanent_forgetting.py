@@ -85,27 +85,27 @@ async def test_forget_cascades_and_permanently_blocks_both_protocols(identity, b
     monkeypatch.setenv("ACCESS_TOKEN", "permanent-delete-test-only")
     client = TestClient(app, headers={"Authorization": "Bearer permanent-delete-test-only"})
     try:
-        first = client.delete(f"/api/v2/users/{uid}")
+        first = client.delete(f"/api/users/{uid}")
         assert first.status_code == 200
         assert first.json() == {"user_id": str(uid), "forgotten": True}
         stamp = forgotten_row(uid)["forgotten_at"]
         assert_user_data_absent(uid)
-        assert client.delete(f"/api/v2/users/{uid}").json() == first.json()
+        assert client.delete(f"/api/users/{uid}").json() == first.json()
         assert forgotten_row(uid)["forgotten_at"] == stamp
-        assert client.delete(f"/api/v1/users/{uid}").json()["errno"] == 0
+        assert client.delete(f"/api/users/{uid}").json()["forgotten"] is True
         assert forgotten_row(uid)["forgotten_at"] == stamp
-        legacy = client.post("/api/v1/users", json={"id": str(uid)})
-        assert legacy.json()["errno"] == 403
-        imported = client.post(f"/api/v2/users/{uid}/blobs", json=body.model_dump(mode="json"))
+        legacy = client.post("/api/users", json={"id": str(uid)})
+        assert legacy.status_code == 403
+        imported = client.post(f"/api/users/{uid}/blobs", json=body.model_dump(mode="json"))
         assert imported.status_code == 410
         assert imported.json()["detail"]["code"] == "user_forgotten"
         assert imported.json()["detail"]["retryable"] is False
-        recovered = client.post(f"/api/v2/users/{uid}/operations/{operation.operation_id}/retry")
+        recovered = client.post(f"/api/users/{uid}/operations/{operation.operation_id}/retry")
         assert recovered.status_code == 410
-        assert client.get(f"/api/v2/users/{uid}/sources").json() == {"sources": []}
-        assert client.get(f"/api/v2/users/{uid}/profiles").json() == {"profiles": []}
-        assert client.get(f"/api/v2/users/{uid}/history").json() == {"entries": []}
-        assert client.get(f"/api/v1/users/event/{uid}").json()["data"]["events"] == []
+        assert client.get(f"/api/users/{uid}/sources").json() == {"sources": []}
+        assert client.get(f"/api/users/{uid}/profiles").json() == {"profiles": []}
+        assert client.get(f"/api/users/{uid}/history").json() == {"entries": []}
+        assert client.get(f"/api/users/{uid}/events").json()["events"] == []
         assert_user_data_absent(uid)
     finally:
         client.close()
@@ -136,11 +136,11 @@ def test_forget_missing_identity_is_repeatable_but_wrong_token_is_not(identity, 
     monkeypatch.setenv("ACCESS_TOKEN", "permanent-delete-test-only")
     client = TestClient(app)
     try:
-        invalid = client.delete(f"/api/v2/users/{identity}", headers={"Authorization": "Bearer invalid"})
+        invalid = client.delete(f"/api/users/{identity}", headers={"Authorization": "Bearer invalid"})
         assert invalid.status_code == 401
         assert forgotten_row(identity) is None
         for _ in range(2):
-            response = client.delete(f"/api/v2/users/{identity}", headers={"Authorization": "Bearer permanent-delete-test-only"})
+            response = client.delete(f"/api/users/{identity}", headers={"Authorization": "Bearer permanent-delete-test-only"})
             assert response.status_code == 200
             assert response.json() == {"user_id": str(identity), "forgotten": True}
         assert_user_data_absent(identity)

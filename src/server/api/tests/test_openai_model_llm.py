@@ -208,23 +208,17 @@ async def test_empty_structured_content_flush_fails_without_event(
     monkeypatch.setattr(CONFIG, "summary_llm_model", None)
     api_client = TestClient(app)
     api_client.headers["Authorization"] = f"Bearer {os.environ['ACCESS_TOKEN']}"
-    user_id = api_client.post("/api/v1/users", json={}).json()["data"]["id"]
+    user_id = api_client.post("/api/users", json={}).json()["id"]
     try:
-        inserted = api_client.post(
-            f"/api/v1/blobs/insert/{user_id}",
-            json={
-                "blob_type": "chat",
-                "blob_data": {"messages": [{"role": "user", "content": "Hello"}]},
-            },
-        )
-        assert inserted.json()["errno"] == 0
-        # Adapter 允许合法空文本，但结构化提取必须由 parser 拒绝空 JSON。
-        flushed = api_client.post(f"/api/v1/users/buffer/{user_id}/chat?wait_process=true")
-        assert flushed.json()["errno"] != 0
-        assert api_client.get(f"/api/v1/users/event/{user_id}").json()["data"]["events"] == []
+        inserted = api_client.post(f"/api/users/{user_id}/blobs", json={
+            "source_id": "empty-json", "idempotency_key": "empty-json",
+            "messages": [{"message_id": "1", "role": "user", "content": "Hello",
+                          "occurred_at": "2026-10-06T00:00:00Z"}]})
+        assert inserted.status_code >= 400
+        assert api_client.get(f"/api/users/{user_id}/events").json()["events"] == []
         assert len(state["requests"]) == 1
     finally:
-        api_client.delete(f"/api/v1/users/{user_id}")
+        api_client.delete(f"/api/users/{user_id}")
         api_client.close()
         await client.close()
 
@@ -234,18 +228,18 @@ async def test_complete_structured_empty_facts_flush_succeeds_without_event(open
     state, model_client = openai_transport
     state["content"] = '{"facts": [], "event_tags": []}'
     client = TestClient(app, headers={"Authorization": f"Bearer {os.environ['ACCESS_TOKEN']}"})
-    uid = client.post("/api/v1/users", json={}).json()["data"]["id"]
+    uid = client.post("/api/users", json={}).json()["id"]
     try:
-        inserted = client.post(f"/api/v1/blobs/insert/{uid}", json={"blob_type": "chat",
-            "blob_data": {"messages": [{"role": "user", "content": "Hello"}]}})
-        assert inserted.json()["errno"] == 0
-        flushed = client.post(f"/api/v1/users/buffer/{uid}/chat?wait_process=true").json()
-        assert flushed["errno"] == 0 and len(flushed["data"]) == 1 and flushed["data"][0]["event_id"] is None
-        assert client.get(f"/api/v1/users/event/{uid}").json()["data"]["events"] == []
+        inserted = client.post(f"/api/users/{uid}/blobs", json={"source_id": "empty-facts",
+            "idempotency_key": "empty-facts", "messages": [{"message_id": "1", "role": "user",
+            "content": "Hello", "occurred_at": "2026-10-06T00:00:00Z"}]})
+        assert inserted.status_code == 200 and inserted.json()["status"] == "completed"
+        assert inserted.json()["result"]["event_ids"] == []
+        assert client.get(f"/api/users/{uid}/events").json()["events"] == []
         assert len(state["requests"]) == 1
         assert state["requests"][0]["response_format"]["json_schema"]["strict"]
     finally:
-        client.delete(f"/api/v1/users/{uid}")
+        client.delete(f"/api/users/{uid}")
         client.close()
         await model_client.close()
 

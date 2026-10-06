@@ -1,14 +1,15 @@
-"""Typed V2 HTTP boundary; no database access is required to export OpenAPI."""
+"""Typed HTTP boundary; no database access is required to export OpenAPI."""
 from uuid import UUID
 
 from fastapi import APIRouter, Request, Query, HTTPException, Response
+from ..models.management import SearchInput
 from ..models.source import (
     ImportSource, DeleteMessages, Operation, Operations, Source, Sources, Profiles, Profile, Blob,
     SearchResult, SearchEvent, History, HistoryEntry,
     ForgottenUser,
 )
 
-router = APIRouter(prefix="/api/v2", tags=["sources"])
+router = APIRouter(prefix="/api", tags=["sources"])
 
 
 def project_id(request):
@@ -134,16 +135,16 @@ async def delete_messages(user_id: UUID, source_id: str, body: DeleteMessages, r
 async def get_profiles(user_id: UUID, request: Request):
     from ..controllers.profile import get_user_profiles
     rows = (await get_user_profiles(str(user_id), project_id(request))).data().profiles
-    profiles = [Profile(id=row.id, content=row.content, topic=(row.attributes or {}).get("topic", ""),
+    profiles = [Profile(id=row.id, created_at=row.created_at, content=row.content, topic=(row.attributes or {}).get("topic", ""),
                         sub_topic=(row.attributes or {}).get("sub_topic", ""),
                         source_ids=(row.attributes or {}).get("source_ids", []), updated_at=row.updated_at) for row in rows]
     return Profiles(profiles=sorted(profiles, key=lambda p: (p.topic, p.sub_topic, str(p.id))))
 
 
-@router.get("/users/{user_id}/search", response_model=SearchResult, operation_id="search", tags=["events"])
-async def search(user_id: UUID, request: Request, query: str = Query(min_length=1, max_length=8192), limit: int = Query(10, ge=1, le=100)):
+@router.post("/users/{user_id}/search", response_model=SearchResult, operation_id="search", tags=["events"])
+async def search(user_id: UUID, body: SearchInput, request: Request):
     from ..controllers.event import hybrid_search_user_events
-    result = await hybrid_search_user_events(str(user_id), project_id(request), query, limit)
+    result = await hybrid_search_user_events(str(user_id), project_id(request), body.query, body.limit)
     if not result.ok():
         raise HTTPException(503, detail={"code": "search_unavailable", "message": "Search unavailable", "retryable": True})
     return result.data()

@@ -60,7 +60,7 @@ async def test_accounting_failure_does_not_discard_completion_for_both_loggers(e
 @pytest.mark.parametrize("permanent", [False, True])
 async def test_embedding_failure_is_rejected_and_redacted_for_both_loggers(error_logs, monkeypatch, permanent):
     private = "private-embedding-token-and-input"
-    error = ValueError(private)
+    error = RuntimeError(private)
     expected = CODE.SERVICE_UNAVAILABLE
     if permanent:
         response = httpx.Response(401, request=httpx.Request("POST", "https://example.invalid/embeddings"))

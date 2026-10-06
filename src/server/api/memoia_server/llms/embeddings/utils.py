@@ -15,6 +15,7 @@ def get_openai_async_client_instance() -> AsyncOpenAI:
         _global_openai_async_client = AsyncOpenAI(
             base_url=CONFIG.embedding_base_url,
             api_key=CONFIG.embedding_api_key,
+            timeout=10,
         )
     return _global_openai_async_client
 

@@ -7,12 +7,27 @@ import addFormats from "ajv-formats";
 import standaloneCode from "ajv/dist/standalone/index.js";
 import { build } from "esbuild";
 
-const apiUrl = new URL("../../../src/server/api/openapi-v2.json", import.meta.url);
+const apiUrl = new URL("../../../src/server/api/openapi.json", import.meta.url);
 const apiText = await readFile(apiUrl, "utf8");
 const api = JSON.parse(apiText);
 const { version: sdkVersion } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-const route = "/api/v2/users/{user_id}";
+const route = "/api/users/{user_id}";
 const targets = {
+  validateSearchInput: ["post", `${route}/search`, "request"],
+  validateContextInput: ["post", `${route}/context`, "request"],
+  validateContext: ["post", `${route}/context`, "response"],
+  validateUserInput: ["post", "/api/users", "request"],
+  validateUserId: ["post", "/api/users", "response"],
+  validateUser: ["get", route, "response"],
+  validateUsers: ["get", "/api/users", "response"],
+  validateUsersQuery: ["get", "/api/users", "query"],
+  validateEvents: ["get", `${route}/events`, "response"],
+  validateEventsQuery: ["get", `${route}/events`, "query"],
+  validateProfileInput: ["post", `${route}/profiles`, "request"],
+  validateProfileId: ["post", `${route}/profiles`, "response"],
+  validateConfig: ["get", "/api/project/config", "response"],
+  validateUsage: ["get", "/api/project/usage", "response"],
+  validateUsageQuery: ["get", "/api/project/usage", "query"],
   validateForgetUserPath: ["delete", route, "path"],
   validateForgottenUser: ["delete", route, "response"],
   validateOperation: ["post", `${route}/blobs`, "response"],
@@ -23,25 +38,27 @@ const targets = {
   validateSource: ["get", `${route}/sources/{source_id}`, "response"],
   validateSourceQuery: ["get", `${route}/sources/{source_id}`, "query"],
   validateProfiles: ["get", `${route}/profiles`, "response"],
-  validateSearch: ["get", `${route}/search`, "response"],
+  validateSearch: ["post", `${route}/search`, "response"],
   validateHistory: ["get", `${route}/history`, "response"],
   validateOperations: ["get", `${route}/operations`, "response"],
   validateSourcesQuery: ["get", `${route}/sources`, "query"],
   validateHistoryQuery: ["get", `${route}/history`, "query"],
   validateOperationsQuery: ["get", `${route}/operations`, "query"],
-  validateProjects: ["get", "/api/v2/projects", "response"],
-  validateProject: ["post", "/api/v2/projects", "response"],
-  validateProjectCreate: ["post", "/api/v2/projects", "request"],
-  validateProjectUpdate: ["patch", "/api/v2/projects/{project_id}", "request"],
-  validateProjectsQuery: ["get", "/api/v2/projects", "query"],
-  validateKeys: ["get", "/api/v2/projects/{project_id}/keys", "response"],
-  validateKeysQuery: ["get", "/api/v2/projects/{project_id}/keys", "query"],
-  validateKeyCreate: ["post", "/api/v2/projects/{project_id}/keys", "request"],
-  validateIssuedKey: ["post", "/api/v2/projects/{project_id}/keys", "response"],
-  validateLegacyToken: ["post", "/api/v2/projects/{project_id}/legacy-token/rotate", "response"],
+  validateProjects: ["get", "/api/projects", "response"],
+  validateProject: ["post", "/api/projects", "response"],
+  validateProjectCreate: ["post", "/api/projects", "request"],
+  validateProjectUpdate: ["patch", "/api/projects/{project_id}", "request"],
+  validateProjectsQuery: ["get", "/api/projects", "query"],
+  validateKeys: ["get", "/api/projects/{project_id}/keys", "response"],
+  validateKeysQuery: ["get", "/api/projects/{project_id}/keys", "query"],
+  validateKeyCreate: ["post", "/api/projects/{project_id}/keys", "request"],
+  validateIssuedKey: ["post", "/api/projects/{project_id}/keys", "response"],
+  validateLegacyToken: ["post", "/api/projects/{project_id}/legacy-token/rotate", "response"],
 };
 const ajv = new Ajv2020({ strict: false, allErrors: true, code: { source: true, esm: true } });
 addFormats(ajv);
+ajv.addFormat("uuid4", /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+ajv.addFormat("uuid5", /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 const refs = {};
 for (const [name, [method, path, kind]] of Object.entries(targets)) {
   const operation = api.paths[path]?.[method];
@@ -80,3 +97,8 @@ for (const [name, content] of Object.entries(generated)) {
   await mkdir(new URL("../src/generated/", import.meta.url), { recursive: true });
   await writeFile(url, content);
 }
+
+const docsUrl = new URL("../../../docs/site/openapi.json", import.meta.url);
+if (checking) {
+  if (await readFile(docsUrl, "utf8") !== apiText) throw new Error("Generated documentation OpenAPI is stale; pnpm generate");
+} else await writeFile(docsUrl, apiText);

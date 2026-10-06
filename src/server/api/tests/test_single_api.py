@@ -1,0 +1,124 @@
+"""Actual HTTP and SQL checks for one unversioned contract."""
+import os
+from datetime import datetime, timezone
+from uuid import uuid4
+from unittest.mock import AsyncMock, patch
+import pytest
+from fastapi.testclient import TestClient
+from memoia_server.models.source import SearchResult
+from memoia_server.models.utils import Promise
+from memoia_server.controllers import event
+
+@pytest.fixture
+def client(db_env):
+    client = TestClient(__import__("api").app, headers={"Authorization": "Bearer " + os.environ["ACCESS_TOKEN"]})
+    yield client
+    client.close()
+
+
+def test_only_one_contract_is_mounted(client):
+    assert client.get("/api/healthcheck").json() == {"status": "ok"}
+    for prefix in ("/api/v1", "/api/v2"):
+        assert client.get(prefix + "/healthcheck").status_code == 404
+        assert client.post(prefix + "/users", json={}).status_code == 404
+    schema = client.get("/openapi.json").json()
+    assert not any(path.startswith(("/api/v1", "/api/v2")) for path in schema["paths"])
+
+
+def test_user_and_manual_profile_management_use_one_contract(client):
+    uid = client.post("/api/users", json={"data": {"label": "fixture"}}).json()["id"]
+    try:
+        assert client.get(f"/api/users/{uid}").json()["data"] == {"label": "fixture"}
+        assert client.get("/api/users", params={"search": uid}).json()["count"] == 1
+        body = {"content": "Sakura Hotel", "topic": "travel", "sub_topic": "hotel"}
+        result = client.post(f"/api/users/{uid}/profiles", json=body)
+        assert result.status_code == 201
+        pid = result.json()["id"]
+        assert client.get(f"/api/users/{uid}/profiles").json()["profiles"][0]["content"] == body["content"]
+        assert client.patch(f"/api/users/{uid}/profiles/{pid}", json={**body, "content": "Corrected hotel"}).status_code == 204
+        assert client.get(f"/api/users/{uid}/profiles").json()["profiles"][0]["content"] == "Corrected hotel"
+        assert client.delete(f"/api/users/{uuid4()}/profiles/{pid}").status_code == 404
+        assert client.delete(f"/api/users/{uid}/profiles/{pid}").status_code == 204
+    finally:
+        result = client.delete(f"/api/users/{uid}")
+        assert result.json() == {"user_id": uid, "forgotten": True}
+        assert client.post("/api/users", json={"id": uid}).status_code == 403
+
+
+def test_private_query_is_post_body_and_errors_never_echo_it(client, monkeypatch):
+    secret = "PRIVATE_QUERY_MUST_NOT_LEAK"
+    search = AsyncMock(return_value=Promise.resolve(SearchResult(events=[])))
+    monkeypatch.setattr(event, "hybrid_search_user_events", search)
+    uid = str(uuid4())
+    result = client.post(f"/api/users/{uid}/search", json={"query": secret})
+    assert result.json() == {"events": []}
+    assert secret not in str(result.request.url)
+    assert search.await_args.args[2] == secret
+    assert client.get(f"/api/users/{uid}/search", params={"query": secret}).status_code == 405
+    malformed = client.post(f"/api/users/{uid}/search", json={"query": secret, "limit": secret})
+    assert malformed.status_code == 422 and secret not in malformed.text
+    monkeypatch.setattr(event, "retrieve_user_facts", AsyncMock(side_effect=RuntimeError(secret)))
+    with patch("memoia_server.api_layer.middleware.LOG.error") as log:
+        failed = client.post(f"/api/users/{uid}/context", json={"query": secret})
+        assert failed.status_code == 500
+        assert secret not in failed.text and secret not in str(log.call_args_list)
+
+
+def test_read_only_posts_obey_read_scope(client, monkeypatch):
+    project = "single-api-" + uuid4().hex
+    assert client.post("/api/projects", json={"project_id": project}).status_code == 201
+    token = client.post(f"/api/projects/{project}/keys", json={"name": "reader", "scopes": ["read"]}).json()["token"]
+    reader = TestClient(__import__("api").app, headers={"Authorization": "Bearer " + token})
+    try:
+        monkeypatch.setattr(event, "hybrid_search_user_events", AsyncMock(return_value=Promise.resolve(SearchResult(events=[]))))
+        monkeypatch.setattr(event, "retrieve_user_facts", AsyncMock(return_value=Promise.resolve([])))
+        uid = str(uuid4())
+        assert reader.post(f"/api/users/{uid}/search", json={"query": "Kyoto"}).status_code == 200
+        assert reader.post(f"/api/users/{uid}/context", json={"query": "Kyoto"}).json() == {"context": "", "entries": []}
+        assert reader.post("/api/users", json={}).status_code == 403
+        assert reader.patch("/api/project/config", json={"profile_config": ""}).status_code == 403
+    finally:
+        reader.close()
+        from memoia_server.connectors import Session
+        from memoia_server.models.database import Project
+        with Session.begin() as session:
+            from sqlalchemy import delete
+            session.execute(delete(Project).where(Project.project_id == project))
+
+
+def test_context_counts_complete_fact_evidence_and_preserves_rank(client, monkeypatch):
+    from memoia_server.models.source import SearchEvent, Evidence, EventTime
+    from memoia_server.models.response import EventGistData
+    from memoia_server.temporal import render_gist
+    from memoia_server.utils import get_encoded_tokens
+    uid, fid, blob = str(uuid4()), uuid4(), uuid4()
+    fact = Evidence(fact_id=fid, blob_id=blob, content="Kyoto hotel", topic="life_event", sub_topic="travel",
+        support_groups=[["1"]], event_time=EventTime(start="2026-04-01", end="2026-04-30", precision="month",
+        evidence=[{"message_id": "1", "expression": "April 2026"}]), source_messages=[])
+    rendered = render_gist(EventGistData(content=fact.content, event_time=fact.event_time, source_id="dialog", blob_id=blob, fact_id=fid))
+    budget = len(get_encoded_tokens(rendered))
+    gist = EventGistData(content=fact.content, event_time=fact.event_time, source_id="dialog", blob_id=blob, fact_id=fid)
+    result = [event.RetrievedFact(uuid4(), datetime(2026, 10, 6, tzinfo=timezone.utc), .1,
+        gist.model_copy(update={"content": "oversized " * 1000})),
+        event.RetrievedFact(uuid4(), datetime(2026, 10, 6, tzinfo=timezone.utc), .09, gist),
+        event.RetrievedFact(uuid4(), datetime(2026, 10, 6, tzinfo=timezone.utc), .08, EventGistData(content="legacy hotel"))]
+    search = AsyncMock(return_value=Promise.resolve(result))
+    monkeypatch.setattr(event, "retrieve_user_facts", search)
+    response = client.post(f"/api/users/{uid}/context", json={"query": "Kyoto April 2026", "max_token_size": budget})
+    assert response.json() == {"context": rendered, "entries": [rendered]}
+    assert "April 2026" in rendered and '"precision":"month"' in rendered
+    assert len(get_encoded_tokens(response.json()["context"])) <= budget
+    assert search.await_count == 1
+
+
+def test_context_recent_records_keep_evidence_and_query_none_avoids_embedding(client, monkeypatch):
+    from memoia_server.models.response import UserEventsData
+    search = AsyncMock()
+    recent = AsyncMock(return_value=Promise.resolve(UserEventsData(events=[{
+        "id": uuid4(), "event_data": {"event_tip": "Legacy undated event"},
+        "created_at": "2026-10-06T00:00:00Z", "updated_at": "2026-10-06T00:00:00Z"}])))
+    monkeypatch.setattr(event, "retrieve_user_facts", search)
+    monkeypatch.setattr(event, "get_user_events", recent)
+    response = client.post(f"/api/users/{uuid4()}/context", json={"query": None})
+    assert response.json() == {"context": "Legacy undated event", "entries": ["Legacy undated event"]}
+    search.assert_not_called()

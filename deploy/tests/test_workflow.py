@@ -65,7 +65,7 @@ class PublicationContract(unittest.TestCase):
         self.assertIn("import memoia_server", verify_source)
         self.assertIn("--network none", verify_source)
         local = (WORKFLOW.parents[2] / "scripts/verify_local.py").read_text()
-        for name in ("test_compose.py", "test_recovery.py", "test_sdk_probe.py", "test_deploy.py", "pytest", "check:generated"):
+        for name in ("test_compose.py", "test_recovery.py", "test_sdk_probe.mjs", "test_deploy.py", "pytest", "check:generated"):
             self.assertIn(name, local)
         for path in (WORKFLOW, ONLINE_WORKFLOW, VERIFY_WORKFLOW):
             for job in yaml.safe_load(path.read_text())["jobs"].values():

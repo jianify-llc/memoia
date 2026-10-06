@@ -2,7 +2,7 @@
 [project]
 name = "memoia_server"
 version = "0.1.0"
-description = "Memoia Server, compatible with the Memobase API"
+description = "Memoia traceable memory server"
 readme = "readme.md"
 requires-python = ">=3.12"
 dependencies = [

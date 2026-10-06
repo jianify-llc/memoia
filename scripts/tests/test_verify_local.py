@@ -149,7 +149,7 @@ class LocalVerificationContract(unittest.TestCase):
 
     def test_quick_keeps_source_and_temporal_offline_regressions_for_business_diffs(self):
         api = self.source / "src/server/api"
-        for name in ("LICENSE", "NOTICE", "Dockerfile", "openapi-v2.json"):
+        for name in ("LICENSE", "NOTICE", "Dockerfile", "openapi.json"):
             (api / name).write_text("")
 
         @contextmanager
@@ -158,7 +158,7 @@ class LocalVerificationContract(unittest.TestCase):
 
         temporal_tests = (
             "test_calendar_precision_and_unknown_are_not_invented_dates",
-            "test_query_time_is_explicit_soft_evidence_and_unknown_stays_unknown",
+            "test_withdrawn_time_anchor_does_not_survive_independent_untimed_support",
             "test_render_retains_precision_raw_expression_and_labels_recording_time",
             "test_real_structured_validation_rejects_missing_or_invalid_time_without_echoing_content",
             "test_extraction_anchors_each_message_in_its_recorded_zone_and_rejects_fake_quote",
@@ -238,7 +238,7 @@ class LocalVerificationContract(unittest.TestCase):
 
     def test_cleanup_failure_preserves_primary_command_and_fails_successful_run(self):
         api = self.source / "src/server/api"
-        for name in ("LICENSE", "NOTICE", "Dockerfile", "openapi-v2.json"):
+        for name in ("LICENSE", "NOTICE", "Dockerfile", "openapi.json"):
             (api / name).write_text("")
         @contextmanager
         def tree(*_):

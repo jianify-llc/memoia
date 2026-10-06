@@ -8,7 +8,7 @@ from sqlalchemy import pool
 from alembic import context
 from memoia_server.models.database import REG
 from memoia_server.models.source import SOURCE_TABLES
-from memoia_server.models.project_v2 import project_api_keys
+from memoia_server.models.projects import project_api_keys
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

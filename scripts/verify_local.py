@@ -20,7 +20,7 @@ QUICK_TESTS = (
     "test_llm_logging.py", "test_embedding_validation.py", "test_source_quality.py",
     *["test_temporal_evidence.py::" + name for name in (
         "test_calendar_precision_and_unknown_are_not_invented_dates",
-        "test_query_time_is_explicit_soft_evidence_and_unknown_stays_unknown",
+        "test_withdrawn_time_anchor_does_not_survive_independent_untimed_support",
         "test_render_retains_precision_raw_expression_and_labels_recording_time",
         "test_real_structured_validation_rejects_missing_or_invalid_time_without_echoing_content",
         "test_extraction_anchors_each_message_in_its_recorded_zone_and_rejects_fake_quote",
@@ -172,7 +172,7 @@ def verify(mode="full", base=None):
                 step([python, "-m", "unittest", "discover", "-s", "scripts/tests", "-v"], source)
             if selected["deploy"]:
                 step(["shellcheck", *map(str, sorted((source / "deploy").glob("*.sh")))], source)
-                for test in ("test_compose.py", "test_workflow.py", "test_recovery.py", "test_sdk_probe.py"):
+                for test in ("test_compose.py", "test_workflow.py", "test_recovery.py"):
                     step([python, "-m", "unittest", "discover", "-s", "deploy/tests", "-p", test, "-v"], source)
             if selected["legacy"]:
                 step([python, "-m", "unittest", "discover", "-s", "deploy/cutover", "-p", "verify_legacy_patch.py", "-v"], source)
@@ -191,7 +191,7 @@ def verify(mode="full", base=None):
                 # tiktoken 的公开词表属于依赖准备；quick 测试进程随后禁止一切 socket 连接。
                 step([python, "-c", "import tiktoken; tiktoken.encoding_for_model('gpt-4o')"], api)
                 step([python, "export-openapi.py", str(Path(temporary) / "openapi-export.json")], api)
-                if (Path(temporary) / "openapi-export.json").read_bytes() != (api / "openapi-v2.json").read_bytes():
+                if (Path(temporary) / "openapi-export.json").read_bytes() != (api / "openapi.json").read_bytes():
                     raise ValueError("SERVER_OPENAPI_STALE")
             env["PYTHONPATH"] = str(source / "scripts")
             if mode == "quick":
@@ -210,7 +210,7 @@ def verify(mode="full", base=None):
             if selected["deploy"]:
                 if not business:
                     step(["pnpm", "build"], sdk)
-                step(["node", "--test", "deploy/tests/test_v2_sdk_probe.mjs"], source)
+                step(["node", "--test", "deploy/tests/test_sdk_probe.mjs"], source)
     finally:
         cleanup_errors = []
         for name in reversed(owned):

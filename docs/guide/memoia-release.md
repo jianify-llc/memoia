@@ -19,38 +19,16 @@ not a prerequisite for building, releasing, or deploying Memoia.
 
 ## Compatibility and ownership
 
-The namespace release changes the internal Python package to `memoia_server`, its
-imports, packaging, tests, and build inputs. It does not rename SDK packages or
-change `/api/v1`, bearer authentication, `errno`/`errmsg`/`data`, record IDs, database
-tables, Redis keys, `MEMOBASE_*` variables, telemetry keys, or deployed identities.
-There is no schema migration for this release. Original Memobase author and license
-metadata remain; source files carry relocation/change notices.
-The image includes the original license and the fork's attribution in
-`/app/LICENSE` and `/app/NOTICE`; a test keeps the packaged license identical to
-the repository's preserved upstream license.
+The supported server contract is now unversioned `/api`, with typed JSON responses and real HTTP errors. Only `@jianify/memoia` is supported. Upgrade Memoia, Luvel and Inspector together; old clients do not receive aliases. Software SemVer, database identities, Redis keys, provider identifiers and historical migrations remain separate facts. No database migration or history rewrite is introduced solely by this API switch.
 
-Flush consumers must distinguish existing wire semantics: default background mode
-returns `data: null` for admitted work, not event IDs; `wait_process=true` returns
-`data: [{event_id, add_profiles, update_profiles, delete_profiles}]`. An empty
-buffer returns `data: []`; a completed extraction with no memory can return an item
-with `event_id: null` and empty profile arrays. Do not interpret all of these as a
-successfully persisted event, or parse the field as `id`. The SDK's boolean `flush`
-helper intentionally discards this payload; applications tracking events must use
-the existing raw request API and explicitly validate the synchronous response.
-
-The existing API/controller is the only writer of memory processing state. The
-database owns buffer status and memory records; Redis owns queue/lock state, not
-proof of completed processing. Luvel owns its returned event-ID tracking and
-deletion jobs. This release introduces no second queue, dual writer, or automatic
-retry/recovery state machine. A successful source rename is not evidence that a
-previously interrupted flush is safe to replay.
+Source processing and permanent forgetting retain their existing operation/lease/fence ownership. A processing or lost acknowledgement is not proof of completion; query the original operation identity before explicit recovery. Before an incompatible cutover, stop old callers and inspect/drain their existing unfinished inputs using the coordinated maintenance process below. Removing old API routes does not authorize deleting pending input or restoring withdrawn data.
 
 ## Build and record a release
 
-The [`verify` workflow](../../.github/workflows/verify.yml)
-builds an AMD64 candidate image without publication for `main` pull requests, merge queues and explicit manual checks. It checks source identity, Python import and migration source presence; full API/SDK and isolated migration tests run locally before Test pushes. `deploy-test.yml` handles explicit manual Test batches (AMD64);
-`deploy-online.yml` handles version tags at Release HEAD on native AMD64/ARM64
-runners. Neither is triggered by a `main` or `release` branch push. Promoting
+The shared [`verify` workflow](../../.github/workflows/verify.yml)
+runs the same isolated local verification entry on pull requests archiving to `main` without building
+a Docker image. The separate `test` and `release` workflows own test deployment and
+online release respectively; neither is triggered by a `main` push. Promoting
 code to `release` and deploying online remain separate decisions. A successful
 build does not replace an ARM64 runtime test or the full API/SDK acceptance test.
 

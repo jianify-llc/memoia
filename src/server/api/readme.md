@@ -3,7 +3,8 @@
 <!-- Modified for Memoia: internal package name and maintenance references. -->
 
 The internal implementation lives in `memoia_server/`. This is an Apache-2.0 fork
-of Memobase; HTTP contracts and the original Memobase SDKs remain unchanged.
+of Memobase; it now exposes one `/api` contract and the `@jianify/memoia` SDK.
+Upstream HTTP routes and SDKs are retired. Consumers must upgrade together.
 Deployment and rollback boundaries are in the [release guide](../../../docs/guide/memoia-release.md).
 
 Memobase is a user memory system designed for LLM Applications. It provides a FastAPI-based server that manages user profiles, memories, and various types of data blobs. Details of developing it in [here](./DEVELOPMENT.md).
@@ -11,14 +12,14 @@ Memobase is a user memory system designed for LLM Applications. It provides a Fa
 ## Core Components
 
 ### 1. API Layer (`api.py`)
-- FastAPI application with versioned endpoints (`/api/v1`)
+- FastAPI application with one unversioned `/api` contract
 - Implements authentication middleware
 - Main endpoints:
   - Health check
   - User management (CRUD operations)
   - Blob management
   - User profile management
-  - Buffer management
+  - Source import, retraction, provenance and operation recovery
 
 ### 2. Database Models (`models/`)
 - Uses SQLAlchemy ORM
@@ -93,7 +94,8 @@ The obsolete `cache_user_profiles_ttl` YAML option and
 `MEMOBASE_CACHE_USER_PROFILES_TTL` override are ignored. Existing expiring
 `user_profiles::{project_id}::{user_id}` keys are no longer read or written and
 may expire naturally; no Redis cleanup or database migration is required.
-SDK signatures, response fields and descending profile update ordering are unchanged.
+Descending profile update ordering is preserved. The single API and SDK contracts
+are defined by [API-DESIGN.md](API-DESIGN.md) and generated `openapi.json`.
 
 `tests/test_profile_storage.py` verifies committed reads despite stale Redis data,
 project/user isolation and profile CRUD/merge/user deletion without Redis commands.
@@ -143,8 +145,7 @@ not a per-call reservation or guaranteed visible output length. Actual usage and
 latency require provider acceptance. Existing application telemetry tokenizes input
 and visible output, not the provider's full reasoning-token usage; it is not a
 provider billing record. GPT-6 Luna is the acceptance target; compatibility with
-older models is no longer promised or tested. Business prompts and SDK/HTTP
-contracts are unchanged. Reasoning effort is not a substitute
+older models is no longer promised or tested. This model parameter policy does not change business prompts. Reasoning effort is not a substitute
 for low sampling temperature or a guarantee of deterministic extraction.
 See [OpenAI parameter guidance](https://developers.openai.com/api/docs/guides/latest-model#gpt-6-astra-update-api-and-model-parameters)
 and [Chat Completions limits](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
@@ -160,9 +161,9 @@ and this patch does not introduce Structured Outputs or guarantee determinism.
 
 `tests/test_openai_model_llm.py` exercises the installed OpenAI SDK through a
 mock HTTP transport, including request serialization, JSON mode, the actual empty
-summary HTTP/flush path, startup limits and failure responses. Run it and the complete `tests/` suite
+summary processing path, startup limits and failure responses. Run it and the complete `tests/` suite
 against disposable local PostgreSQL/Redis only. These checks do not establish
-API-key/model access, extraction quality, latency, cost or real flush acceptance;
+API-key/model access, extraction quality, latency, cost or real source-import acceptance;
 those require an explicitly configured provider acceptance run and a new image.
 
 ### Background user lease
@@ -205,3 +206,12 @@ cancellation leaves no heartbeat behind.
 - Validation error handling
 
 This documentation provides a high-level overview of the Memobase system. For specific implementation details, refer to the individual module documentation and code comments.
+
+
+## Query execution and provider failures
+
+Fact retrieval starts lexical SQL and query embedding concurrently. The lexical branch creates and closes its own SQLAlchemy Session in a worker thread, returning only plain candidate identifiers; ORM objects and Sessions never cross threads. Semantic ranking and evidence hydration then run in the existing retrieval Session. RRF weights, candidate limits, user/project isolation and full-evidence token budgets are unchanged.
+
+Query embedding has one 8-second deadline, with no OpenAI SDK query retries; cancellation ends its async HTTP wait. Embedding HTTP clients use a 10-second ordinary request timeout. Document generation keeps its existing explicit operation/recovery policy. Temporary network failures, rate limiting, server errors or query deadlines retain lexical retrieval. Explicit 400/401/403/404/422 provider rejection is a configuration error returned as controlled 422, rather than pretending lexical fallback repaired an invalid configuration. Provider bodies and query text are not included in ordinary error logs.
+
+Tests use actual isolated PostgreSQL plus an intercepted embedding transport to prove lexical execution overlaps embedding waiting, deadline cancellation and status classification. They do not prove real provider latency, extraction or retrieval quality.

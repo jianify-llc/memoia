@@ -47,7 +47,7 @@ def authenticate_scoped_key(token: str):
     from sqlalchemy import select, or_, func
     from ..connectors import Session
     from ..models.database import Project
-    from ..models.project_v2 import project_api_keys as keys
+    from ..models.projects import project_api_keys as keys
     try:
         prefix, key_id, secret = token.split("_", 2)
         if prefix != "mka" or not secret:

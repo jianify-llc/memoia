@@ -1,3 +1,5 @@
+> Archived upstream material. These legacy routes/SDKs are not supported by Memoia. Use the current Quickstart and OpenAPI contract.
+
 === api-reference/blobs/delete_blob.mdx ===
 ---
 title: 'Delete Blob'

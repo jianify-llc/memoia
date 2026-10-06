@@ -10,47 +10,6 @@ const source = { idempotency_key: "luvel:batch:1", source_id: sourceId, messages
 const json = (body, status = 200) => Response.json(body, { status });
 const client = (fetch, options = {}) => new MemoiaClient({ baseUrl: "https://memoia.example", apiKey: "private-project-token", fetch, ...options });
 
-describe("bounded source pages", () => {
-  const detail = { source_id: "dialog-1", legacy: false, created_at: "2026-10-02T00:00:00Z",
-    message_ids: ["1"], deleted_message_ids: [], blobs: [], evidence: [],
-    next_message_offset: 2, next_blob_offset: null, next_evidence_offset: null };
-
-  it("lists summaries without loading historical collections", async () => {
-    const summary = { source_id: detail.source_id, legacy: detail.legacy, created_at: detail.created_at };
-    assert.deepEqual(await client(async () => json({ sources: [summary] })).listSources(user), { sources: [summary] });
-  });
-
-  it("keeps request options separate from independently selected page offsets", async () => {
-    let sent;
-    const api = client(async (url) => { sent = new URL(url); return json(detail); });
-    assert.deepEqual(await api.getSource(user, "dialog-1", { deadline: Date.now() + 5000 },
-      { limit: 2, message_offset: 10, evidence_offset: 4 }), detail);
-    assert.equal(sent.searchParams.get("limit"), "2");
-    assert.equal(sent.searchParams.get("message_offset"), "10");
-    assert.equal(sent.searchParams.get("evidence_offset"), "4");
-    assert.equal(sent.searchParams.has("deadline"), false);
-  });
-
-  it("does not mistake an old or wrong-source response for a complete page", async () => {
-    for (const broken of ["next_message_offset", "next_blob_offset", "next_evidence_offset"]) {
-      const value = { ...detail };
-      delete value[broken];
-      await assert.rejects(client(async () => json(value)).getSource(user, "dialog-1"),
-        (error) => error.code === "INVALID_RESPONSE");
-    }
-    await assert.rejects(client(async () => json({ ...detail, source_id: "other" })).getSource(user, "dialog-1"),
-      (error) => error.code === "INVALID_RESPONSE");
-  });
-
-  it("rejects invalid page arguments before fetching", async () => {
-    const api = client(async () => { assert.fail("invalid page must not reach fetch"); });
-    for (const page of [{ limit: 0 }, { limit: 101 }, { blob_offset: -1 }, { message_offset: 1.5 }]) {
-      assert.throws(() => api.getSource(user, "dialog-1", undefined, page),
-        (error) => error.code === "INVALID_INPUT");
-    }
-  });
-});
-
 describe("event time evidence contract", () => {
   it("sends source timezone and keeps it distinct from event dates", async () => {
     let posted;
@@ -86,8 +45,8 @@ describe("fixed source identity and acknowledgement", () => {
     });
     assert.deepEqual(await api.getBlob(user, complete.blob_id), blob);
     assert.equal((await api.deleteMessages(user, "dialog-1", deletion)).status, "completed");
-    assert.equal(calls[0].url, `https://memoia.example/api/v2/users/${user}/blobs/${complete.blob_id}`);
-    assert.equal(calls[1].url, `https://memoia.example/api/v2/users/${user}/sources/dialog-1/messages`);
+    assert.equal(calls[0].url, `https://memoia.example/api/users/${user}/blobs/${complete.blob_id}`);
+    assert.equal(calls[1].url, `https://memoia.example/api/users/${user}/sources/dialog-1/messages`);
     assert.equal(calls[1].init.method, "DELETE");
     assert.deepEqual(JSON.parse(calls[1].init.body), deletion);
   });
@@ -112,11 +71,11 @@ describe("fixed source identity and acknowledgement", () => {
       (error) => error.code === "INVALID_RESPONSE");
   });
 
-  it("validates final UUID IDs and sends the origin-only v2 path", async () => {
+  it("validates final UUID IDs and sends the unversioned origin path", async () => {
     let sent;
     const api = client(async (url, init) => { sent = { url, init }; return json(complete); });
     assert.deepEqual(await api.importBlob(user, source), complete);
-    assert.equal(sent.url, `https://memoia.example/api/v2/users/${user}/blobs`);
+    assert.equal(sent.url, `https://memoia.example/api/users/${user}/blobs`);
     assert.equal(sent.init.redirect, "manual");
     assert.equal(sent.init.headers.Authorization, "Bearer private-project-token");
     assert.deepEqual(JSON.parse(sent.init.body), source);
@@ -153,15 +112,11 @@ describe("fixed source identity and acknowledgement", () => {
     assert.deepEqual(methods, ["POST", "GET"]);
   });
 
-  it("retries an explicit retryable rejection without changing the body or key", async () => {
-    const bodies = [];
-    const api = client(async (_url, init) => {
-      bodies.push(init.body);
-      return bodies.length === 1 ? json({ detail: { code: "PROVIDER_RATE_LIMIT", retryable: true } }, 429) : json(complete);
-    });
-    assert.equal((await api.importBlob(user, source)).status, "completed");
-    assert.equal(bodies.length, 2);
-    assert.equal(bodies[0], bodies[1]);
+  it("leaves retryable write recovery to its caller without replaying the body", async () => {
+    let calls = 0;
+    const api = client(async () => { calls++; return json({ detail: { code: "PROVIDER_RATE_LIMIT", retryable: true } }, 429); });
+    await assert.rejects(api.importBlob(user, source), error => error.retryable && error.outcome === "rejected");
+    assert.equal(calls, 1);
   });
 
   it("preserves recoverable ownership conflicts with one attempt, then resumes the durable operation", async () => {
@@ -188,17 +143,13 @@ describe("fixed source identity and acknowledgement", () => {
     }
   });
 
-  it("bounds explicitly recoverable 409 retries and preserves the exact accepted identity", async () => {
+  it("preserves recoverable conflicts without implicitly replaying writes", async () => {
     for (const code of ["lease_lost", "write_conflict"]) {
       const bodies = [];
-      const api = client(async (_url, init) => {
-        bodies.push(init.body);
-        return bodies.length === 1 ? json({ detail: { code, retryable: true } }, 409) : json(complete);
-      }, { maxAttempts: 2 });
-      assert.deepEqual(await api.importBlob(user, source), complete);
-      assert.equal(bodies.length, 2);
+      const api = client(async (_url, init) => { bodies.push(init.body); return json({ detail: { code, retryable: true } }, 409); }, { maxAttempts: 2 });
+      await assert.rejects(api.importBlob(user, source), error => error.retryable && error.outcome === "rejected");
+      assert.equal(bodies.length, 1);
       assert.deepEqual(JSON.parse(bodies[0]), source);
-      assert.equal(bodies[0], bodies[1]);
     }
   });
 
@@ -260,7 +211,7 @@ describe("permanent account forgetting", () => {
     assert.deepEqual(await api.forgetUser(user), receipt);
     assert.equal(calls.length, 2);
     for (const { url, init } of calls) {
-      assert.equal(url, `https://memoia.example/api/v2/users/${user}`);
+      assert.equal(url, `https://memoia.example/api/users/${user}`);
       assert.equal(init.method, "DELETE");
       assert.equal(init.body, undefined);
       assert.equal(init.headers["Content-Type"], undefined);
@@ -461,7 +412,7 @@ describe("bounded transport", () => {
   });
 
   it("rejects endpoint paths/embedded credentials and invalid input before network I/O", async () => {
-    for (const baseUrl of ["https://memoia.example/api/v2", "https://user:pass@memoia.example", "https://memoia.example/?key=secret"]) {
+    for (const baseUrl of ["https://memoia.example/api", "https://user:pass@memoia.example", "https://memoia.example/?key=secret"]) {
       assert.throws(() => new MemoiaClient({ baseUrl, apiKey: "secret" }), TypeError);
     }
     let count = 0;
@@ -473,5 +424,71 @@ describe("bounded transport", () => {
   it("never includes provider bodies or the project key in returned errors", async () => {
     const api = client(async () => json({ detail: { code: "token private-project-token", message: "private content", retryable: false } }, 500));
     await assert.rejects(api.importBlob(user, source), (error) => error.message === "Memoia request failed: HTTP_ERROR");
+  });
+});
+
+
+describe("single API private read contract", () => {
+  it("sends query text only in POST bodies to search and context", async () => {
+    const calls = [];
+    const query = "not April 2025, April 2026 before the trip";
+    const api = client(async (url, init) => {
+      calls.push({ url, method: init.method, body: JSON.parse(init.body) });
+      return json(url.endsWith("/context") ? { context: "Kyoto\n[Time evidence]", entries: ["Kyoto\n[Time evidence]"] } : { events: [] });
+    });
+    await api.search(user, query, 3);
+    assert.deepEqual(await api.getContext(user, { query, max_token_size: 500 }), { context: "Kyoto\n[Time evidence]", entries: ["Kyoto\n[Time evidence]"] });
+    assert.deepEqual(calls, [
+      { url: `https://memoia.example/api/users/${user}/search`, method: "POST", body: { query, limit: 3 } },
+      { url: `https://memoia.example/api/users/${user}/context`, method: "POST", body: { query, max_token_size: 500 } },
+    ]);
+  });
+  it("read-only POST uses read timeout and outcome classification, never a write replay", async () => {
+    let calls = 0;
+    const api = client(async (_url, init) => { calls++; return new Promise((_resolve, reject) =>
+      init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true })); },
+      { readTimeoutMs: 10, writeTimeoutMs: 1000, maxAttempts: 1 });
+    await assert.rejects(api.getContext(user, { query: "private" }), error => error instanceof MemoiaError && error.outcome === "rejected");
+    assert.equal(calls, 1);
+  });
+  it("requires valid typed management acknowledgements", async () => {
+    const id = { id: user };
+    assert.deepEqual(await client(async () => json(id, 201)).createUser({ id: user }), id);
+    await assert.rejects(client(async () => json({ errno: 0, data: id })).createUser({ id: user }), error => error.outcome === "unknown");
+    assert.equal(await client(async () => new Response(null, { status: 204 })).updateConfig({ profile_config: "" }), undefined);
+    await assert.rejects(client(async () => json(false)).updateConfig({ profile_config: "" }), error => error.outcome === "unknown");
+  });
+});
+
+describe("single writer and complete context entries", () => {
+  it("never replays unkeyed profile creation after a generic 500", async () => {
+    let calls = 0;
+    const api = client(async () => { calls++; return calls === 1
+      ? json({ detail: { code: "internal_error", retryable: true } }, 500)
+      : json({ id: eventId }, 201); }, { maxAttempts: 2 });
+    await assert.rejects(api.addProfile(user, { content: "Kyoto", topic: "travel", sub_topic: "hotel" }),
+      error => error.code === "internal_error" && error.outcome === "unknown");
+    assert.equal(calls, 1);
+  });
+  it("requires ordered complete entries in the context contract", async () => {
+    await assert.rejects(client(async () => json({ context: "old string only" })).getContext(user, { query: "Kyoto" }),
+      error => error.code === "INVALID_RESPONSE");
+    const entries = ["Kyoto\n[time/source evidence]", "Another complete fact"];
+    assert.deepEqual(await client(async () => json({ context: entries.join("\n\n"), entries })).getContext(user, { query: "Kyoto" }),
+      { context: entries.join("\n\n"), entries });
+    await assert.rejects(client(async () => json({ context: "different text", entries })).getContext(user, { query: "Kyoto" }),
+      error => error.code === "INVALID_RESPONSE");
+  });
+  it("retries a transient read-only POST without changing the query", async () => {
+    const calls = [];
+    const api = client(async (_url, init) => {
+      calls.push({ method: init.method, body: init.body });
+      return calls.length === 1 ? json({ detail: { code: "unavailable", retryable: true } }, 503)
+        : json({ context: "", entries: [] });
+    }, { maxAttempts: 2 });
+    assert.deepEqual(await api.getContext(user, { query: "Kyoto", max_token_size: 1500 }), { context: "", entries: [] });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0], calls[1]);
+    assert.equal(calls[0].method, "POST");
   });
 });

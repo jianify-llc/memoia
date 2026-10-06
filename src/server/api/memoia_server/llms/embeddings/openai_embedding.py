@@ -9,6 +9,9 @@ async def openai_embedding(
     model: str, texts: list[str], phase: Literal["query", "document"] = "document"
 ) -> np.ndarray:
     openai_async_client = get_openai_async_client_instance()
+    # 查询的完整等待由检索子预算拥有，不能在短窗口内隐式重试。
+    if phase == "query":
+        openai_async_client = openai_async_client.with_options(max_retries=0)
     response = await openai_async_client.embeddings.create(
         model=model,
         input=texts,

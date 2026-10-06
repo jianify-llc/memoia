@@ -1,12 +1,13 @@
 export interface paths {
-    "/api/v2/users/{user_id}": {
+    "/api/users/{user_id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** Get User */
+        get: operations["getUser"];
         put?: never;
         post?: never;
         /** Forget User */
@@ -16,7 +17,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/blobs": {
+    "/api/users/{user_id}/blobs": {
         parameters: {
             query?: never;
             header?: never;
@@ -33,7 +34,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/operations/by-key/{idempotency_key}": {
+    "/api/users/{user_id}/operations/by-key/{idempotency_key}": {
         parameters: {
             query?: never;
             header?: never;
@@ -50,7 +51,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/operations": {
+    "/api/users/{user_id}/operations": {
         parameters: {
             query?: never;
             header?: never;
@@ -67,7 +68,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/operations/{operation_id}": {
+    "/api/users/{user_id}/operations/{operation_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -84,7 +85,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/sources": {
+    "/api/users/{user_id}/sources": {
         parameters: {
             query?: never;
             header?: never;
@@ -101,7 +102,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/operations/{operation_id}/retry": {
+    "/api/users/{user_id}/operations/{operation_id}/retry": {
         parameters: {
             query?: never;
             header?: never;
@@ -118,7 +119,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/blobs/{blob_id}": {
+    "/api/users/{user_id}/blobs/{blob_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -135,7 +136,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/sources/{source_id}": {
+    "/api/users/{user_id}/sources/{source_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -152,7 +153,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/sources/{source_id}/messages": {
+    "/api/users/{user_id}/sources/{source_id}/messages": {
         parameters: {
             query?: never;
             header?: never;
@@ -169,7 +170,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/profiles": {
+    "/api/users/{user_id}/profiles": {
         parameters: {
             query?: never;
             header?: never;
@@ -179,31 +180,32 @@ export interface paths {
         /** Get Profiles */
         get: operations["getProfiles"];
         put?: never;
-        post?: never;
+        /** Add Profile */
+        post: operations["addProfile"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/search": {
+    "/api/users/{user_id}/search": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** Search */
-        get: operations["search"];
+        get?: never;
         put?: never;
-        post?: never;
+        /** Search */
+        post: operations["search"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v2/users/{user_id}/history": {
+    "/api/users/{user_id}/history": {
         parameters: {
             query?: never;
             header?: never;
@@ -220,7 +222,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects": {
+    "/api/projects": {
         parameters: {
             query?: never;
             header?: never;
@@ -238,7 +240,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects/{project_id}": {
+    "/api/projects/{project_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -255,7 +257,7 @@ export interface paths {
         patch: operations["updateProject"];
         trace?: never;
     };
-    "/api/v2/projects/{project_id}/keys": {
+    "/api/projects/{project_id}/keys": {
         parameters: {
             query?: never;
             header?: never;
@@ -273,7 +275,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects/{project_id}/keys/{key_id}": {
+    "/api/projects/{project_id}/keys/{key_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -290,7 +292,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/projects/{project_id}/legacy-token/rotate": {
+    "/api/projects/{project_id}/legacy-token/rotate": {
         parameters: {
             query?: never;
             header?: never;
@@ -301,6 +303,145 @@ export interface paths {
         put?: never;
         /** Rotate Legacy Token */
         post: operations["rotateLegacyToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/healthcheck": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Healthcheck */
+        get: operations["healthcheck"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Users */
+        get: operations["listUsers"];
+        put?: never;
+        /** Create User */
+        post: operations["createUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/{user_id}/profiles/{profile_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Profile */
+        delete: operations["deleteProfile"];
+        options?: never;
+        head?: never;
+        /** Update Profile */
+        patch: operations["updateProfile"];
+        trace?: never;
+    };
+    "/api/users/{user_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Events */
+        get: operations["getEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/{user_id}/events/{event_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Event */
+        delete: operations["deleteEvent"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/{user_id}/context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Context */
+        post: operations["getContext"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/project/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Config */
+        get: operations["getConfig"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update Config */
+        patch: operations["updateConfig"];
+        trace?: never;
+    };
+    "/api/project/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Usage */
+        get: operations["getUsage"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -335,12 +476,117 @@ export interface components {
              */
             created_at: string;
         };
+        /** Context */
+        Context: {
+            /** Context */
+            context: string;
+            /** Entries */
+            entries: string[];
+        };
+        /** ContextInput */
+        ContextInput: {
+            /** Query */
+            query?: string | null;
+            /**
+             * Max Token Size
+             * @default 500
+             */
+            max_token_size: number;
+        };
+        /** DailyUsage */
+        DailyUsage: {
+            /**
+             * Date
+             * @description The date
+             */
+            date: string;
+            /**
+             * Total Insert
+             * @description The total insert
+             * @default 0
+             */
+            total_insert: number;
+            /**
+             * Total Success Insert
+             * @description The total update
+             * @default 0
+             */
+            total_success_insert: number;
+            /**
+             * Total Input Token
+             * @description The total input token
+             * @default 0
+             */
+            total_input_token: number;
+            /**
+             * Total Output Token
+             * @description The total output token
+             * @default 0
+             */
+            total_output_token: number;
+        };
         /** DeleteMessages */
         DeleteMessages: {
             /** Idempotency Key */
             idempotency_key: string;
             /** Message Ids */
             message_ids: string[];
+        };
+        /** EventData */
+        EventData: {
+            /** Source Id */
+            source_id?: string | null;
+            /** Blob Id */
+            blob_id?: string | null;
+            /** Evidence */
+            evidence?: components["schemas"]["Evidence"][];
+            /**
+             * Profile Delta
+             * @description List of profile data
+             */
+            profile_delta?: components["schemas"]["ProfileDelta"][] | null;
+            /**
+             * Event Tip
+             * @description Event tip
+             */
+            event_tip?: string | null;
+            /**
+             * Event Tags
+             * @description List of event tags
+             */
+            event_tags?: components["schemas"]["EventTag"][] | null;
+        };
+        /** EventRecord */
+        EventRecord: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            event_data: components["schemas"]["EventData"];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** EventTag */
+        EventTag: {
+            /**
+             * Tag
+             * @description The event tag
+             */
+            tag: string;
+            /**
+             * Value
+             * @description The event tag value
+             */
+            value: string;
         };
         /** EventTime */
         EventTime: {
@@ -355,6 +601,11 @@ export interface components {
             precision: "year" | "month" | "day" | "range" | "unknown";
             /** Evidence */
             evidence: components["schemas"]["TimeEvidence"][];
+        };
+        /** Events */
+        Events: {
+            /** Events */
+            events: components["schemas"]["EventRecord"][];
         };
         /** Evidence */
         Evidence: {
@@ -397,6 +648,14 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** Health */
+        Health: {
+            /**
+             * Status
+             * @default ok
+             */
+            status: string;
         };
         /** HistoricalProfile */
         HistoricalProfile: {
@@ -446,6 +705,14 @@ export interface components {
             added: components["schemas"]["HistoricalProfile"][];
             /** Removed */
             removed: components["schemas"]["HistoricalProfile"][];
+        };
+        /** IdData */
+        IdData: {
+            /**
+             * Id
+             * @description The UUID identifier
+             */
+            id: string;
         };
         /** ImportSource */
         ImportSource: {
@@ -569,6 +836,11 @@ export interface components {
         /** Profile */
         Profile: {
             /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
              * Id
              * Format: uuid
              */
@@ -587,6 +859,35 @@ export interface components {
              */
             updated_at: string;
         };
+        /** ProfileConfig */
+        ProfileConfig: {
+            /** Profile Config */
+            profile_config: string;
+        };
+        /** ProfileDelta */
+        ProfileDelta: {
+            /**
+             * Content
+             * @description The profile content
+             */
+            content: string;
+            /**
+             * Attributes
+             * @description User profile attributes in JSON, containing 'topic', 'sub_topic'
+             */
+            attributes: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /** ProfileInput */
+        ProfileInput: {
+            /** Content */
+            content: string;
+            /** Topic */
+            topic: string;
+            /** Sub Topic */
+            sub_topic: string;
+        };
         /** Profiles */
         Profiles: {
             /** Profiles */
@@ -604,6 +905,34 @@ export interface components {
              * @enum {string}
              */
             status: "active" | "suspended";
+        };
+        /** ProjectUser */
+        ProjectUser: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Project Id */
+            project_id: string;
+            /** Additional Fields */
+            additional_fields: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Profile Count */
+            profile_count: number;
+            /** Event Count */
+            event_count: number;
         };
         /** Projects */
         Projects: {
@@ -632,6 +961,16 @@ export interface components {
             occurred_at: string;
             /** Evidence */
             evidence?: components["schemas"]["Evidence"][];
+        };
+        /** SearchInput */
+        SearchInput: {
+            /** Query */
+            query: string;
+            /**
+             * Limit
+             * @default 10
+             */
+            limit: number;
         };
         /** SearchResult */
         SearchResult: {
@@ -726,6 +1065,43 @@ export interface components {
             /** Expression */
             expression: string;
         };
+        /** Usage */
+        Usage: {
+            /** Usages */
+            usages: components["schemas"]["DailyUsage"][];
+        };
+        /** UserData */
+        UserData: {
+            /**
+             * Data
+             * @description User additional data in JSON
+             */
+            data?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Id
+             * @description User ID in UUIDv4/5
+             */
+            id?: string | null;
+            /**
+             * Created At
+             * @description Timestamp when the user was created
+             */
+            created_at?: string | null;
+            /**
+             * Updated At
+             * @description Timestamp when the user was last updated
+             */
+            updated_at?: string | null;
+        };
+        /** Users */
+        Users: {
+            /** Users */
+            users: components["schemas"]["ProjectUser"][];
+            /** Count */
+            count: number;
+        };
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -744,6 +1120,37 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    getUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserData"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     forgetUser: {
         parameters: {
             query?: never;
@@ -1110,19 +1517,55 @@ export interface operations {
             };
         };
     };
-    search: {
+    addProfile: {
         parameters: {
-            query: {
-                query: string;
-                limit?: number;
-            };
+            query?: never;
             header?: never;
             path: {
                 user_id: string;
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfileInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdData"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SearchInput"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -1395,6 +1838,339 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LegacyToken"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    healthcheck: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Health"];
+                };
+            };
+        };
+    };
+    listUsers: {
+        parameters: {
+            query?: {
+                search?: string;
+                order_by?: "updated_at" | "profile_count" | "event_count";
+                order_desc?: boolean;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Users"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    createUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserData"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdData"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    deleteProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    updateProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfileInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    getEvents: {
+        parameters: {
+            query?: {
+                limit?: number;
+                time_range_in_days?: number;
+            };
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Events"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    deleteEvent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+                event_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    getContext: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContextInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Context"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    getConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileConfig"];
+                };
+            };
+        };
+    };
+    updateConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfileConfig"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    getUsage: {
+        parameters: {
+            query?: {
+                last_days?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Usage"];
                 };
             };
             /** @description Validation Error */

@@ -5,7 +5,7 @@ from api import app
 from memoia_server.env import CONFIG
 from fastapi.testclient import TestClient
 
-PREFIX = "/api/v1"
+PREFIX = "/api"
 CONFIG.profile_strict_mode = False
 CONFIG.minimum_chats_token_size_for_event_summary = 5
 CONFIG.event_tags = [
@@ -30,7 +30,7 @@ async def db_env():
     client = TestClient(app)
     response = client.get(f"{PREFIX}/healthcheck")
     d = response.json()
-    if response.status_code == 200 and d["errno"] == 0:
+    if response.status_code == 200 and d["status"] == "ok":
         yield
     else:
         pytest.fail("Database not available: integration tests must not silently skip")

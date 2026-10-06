@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 
 from memoia_server.controllers import source
 from memoia_server.connectors import Session
+from memoia_server.env import CONFIG
 from memoia_server.connectors import get_redis_client
 from memoia_server.controllers.user_lease import UserLease
 from memoia_server.models.database import User, UserEvent
@@ -46,9 +47,7 @@ def models(monkeypatch):
                                            fact_ids=[f["id"]]) for f in facts])
     monkeypatch.setattr(source, "extract_source", extract)
     monkeypatch.setattr(source, "reconcile_facts", reconcile)
-    async def vectors(project_id, facts):
-        return "\n".join(f["content"] for f in facts), [None] * (len(facts) + 1)
-    monkeypatch.setattr(source, "_event_vectors", vectors)
+    monkeypatch.setattr(CONFIG, "enable_event_embedding", False)
     async def tags(*args, **kwargs):
         return []
     monkeypatch.setattr(source, "rebuild_event_tags", tags)

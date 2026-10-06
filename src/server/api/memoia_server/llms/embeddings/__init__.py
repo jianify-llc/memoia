@@ -5,6 +5,7 @@ import numpy as np
 from openai import BadRequestError, AuthenticationError, PermissionDeniedError, NotFoundError
 from traceback import format_exc
 from ...env import CONFIG, LOG
+from ...errors import ExternalAPIError
 from ...models.utils import Promise
 from ...models.response import CODE
 from ...models.database import DEFAULT_PROJECT_ID
@@ -49,7 +50,7 @@ async def get_embedding(
     if not texts:
         return Promise.resolve(np.empty((0, CONFIG.embedding_dim)))
     if CONFIG.embedding_batch_size < 1:
-        return Promise.reject(CODE.SERVICE_UNAVAILABLE, "Invalid embedding batch configuration")
+        return Promise.reject(CODE.UNPROCESSABLE_ENTITY, "Invalid embedding batch configuration")
     if any(len(get_encoded_tokens(text)) > CONFIG.embedding_max_token_size for text in texts):
         return Promise.reject(CODE.BAD_REQUEST, "Embedding input exceeds complete-text limit")
     try:
@@ -63,9 +64,16 @@ async def get_embedding(
             batches.append(vectors)
         results = np.concatenate(batches, axis=0)
         latency_ms = (time.time() - start_time) * 1000
-    except (BadRequestError, AuthenticationError, PermissionDeniedError, NotFoundError) as e:
+    except (BadRequestError, AuthenticationError, PermissionDeniedError, NotFoundError, ValueError) as e:
         LOG.error("Embedding configuration rejected (%s)", type(e).__name__)
         return Promise.reject(CODE.UNPROCESSABLE_ENTITY, "Embedding configuration rejected")
+    except ExternalAPIError as e:
+        status = e.status_code
+        if status in {400, 401, 403, 404, 422}:
+            LOG.error("Embedding configuration rejected (%s)", status)
+            return Promise.reject(CODE.UNPROCESSABLE_ENTITY, "Embedding configuration rejected")
+        LOG.error("Embedding provider unavailable (%s)", status)
+        return Promise.reject(CODE.SERVICE_UNAVAILABLE, "Embedding generation failed")
     except Exception as e:
         LOG.error("Embedding generation failed (%s)", type(e).__name__)
         return Promise.reject(CODE.SERVICE_UNAVAILABLE, "Embedding generation failed")

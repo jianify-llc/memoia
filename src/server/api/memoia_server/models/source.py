@@ -180,6 +180,7 @@ class Sources(StrictModel):
 
 
 class Profile(StrictModel):
+    created_at: datetime
     id: UUID
     content: str
     topic: str

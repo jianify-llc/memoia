@@ -6,7 +6,7 @@ from pydantic import BaseModel, UUID4, UUID5, Field
 from .blob import BlobData, OpenAICompatibleMessage
 from .claim import ClaimData
 from .action import ActionData
-from .source import EventTime, SourceObservation
+from .source import EventTime, SourceObservation, Evidence
 
 UUID = UUID4 | UUID5
 
@@ -108,6 +108,9 @@ class EventGistData(BaseModel):
 
 
 class EventData(BaseModel):
+    source_id: str | None = None
+    blob_id: UUID | None = None
+    evidence: list[Evidence] = Field(default_factory=list)
     profile_delta: Optional[list[ProfileDelta]] = Field(
         None, description="List of profile data"
     )

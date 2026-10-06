@@ -70,7 +70,7 @@ Test 长检查先于 Git 连接，hook 按目标 ref 验证本次提交和远端
 
 ## 上下文接口的隐私边界
 
-Luvel 读取上下文使用 `POST /api/v1/users/context/{user_id}`，在 JSON body 传 `chats_str` 和 `customize_context_prompt`，沿用现有 Bearer 鉴权及响应结构。GET 仅供既有其它客户端兼容；Luvel 不能在 POST 失败时回退到把聊天内容放进 URL 的 GET。上线须先发布 Memoia POST，再切 Luvel 调用。验收正常、非法输入、超时和服务端异常时，入口日志、反向代理 URL 及 Trace 不得出现聊天正文或模板。
+Luvel 用唯一固定 SDK 调用 `POST /api/users/{user_id}/context`，JSON body 为 query/max_token_size，成功返回 `{context}`。查询只在正文，GET 查询和旧版本路由不兼容；错误、日志、Trace 不回显正文。画像独立 GET profiles。Memoia、Luvel 和 Inspector 必须协调上线这一不兼容协议，部署与真实业务验收分别记录。
 
 历史 GET URL 已可能进入 Cloudflare Workers Logs／Traces、Tunnel／代理访问日志或外部日志目的地；POST 切换不会清除这些记录。发布前核对各目的地的访问角色、导出设置及实际保留期限；有定向清理能力才按受影响时间及路径限定清理，否则限制访问并记录到期时间。实际账号和其它日志目的地须现场核实。
 
@@ -118,9 +118,9 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 
 日常更新假定候选与现有 schema、持久化队列和处理状态兼容；拉取镜像后正常停止旧 API，再启动新 API，接受短暂不可用。正常退出不等于每个请求已向调用方返回最终结果；中断/超时的写入由业务链保留未知结果，不在部署脚本中清队列、重置状态或自动重放。数据库结构、embedding 身份或处理状态协议不兼容的变化走单独维护，不沿用普通发布入口。
 
-## Schema 维护与 v2 升级
+## Schema 维护与来源模型升级
 
-现有 v1 库升级 v2 是显式维护，不是普通 `prepare`。当前 Alembic 链依次为 `0001_v1_baseline`、`0002_sources_v2`、`0003_profile_history`、`0004_key_scopes_search`、`0005_user_tombstones`、`0006_source_blob_messages`、`0007_event_time_evidence`。0001 严格接纳匹配的完整 v1 库；漂移须停止调查，不重建历史数据。0005 增加永久用户墓碑；0006 将旧批次保留为 legacy 来源，建立 Blob／消息归属约束并清除完成输入原文，未完成输入暂留 7 天。0006 为不可逆原文清理及 v2/0.3 协议调整，调用方必须协调升级，不能走普通 API 更新或恢复旧 API。不要 stamp 或手填 schema 指纹绕过维护。迁移范围见[服务端迁移说明](../src/server/api/migrations/README)与[数据及恢复契约](../src/server/api/V2-DESIGN.md)。
+现有 v1 库升级 v2 是显式维护，不是普通 `prepare`。当前 Alembic 链依次为 `0001_v1_baseline`、`0002_sources_v2`、`0003_profile_history`、`0004_key_scopes_search`、`0005_user_tombstones`、`0006_source_blob_messages`、`0007_event_time_evidence`。0001 严格接纳匹配的完整 v1 库；漂移须停止调查，不重建历史数据。0005 增加永久用户墓碑；0006 将旧批次保留为 legacy 来源，建立 Blob／消息归属约束并清除完成输入原文，未完成输入暂留 7 天。0006 为不可逆原文清理及 v2/0.3 协议调整，调用方必须协调升级，不能走普通 API 更新或恢复旧 API。不要 stamp 或手填 schema 指纹绕过维护。迁移范围见[服务端迁移说明](../src/server/api/migrations/README)与[数据及恢复契约](../src/server/api/API-DESIGN.md)。
 
 本轮 `migrate-schema`／`finalize-schema` 仅允许 Test。操作顺序：
 
@@ -172,7 +172,7 @@ Actions 只上传脚本到 .deploy/candidates，不覆盖 Compose/.env/YAML。su
 
 需要显式 schema 维护时，手动 Test 工作流选择 `deploy=false`：仍完成镜像发布、源码／架构／匿名拉取校验及候选记录，但不访问部署 Environment、不调用普通 prepare/finalize，也不标记成功 Deployment。随后使用同一 SHA／run／digest 的候选走上述维护入口；缺省 `deploy=true` 仍为普通部署。
 
-日常 smoke 只验收基础部署：健康、Bearer 正反例及探针用户创建/读取/删除。Deployment 状态与 Actions summary 明确记录此范围，不代表完整记忆业务通过。首次部署、修改记忆处理或模型/embedding 配置时，使用已有 verify-sdk.py 工具单独完成核心闭环并记录候选 digest；不在每次普通发布中自动运行全套真实模型探针，也不新增通用排空机制。
+日常 smoke 只验收基础部署：健康、Bearer 正反例及探针用户创建/读取/删除。Deployment 状态与 Actions summary 明确记录此范围，不代表完整记忆业务通过。首次部署、修改记忆处理或模型/embedding 配置时，使用已有 sdk-probe.mjs 工具单独完成核心闭环并记录候选 digest；不在每次普通发布中自动运行全套真实模型探针，也不新增通用排空机制。
 
 同 digest 重跑只证明部署通道；A→B 更新和 B→A 恢复需要两个不同兼容 digest，未完成不得宣称通过。
 
@@ -196,17 +196,15 @@ Actions 只上传脚本到 .deploy/candidates，不覆盖 Compose/.env/YAML。su
 
 ShellCheck/actionlint/Bash 语法仅静态验证。test_workflow.py 解析真实 workflow 并执行部署步骤的原始 shell，mock SSH/git/smoke 等外部命令，覆盖直连参数、缺失配置、非法输入、旧提交、SSH 失败和凭据清理。发布边界测试在一次性 Linux 容器 mock 外部系统；recovery 测试覆盖隔离身份与 RDB→AOF 顺序。均不连接真实 DB/Cloudflare/GitHub，不代替真实业务/恢复验收。
 
-`verify-sdk.py create|verify|cleanup|inspect|no-event|verify-auth HTTPS_ORIGIN RECEIPT` 使用仓库内未改名 SDK，token 仅从 stdin 读取。create 验证小批量显式 flush、大批量插入自动完成、最终事件 ID、画像与真实 embedding 搜索；verify 不重放写入；cleanup 仅操作属于探针的已知事件和用户；inspect 只读核查未知结果。no-event 是条件探针，真实模型不保证问候语一定生成空摘要；有效事件会使该探针不通过，而不是服务协议失败，已知 ID 必须保存并人工核查，不能放宽业务校验。合法 event_id:null、空摘要和 parser 拒绝空 JSON 另有自动协议测试。receipt 先于每次外部写入持久记录阶段，任何未知结果保留且拒绝重跑。不把 blob ID 当 event ID。实际响应异常或 timeout 后先核查，不能通过删除 receipt 开始新一轮重放。
+### TypeScript SDK 真实探针
 
-### v2 TypeScript SDK 真实探针
-
-`v2-sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.5.0 已构建产物，不安装依赖、不构建源码、不重新打 SDK 包。stdin 是一个 JSON 对象：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 为整体等待预算，默认 360000、上限 900000；地址和 token 不放 argv 或日志。输入与输出都应保存为 root:root 0600 的受保护文件，不进入公开 artifact。探针的专用两消息来源必须确认消息、Blob、证据的 next_*_offset 全为 null，不能以部分页证明重放或删除完整性。
+`sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.7.0 已构建产物，不安装依赖、不构建源码、不重新打 SDK 包。stdin 是一个 JSON 对象：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 为整体等待预算，默认 360000、上限 900000；地址和 token 不放 argv 或日志。输入与输出都应保存为 root:root 0600 的受保护文件，不进入公开 artifact。探针的专用两消息来源必须确认消息、Blob、证据的 next_*_offset 全为 null，不能以部分页证明重放或删除完整性。
 
 探针使用随机 UUID 的专用新用户，分别验证缺失／错误 Bearer、首次导入隐式创建用户、固定幂等键和 operation ID 的结果查询、来源证据、非空画像、事件搜索、真实画像历史。只有首次导入已明确 completed 后，才进行一次显式幂等重放：以完全相同正文和 key 再 POST，必须立即返回同一已完成操作及 source/event IDs，重新读取来源、画像和专用用户的完整事件列表，确认身份和数量不增长。随后撤回一条消息验证剩余证据，撤回另一条验证画像／来源证据／历史内容／事件不再返回失效内容。历史审计行可以保留，但其失效画像内容不能返回。原有业务检查全部通过后，调用 v2 `forgetUser`，严格确认同 UUID／`forgotten: true` 提交回执；只有这次回执确认后，才明确重复一次同 UUID 的 DELETE 验证幂等。随后使用预先记录的新 key／external ID 单次尝试迟到导入，必须是 SDK `MemoiaError` 的 HTTP 410／`user_forgotten`／`retryable: false`／`outcome: rejected`，普通 404、鉴权失败或意外接纳均不通过。
 
 除已确认完成的导入回放和已确认提交的遗忘重复这两项明确测试外，每个 mutation 最多发送一次。导入仍 processing 或丢失 ACK 未确认时只按固定 key 查询，绝不重发正文、自动调用 retryOperation 或重置身份；遗忘、遗忘重复或迟到导入的未知结果直接失败，不发送后续 mutation，也不自动清理。迟到导入若意外返回 operation，保留全部已知 operation/source/event/profile IDs，不因为它已 completed 或 failed 就把验收记为通过。
 
-正常路径已永久遗忘本次随机用户，最后仅通过读取确认不存在；进入遗忘阶段后绝不退回 v1 普通 DELETE 掩盖失败。遗忘前的已知失败仍可用原有 v1 普通删除清理探针用户，但不构成永久遗忘证明。CLI stdout 是逐行 JSON：每个写入前的 `kind: boundary`／`stage: *.before` 记录先保存 UUID、固定 key 和累积已知票据；收到回执后再追加 `*.receipt`、`*.rejected` 或 `*.unknown` 检查点，最后一条 `kind: result` 是最终结果。内容仅含布尔检查、UUID／幂等键、阶段和计数，不包含 token、URL 或正文。`runProbe` 的可选异步 `checkpoint` 回调默认无操作，返回对象不变；提供回调时必须等待保存完成，回调拒绝就停止后续写入，包括失败清理。
+正常路径已永久遗忘本次随机用户，最后仅通过读取确认不存在；进入遗忘阶段后未知结果停止后续写入。遗忘前的已知失败仅对本批随机用户用同一正式 SDK 永久遗忘清理，并严格确认回执。CLI stdout 是逐行 JSON：每个写入前的 `kind: boundary`／`stage: *.before` 记录先保存 UUID、固定 key 和累积已知票据；收到回执后再追加 `*.receipt`、`*.rejected` 或 `*.unknown` 检查点，最后一条 `kind: result` 是最终结果。内容仅含布尔检查、UUID／幂等键、阶段和计数，不包含 token、URL 或正文。`runProbe` 的可选异步 `checkpoint` 回调默认无操作，返回对象不变；提供回调时必须等待保存完成，回调拒绝就停止后续写入，包括失败清理。
 
 真实验收应把 CLI stdout 直接追加到已创建的受保护普通文件；CLI 等待每行写完，并仅在 stdout FD 确为普通文件时执行 fsync，再越过写入边界。管道、终端或 Docker stdout 转发只能证明本进程完成流写入，不证明接收端已持久化，不用于进程退出保护验收。不要用 `>` 覆盖旧失败证据。最终验收读取最后一个 `kind: result`，不把中间 `success: false` 的 boundary 当作最终结果；只有 `*.before` 没有确认回执时，保守视为未知，不自动重放。任一业务检查失败、结果未知、检查点保存失败或清理无法确认，进程均退出非零；保留 user_id、import_key、late_import_key 和所有已知 ID 供核查，不通过重跑新用户替代核查。若进程在首个边界前退出、没有输出，需从服务端操作记录和日志核查，不能宣称已经清理。独立加载修订探针时应记录脚本 SHA 与固定 SDK 包 SHA；不把尚未进入镜像的探针修订宣称为该镜像源码的一部分。
 
@@ -215,19 +213,19 @@ ShellCheck/actionlint/Bash 语法仅静态验证。test_workflow.py 解析真实
 ```bash
 sudo -n sh -c '
   umask 077
-  mkdir -m 700 /opt/memoia/.deploy/v2-probe-UNIQUE
-  : > /opt/memoia/.deploy/v2-probe-UNIQUE/evidence.ndjson
+  mkdir -m 700 /opt/memoia/.deploy/sdk-probe-UNIQUE
+  : > /opt/memoia/.deploy/sdk-probe-UNIQUE/evidence.ndjson
   exec docker run --rm -i --read-only --user 0:0 --network host \
-    --mount type=bind,source=/opt/memoia/.deploy/candidates/RUN_ID/v2-sdk-probe.mjs,target=/probe.mjs,readonly \
+    --mount type=bind,source=/opt/memoia/.deploy/candidates/RUN_ID/sdk-probe.mjs,target=/probe.mjs,readonly \
     --mount type=bind,source=/opt/memoia/.deploy/candidates/RUN_ID/sdk/package,target=/sdk,readonly \
-    --mount type=bind,source=/opt/memoia/.deploy/v2-probe-UNIQUE/evidence.ndjson,target=/receipt.ndjson \
+    --mount type=bind,source=/opt/memoia/.deploy/sdk-probe-UNIQUE/evidence.ndjson,target=/receipt.ndjson \
     --entrypoint sh ghcr.io/jianify/memoia-inspector@sha256:已验收的镜像digest \
     -c "exec node /probe.mjs /sdk/dist/index.js >> /receipt.ndjson" \
-    < /opt/memoia/.deploy/v2-probe-input.json
+    < /opt/memoia/.deploy/sdk-probe-input.json
 '
 ```
 
-只有真实服务未使用模型 mock、实际配置启用事件 embedding 且供应商调用证据吻合时，才能把导入／搜索成功记为模型与 embedding 通过；单独 `embedding_search=true` 不证明服务启用了向量调用。脚本级测试 `node --test deploy/tests/test_v2_sdk_probe.mjs` 使用假 SDK／本机 HTTP 边界，验证探针自己的重放、deadline、过滤、清理、脱敏、检查点拒绝停写和进程退出留证行为，不是业务验收。原 v1 SDK 探针继续保留，v2 不替代旧契约回归。
+只有真实服务未使用模型 mock、实际配置启用事件 embedding 且供应商调用证据吻合时，才能把导入／搜索成功记为模型与 embedding 通过；单独 `embedding_search=true` 不证明服务启用了向量调用。脚本级测试 `node --test deploy/tests/test_sdk_probe.mjs` 使用假 SDK／本机 HTTP 边界，验证探针自己的重放、deadline、过滤、清理、脱敏、检查点拒绝停写和进程退出留证行为，不是业务验收。旧 SDK 探针已退役；现有探针只覆盖正式协议。
 
 2026-09-27 首次真实验收发现人工 .env 的数据根误写成 dat，备份的实际挂载检查正确阻断；已通过单独停写备份和目录维护校正，SDK 原事件仍可读。必须核验解析和运行时挂载，不能只核验模板或预建空目录；日常发布不能自动搬数据。详见 validation 记录。
 

@@ -73,7 +73,7 @@ async def idle_buffer(db_env):
 
 
 @pytest.mark.asyncio
-async def test_asgi_async_flush_hands_off_to_new_owner_and_commits_once(idle_buffer, bounded_source_model, monkeypatch):
+async def test_legacy_async_flush_hands_off_to_new_owner_and_commits_once(idle_buffer, bounded_source_model, monkeypatch):
     uid, bid = idle_buffer
     owners, extracted = [], []
     released = asyncio.Event()
@@ -106,11 +106,12 @@ async def test_asgi_async_flush_hands_off_to_new_owner_and_commits_once(idle_buf
     monkeypatch.setattr(UserLease, "__aexit__", observe_exit)
     monkeypatch.setattr(background, "flush_buffer_by_ids_in_background", after_response_release)
     bounded_source_model.side_effect = observe_extract
-    monkeypatch.setenv("ACCESS_TOKEN", "async-flush-local-test-only")
-    async with AsyncClient(transport=ASGITransport(app=app, raise_app_exceptions=False),
-                           base_url="http://test.local", headers={"Authorization": "Bearer async-flush-local-test-only"}) as client:
-        response = await client.post(f"/api/v1/users/buffer/{uid}/chat?wait_process=false")
-    assert response.status_code == 200 and response.json()["errno"] == 0
+    # 旧 HTTP 路由已退出；仍需证明已有缓冲恢复能交接 lease 并原子清理。
+    async with UserLease(uid, "__root__"):
+        worker = asyncio.create_task(after_response_release(
+            uid, "__root__", BlobType.chat, [str(bid)], max_processing_time_s=2,
+        ))
+    await worker
     with Session() as session:
         assert session.scalar(select(BufferZone.status).where(BufferZone.id == bid)) is None
         assert session.scalar(select(func.count()).select_from(memory_blobs).where(memory_blobs.c.user_id == uid)) == 1
@@ -181,7 +182,7 @@ async def test_cancel_while_waiting_keeps_request_owner_and_idle(idle_buffer, bo
 
 
 @pytest.mark.asyncio
-async def test_background_and_v2_share_real_owner_and_register_one_generation(idle_buffer, bounded_source_model, monkeypatch):
+async def test_background_and_source_share_real_owner_and_register_one_generation(idle_buffer, bounded_source_model, monkeypatch):
     uid, bid = idle_buffer
     entered, release = asyncio.Event(), asyncio.Event()
     original_extract = bounded_source_model.side_effect

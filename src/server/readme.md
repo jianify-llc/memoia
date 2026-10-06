@@ -4,7 +4,7 @@
 
 This is the independently maintained server from [jianify-llc/memoia](https://github.com/jianify-llc/memoia),
 derived from Memobase under Apache-2.0. The Python package is `memoia_server`;
-client SDKs remain `memobase`. References to upstream features below remain applicable.
+the supported SDK is `@jianify/memoia`, using the unversioned `/api` contract. Inherited upstream references below describe historical configuration, not API compatibility.
 
 **Existing installations:** follow the [release and rollback guide](../../docs/guide/memoia-release.md).
 Do not rename Compose resources, move data directories, or run development cleanup scripts on existing data.
@@ -16,7 +16,7 @@ Do not rename Compose resources, move data directories, or run development clean
       <img alt="Shows the Memobase logo" src="https://assets.memodb.io/memobase-light.svg" width="424">
     </picture>
   </a>
-  <p><strong>Memoia, compatible with the Memobase API</strong></p>
+  <p><strong>Memoia memory service</strong></p>
   <p>
     <img src="https://img.shields.io/github/v/tag/memodb-io/memobase">
   </p>

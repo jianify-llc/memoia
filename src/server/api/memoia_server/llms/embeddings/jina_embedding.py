@@ -24,10 +24,10 @@ async def jina_embedding(
             "truncate": True,
             "dimensions": CONFIG.embedding_dim,
         },
-        timeout=20,
+        timeout=10,
     )
     if response.status_code != 200:
-        raise ExternalAPIError(f"Failed to embed texts: {response.text}")
+        raise ExternalAPIError("Embedding request rejected", status_code=response.status_code)
     data = response.json()
     LOG.info(
         f"Jina embedding, {model}, {phase}, {data['usage']['prompt_tokens']}/{data['usage']['total_tokens']}"

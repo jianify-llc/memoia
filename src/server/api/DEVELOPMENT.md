@@ -4,17 +4,17 @@
 <!-- Modified for Memoia: corrected package layout and maintenance boundary. -->
 
 Implementation modules below live under `src/server/api/memoia_server/`; the
-ASGI entry point is the sibling `src/server/api/api.py`. Memobase SDK modules
-remain under `src/client/` and are not renamed or republished in this release.
+ASGI entry point is the sibling `src/server/api/api.py`. The only maintained SDK
+is `@jianify/memoia` under `sdks/typescript/`; upstream SDKs have been retired.
 
-V2 的可靠来源写入、证据撤回、幂等恢复及检索边界以 [V2-DESIGN.md](V2-DESIGN.md)
-为准；协议由 `export-openapi.py openapi-v2.json` 生成，TypeScript SDK 位于
-`sdks/typescript/`。旧 v1 SDK 和 URL 保持兼容，不承诺其具有调用方未提供的幂等身份。
+可靠来源写入、证据撤回、幂等恢复及检索边界以 [API-DESIGN.md](API-DESIGN.md)
+为准；协议由 `export-openapi.py openapi.json` 生成，TypeScript SDK 位于
+`sdks/typescript/`。只支持唯一 `/api` 和 `@jianify/memoia` SDK；软件版本和历史迁移编号不表示多套运行时协议。
 数据库只能经显式 [Alembic 链](migrations/README) 修改；import 不执行 DDL。
 
 ## Project Overview
 
-Memoia is a user memory system derived from Memobase. Sources and evidence are the truth; profiles and events are derived memories. This guide describes the module layout; V2-DESIGN defines the current processing contracts.
+Memoia is a user memory system derived from Memobase. Sources and evidence are the truth; profiles and events are derived memories. This guide describes the module layout; API-DESIGN defines the current processing contracts.
 
 ## System Architecture
 
@@ -51,7 +51,7 @@ memoia_server/
 │   ├── blob.py             # Data blob handling
 │   ├── buffer.py           # Legacy buffer operations
 │   ├── profile.py          # Direct PostgreSQL profile reads
-│   ├── source.py           # Atomic v2 processing and withdrawal
+│   ├── source.py           # Atomic source processing and withdrawal
 │   ├── user_lease.py       # Shared user mutation coordination
 │   └── modal/              # Modal processing
 ├── connectors.py           # Database and Redis connections
@@ -87,14 +87,14 @@ sequenceDiagram
 
 ### 1. Entry Points
 - FastAPI Server: `api.py`
-- Main Routes: `/api/v1/*` and `/api/v2/*`
-- Health Check: `/api/v1/healthcheck`
+- Main Routes: `/api/*`
+- Health Check: `/api/healthcheck`
 
 ### 2. Core Services
 - User Management
 - Memory Storage
 - Profile Processing
-- Buffer Management
+- Source imports, retractions and operation recovery
 
 ### 3. External Dependencies
 - PostgreSQL Database
@@ -104,14 +104,14 @@ sequenceDiagram
 ## Quick Start Routes
 
 ### User Flow
-1. Create User: `POST /api/v1/users`
-2. Get Profile: `GET /api/v1/users/profile/{user_id}`
-3. Update User: `PUT /api/v1/users/{user_id}`
+1. Create User: `POST /api/users`
+2. Get Profile: `GET /api/users/{user_id}/profiles`
+3. Permanently forget user: `DELETE /api/users/{user_id}` (strict tombstone receipt).
 
 ### Memory Flow
-1. Insert Memory: `POST /api/v1/blobs/insert/{user_id}`
-2. Process Buffer: `POST /api/v1/users/buffer/{user_id}/{buffer_type}`
-3. Get Profile: `GET /api/v1/users/profile/{user_id}`
+1. Import a bounded source: `POST /api/users/{user_id}/blobs` with source_id/idempotency_key/complete timestamped messages.
+2. Inspect the accepted operation with `GET /api/users/{user_id}/operations/by-key/{key}`; no flush endpoint exists.
+3. Get Profile: `GET /api/users/{user_id}/profiles`
 
 ## Configuration Points
 
@@ -147,15 +147,15 @@ graph LR
 ## Common Development Paths
 
 ### 1. Adding New Features
-1. Define route in `api.py`
+1. Define a typed route in `api_layer/`; register it in `api.py` and the export entry.
 2. Create controller in `controllers/`
 3. Add model in `models/`
 4. Update response types
 
 ### 2. Modifying Memory Processing
 1. Update prompts in `prompts/`
-2. Modify profile controller
-3. Adjust buffer settings
+2. Modify source extraction or profile merging in `controllers/`.
+3. Verify source replay, evidence retraction and failure recovery using isolated fixtures.
 
 ### 3. Database Changes
 1. Update models and add a forward Alembic revision; never edit an executed migration.
@@ -168,13 +168,13 @@ graph LR
 ### Core Functionality
 ```bash
 # Health Check
-curl -X GET http://localhost:8019/api/v1/healthcheck
+curl -X GET http://localhost:8019/api/healthcheck
 
 # Create User
-curl -X POST http://localhost:8019/api/v1/users -H "Content-Type: application/json" -d '{"data":{}}'
+curl -X POST http://localhost:8019/api/users -H "Content-Type: application/json" -d '{"data":{}}'
 
 # Get Profile
-curl -X GET http://localhost:8019/api/v1/users/profile/{user_id}
+curl -X GET http://localhost:8019/api/users/{user_id}/profiles
 ```
 
 ## Common Integration Points

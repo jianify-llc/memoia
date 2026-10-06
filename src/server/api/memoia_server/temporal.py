@@ -1,8 +1,5 @@
-"""Shared time evidence validation, rendering and soft relevance ranking."""
-import calendar
+"""Shared time evidence validation and derived retrieval/context text."""
 import json
-import re
-from datetime import date
 
 from .models.source import EventTime
 
@@ -23,34 +20,23 @@ def source_observations(groups, messages):
             if m["message_id"] in ids and m.get("occurred_at") is not None]
 
 
-def query_periods(query):
-    """Only explicit ISO calendar clues; never guess natural-language relative dates."""
-    periods = []
-    for match in re.finditer(r"(?<![0-9A-Za-z-])(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?(?![0-9A-Za-z-])", query):
-        year, month, day = (int(v) if v else None for v in match.groups())
-        if not 1800 <= year <= 2200:
-            continue
-        try:
-            start = date(year, month or 1, day or 1)
-            if day:
-                end = start
-            elif month:
-                end = date(year, month, calendar.monthrange(year, month)[1])
-            else:
-                end = date(year, 12, 31)
-        except ValueError:
-            continue
-        periods.append((start, end))
-    return periods
-
-
-def time_overlap(value, periods):
-    if not value or not periods:
-        return False
-    time = EventTime.model_validate(value)
-    if time.start is None:
-        return False
-    return any(time.start <= end and time.end >= start for start, end in periods)
+def render_search_fact(content, event_time):
+    """Derive searchable dates only from valid event evidence, never recording time."""
+    if event_time is None:
+        return content
+    time = EventTime.model_validate(event_time)
+    if time.precision == "unknown":
+        return content
+    start = time.start.isoformat()
+    if time.precision == "year":
+        label = start[:4]
+    elif time.precision == "month":
+        label = start[:7]
+    elif time.precision == "day":
+        label = start
+    else:
+        label = f"{start} to {time.end.isoformat()}"
+    return f"{content}\n[Event time: {label}; precision: {time.precision}]"
 
 
 def render_gist(gist):

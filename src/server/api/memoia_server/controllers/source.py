@@ -23,7 +23,7 @@ from ..models.source import (
     user_memory_tombstones as tombstones, ForgottenUser,
     EventTime,
 )
-from ..temporal import supported_event_time, source_observations
+from ..temporal import supported_event_time, source_observations, render_search_fact
 from ..utils import get_encoded_tokens
 from ..llms.openai_model_llm import openai_complete
 from ..llms import record_completion_usage
@@ -495,11 +495,12 @@ def get_history(user_id, project_id, limit=50, offset=0):
 
 
 async def _event_vectors(project_id, source_facts):
-    texts = [f["content"] for f in source_facts]
+    # 导入和撤回重建共用派生文本，时间依据失效后不会留在新向量中。
+    texts = [render_search_fact(f["content"], f.get("event_time")) for f in source_facts]
     content = "\n".join(f"- {line}" for line in texts)
     if not texts or not CONFIG.enable_event_embedding:
-        return content, [None] * (len(texts) + 1)
-    result = await get_embedding(project_id, [content, *texts])
+        return content, [None] * len(texts)
+    result = await get_embedding(project_id, texts)
     if not result.ok():
         if result.code() == 400:
             raise SourceError("embedding_input_too_long", "Complete event exceeds embedding input limit", 413)
@@ -524,14 +525,16 @@ def _write_event(session, user_id, project_id, source_row, source_facts, content
                       "content": f["content"], "topic": f["topic"], "sub_topic": f["sub_topic"],
                       "support_groups": f["support_groups"], "event_time": f.get("event_time"),
                       "source_messages": source_observations(f["support_groups"], message_rows)} for f in source_facts],
-    }, embedding=vectors[0])
+    }, embedding=None)
     event.id = event_id
     event.created_at = max(f["occurred_at"] for f in source_facts)
     session.add(event)
     session.flush()
-    for evidence, fact, vector in zip(event.event_data["evidence"], source_facts, vectors[1:], strict=True):
+    for evidence, fact, vector in zip(event.event_data["evidence"], source_facts, vectors, strict=True):
         session.add(UserEventGist(user_id=user_id, project_id=project_id, event_id=event_id,
-                                 gist_data={"content": fact["content"], "fact_id": str(fact["id"]),
+                                 gist_data={"content": fact["content"],
+                                            "search_text": render_search_fact(fact["content"], evidence["event_time"]),
+                                            "fact_id": str(fact["id"]),
                                             "source_id": source_row["source_id"], "blob_id": str(source_row["id"]),
                                             "event_time": evidence["event_time"],
                                             "source_messages": evidence["source_messages"]}, embedding=vector))

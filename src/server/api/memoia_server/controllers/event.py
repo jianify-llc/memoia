@@ -1,16 +1,22 @@
 # Modified for Memoia: relocated from the upstream memobase_server package.
+import asyncio
 from pydantic import ValidationError
 from ..models.database import UserEvent, UserEventGist
-from ..models.response import UserEventData, UserEventsData, EventData
+from ..models.response import UserEventData, UserEventsData, EventData, EventGistData
+from ..models.source import Evidence
 from ..models.utils import Promise, CODE
 from ..connectors import Session
 from ..utils import get_encoded_tokens, event_str_repr, event_embedding_str
 
 from ..llms.embeddings import get_embedding
-from datetime import timedelta
-from sqlalchemy import desc, select, or_, literal_column
+from datetime import timedelta, datetime
+from dataclasses import dataclass
+from uuid import UUID
+from sqlalchemy import desc, select, or_, literal_column, literal, union_all, exists
 from sqlalchemy.sql import func
 from ..env import TRACE_LOG, CONFIG
+
+QUERY_EMBEDDING_TIMEOUT_SECONDS = 8
 
 
 async def get_user_events(
@@ -240,123 +246,144 @@ async def update_user_event(
     return Promise.resolve(None)
 
 
-async def search_user_events(
-    user_id: str,
-    project_id: str,
-    query: str,
-    topk: int = 10,
-    similarity_threshold: float = 0.2,
-    time_range_in_days: int = 21,
-) -> Promise[UserEventsData]:
-    if not CONFIG.enable_event_embedding:
-        TRACE_LOG.warning(
-            project_id,
-            user_id,
-            "Event embedding is not enabled, skip search",
-        )
-        return Promise.reject(
-            CODE.NOT_IMPLEMENTED,
-            "Event embedding is not enabled",
-        )
+@dataclass(frozen=True)
+class RetrievedFact:
+    """One ranked fact and its complete evidence; event identity is only an association."""
+    event_id: UUID
+    occurred_at: datetime
+    score: float
+    gist: EventGistData
+    evidence: Evidence | None = None
 
-    query_embeddings = await get_embedding(
-        project_id, [query], phase="query", model=CONFIG.embedding_model
+
+async def retrieve_user_facts(
+    user_id: str, project_id: str, query: str, limit: int = 50,
+) -> Promise[list[RetrievedFact]]:
+    # 事实正文保持原样；新索引文本由写入者统一派生，旧 gist 直接读原正文。
+    gist_text = func.coalesce(
+        UserEventGist.gist_data["search_text"].astext,
+        UserEventGist.gist_data["content"].astext, "",
     )
-    if not query_embeddings.ok():
-        TRACE_LOG.error(
-            project_id,
-            user_id,
-            f"Failed to get embeddings: {query_embeddings.msg()}",
-        )
-        return query_embeddings
-    query_embedding = query_embeddings.data()[0]
-
-    stmt = (
-        select(
-            UserEvent,
-            (1 - UserEvent.embedding.cosine_distance(query_embedding)).label(
-                "similarity"
-            ),
-        )
-        .where(UserEvent.user_id == user_id, UserEvent.project_id == project_id)
-        .where(UserEvent.created_at > func.now() - timedelta(days=time_range_in_days))
-        .where(
-            (1 - UserEvent.embedding.cosine_distance(query_embedding))
-            > similarity_threshold
-        )
-        .order_by(desc("similarity"))
-        .limit(topk)
-    )
-
-    with Session() as session:
-        # Use .all() instead of .scalars().all() to get both columns
-        result = session.execute(stmt).all()
-        user_events: list[UserEventData] = []
-        for row in result:
-            user_event: UserEvent = row[0]  # UserEvent object
-            similarity: float = row[1]  # similarity value
-            user_events.append(
-                UserEventData(
-                    id=user_event.id,
-                    event_data=user_event.event_data,
-                    created_at=user_event.created_at,
-                    updated_at=user_event.updated_at,
-                    similarity=similarity,
-                )
-            )
-
-        # Create UserEventsData with the events
-        user_events_data = UserEventsData(events=user_events)
-        TRACE_LOG.info(
-            project_id,
-            user_id,
-            "Event search completed",
-        )
-
-    return Promise.resolve(user_events_data)
-
-
-async def hybrid_search_user_events(user_id, project_id, query, limit=10):
-    """Fuse independently bounded lexical and vector ranks, not incomparable raw scores."""
-    from ..models.source import SearchEvent, SearchResult
-    from ..temporal import query_periods, time_overlap
+    gist_docs = select(
+        UserEventGist.id.label("id"), UserEventGist.event_id.label("event_id"),
+        literal("gist").label("kind"), gist_text.label("text"),
+        UserEventGist.embedding.label("embedding"),
+    ).where(UserEventGist.user_id == user_id, UserEventGist.project_id == project_id)
+    # 只有没有事实索引的旧事件使用整体文本；同一事件不混用两种粒度贡献排名。
+    has_gists = exists(select(UserEventGist.id).where(
+        UserEventGist.event_id == UserEvent.id,
+        UserEventGist.project_id == UserEvent.project_id,
+        UserEventGist.user_id == UserEvent.user_id,
+    ))
+    old_docs = select(
+        UserEvent.id.label("id"), UserEvent.id.label("event_id"), literal("event").label("kind"),
+        func.coalesce(UserEvent.event_data["event_tip"].astext, "").label("text"),
+        UserEvent.embedding.label("embedding"),
+    ).where(UserEvent.user_id == user_id, UserEvent.project_id == project_id, ~has_gists)
+    documents = union_all(gist_docs, old_docs).subquery()
     candidates = min(500, max(50, limit * 5))
-    document = func.coalesce(UserEvent.event_data["event_tip"].astext, "")
-    vector = func.to_tsvector(literal_column("'simple'"), document)
+    vector = func.to_tsvector(literal_column("'simple'"), documents.c.text)
     terms = func.websearch_to_tsquery(literal_column("'simple'"), query)
-    lexical_score = func.ts_rank_cd(vector, terms)
-    lexical_statement = select(UserEvent).where(UserEvent.user_id == user_id, UserEvent.project_id == project_id,
-        or_(vector.op("@@")(terms), func.lower(document).contains(query.lower(), autoescape=True)))
-    lexical_statement = lexical_statement.order_by(lexical_score.desc(), UserEvent.created_at.desc(), UserEvent.id).limit(candidates)
-    # No connection is held during the remote embedding request.
+    identifiers = (documents.c.id, documents.c.event_id, documents.c.kind)
+    lexical_statement = select(*identifiers).where(or_(
+        vector.op("@@")(terms),
+        func.lower(documents.c.text).contains(query.lower(), autoescape=True),
+    )).order_by(func.ts_rank_cd(vector, terms).desc(), documents.c.id).limit(candidates)
+    def read_lexical():
+        # Session 只在工作线程内存活；跨线程传递普通候选，不传 ORM 实体。
+        with Session() as session:
+            return [dict(row) for row in session.execute(lexical_statement).mappings().all()]
+
+    async def read_query_vector():
+        if not CONFIG.enable_event_embedding:
+            return Promise.resolve(None)
+        try:
+            return await asyncio.wait_for(
+                get_embedding(project_id, [query], phase="query", model=CONFIG.embedding_model),
+                timeout=QUERY_EMBEDDING_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            return Promise.reject(503, "Query embedding deadline exceeded")
+
+    # 词法 SQL 与异步 HTTP 独立并行，不让模型等待挡住可用的词法证据。
+    lexical, embedding = await asyncio.gather(asyncio.to_thread(read_lexical), read_query_vector())
     query_vector = None
-    if CONFIG.enable_event_embedding:
-        embedding = await get_embedding(project_id, [query], phase="query", model=CONFIG.embedding_model)
-        if not embedding.ok():
-            return embedding
-        query_vector = embedding.data()[0]
+    if embedding.ok():
+        vectors = embedding.data()
+        if vectors is not None:
+            query_vector = vectors[0]
+    elif embedding.code() not in {429, 500, 502, 503, 504}:
+        return embedding
+    else:
+        TRACE_LOG.warning(project_id, user_id, "Search degraded to lexical retrieval")
     with Session() as session:
-        lexical = session.scalars(lexical_statement).all()
         semantic = []
         if query_vector is not None:
-            similarity = 1 - UserEvent.embedding.cosine_distance(query_vector)
-            semantic = session.scalars(select(UserEvent).where(UserEvent.user_id == user_id,
-                UserEvent.project_id == project_id, UserEvent.embedding.isnot(None), similarity > .2)
-                .order_by(similarity.desc(), UserEvent.id).limit(candidates)).all()
+            similarity = 1 - documents.c.embedding.cosine_distance(query_vector)
+            semantic = session.execute(
+                select(*identifiers).where(documents.c.embedding.isnot(None), similarity > .2)
+                .order_by(similarity.desc(), documents.c.id).limit(candidates)
+            ).mappings().all()
         scores, rows = {}, {}
         for ranking in (lexical, semantic):
             for rank, row in enumerate(ranking, 1):
-                rows[row.id] = row
-                scores[row.id] = scores.get(row.id, 0) + 1 / (60 + rank)
-        periods = query_periods(query)
-        for key, row in rows.items():
-            if any(time_overlap(f.get("event_time"), periods) for f in row.event_data.get("evidence", [])):
-                scores[key] += .001
+                rows[row["id"]] = row
+                scores[row["id"]] = scores.get(row["id"], 0) + 1 / (60 + rank)
         ordered = sorted(scores, key=lambda key: (-scores[key], str(key)))[:limit]
-        return Promise.resolve(SearchResult(events=[SearchEvent(id=key, content=rows[key].event_data.get("event_tip", ""),
-            source_id=rows[key].event_data.get("source_id"), blob_id=rows[key].event_data.get("blob_id"),
-            score=scores[key], occurred_at=rows[key].created_at,
-            evidence=rows[key].event_data.get("evidence", [])) for key in ordered]))
+        event_ids = {rows[key]["event_id"] for key in ordered}
+        events = {row.id: row for row in session.scalars(select(UserEvent).where(
+            UserEvent.id.in_(event_ids), UserEvent.user_id == user_id,
+            UserEvent.project_id == project_id,
+        ))}
+        gist_ids = [key for key in ordered if rows[key]["kind"] == "gist"]
+        gists = {row.id: row for row in session.scalars(select(UserEventGist).where(
+            UserEventGist.id.in_(gist_ids), UserEventGist.user_id == user_id,
+            UserEventGist.project_id == project_id,
+        ))}
+        result = []
+        for key in ordered:
+            parent = events.get(rows[key]["event_id"])
+            if parent is None:
+                continue  # 删除／隐藏后的事件不能通过旧候选恢复。
+            evidence = None
+            if rows[key]["kind"] == "gist":
+                row = gists.get(key)
+                if row is None:
+                    continue
+                gist = EventGistData.model_validate(row.gist_data)
+                fact_id = row.gist_data.get("fact_id")
+                if fact_id is not None:
+                    evidence = next((
+                        Evidence.model_validate(f) for f in parent.event_data.get("evidence", [])
+                        if str(f["fact_id"]) == str(fact_id)
+                    ), None)
+            else:
+                gist = EventGistData(content=parent.event_data.get("event_tip", ""))
+            result.append(RetrievedFact(parent.id, parent.created_at, scores[key], gist, evidence))
+        return Promise.resolve(result)
+
+
+async def hybrid_search_user_events(user_id, project_id, query, limit=10):
+    from ..models.source import SearchEvent, SearchResult
+    from ..temporal import render_search_fact
+    result = await retrieve_user_facts(user_id, project_id, query, limit)
+    if not result.ok():
+        return result
+    # search 保留事件关联；context 直接使用同一有序事实，不经过事件分组再展开。
+    groups = {}
+    for fact in result.data():
+        if fact.event_id not in groups:
+            groups[fact.event_id] = SearchEvent(
+                id=fact.event_id, content="", score=fact.score,
+                source_id=fact.gist.source_id, blob_id=fact.gist.blob_id,
+                occurred_at=fact.occurred_at, evidence=[],
+            )
+        row = groups[fact.event_id]
+        text = render_search_fact(fact.gist.content, fact.gist.event_time)
+        row.content = "\n".join(filter(None, [row.content, text]))
+        if fact.evidence is not None:
+            row.evidence.append(fact.evidence)
+    return Promise.resolve(SearchResult(events=list(groups.values())))
 
 
 async def filter_user_events(
