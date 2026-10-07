@@ -103,7 +103,12 @@ supported source facts. strict_mode restricts derived profiles in a later stage,
 Return JSON facts with content, topic, sub_topic, support_groups and event_time. Every group is the
 complete set of original message IDs JOINTLY needed to establish a fact; separate groups
 are INDEPENDENT alternative evidence. Include correction/negation messages in their group
-when needed. Do not omit any prerequisite evidence. No facts is valid for no supported,
+when needed. Deduplicate conclusions, NOT their supporting messages: when distinct
+messages independently state the same fact, preserve each independent support_group.
+A repeated confirmation is evidence even if it adds no new fact content. Do not keep
+only the first, latest, or most detailed message. Use a joint group only when its
+messages are jointly necessary, not merely because they discuss the same event.
+Do not omit any prerequisite evidence. No facts is valid for no supported,
 useful facts, including greetings or assistant-only statements; do not invent a fact just
 to make the list nonempty.
 Use the configured language for descriptions. No prose outside JSON."""
@@ -126,6 +131,14 @@ or duration. Prioritize explicit corrections; distinguish separate occurrences.
 Keep occurrence dates in event_time rather than content, so removing a time anchor cannot
 leave an unsupported date inside a surviving fact. The content must be supported by EACH
 alternative support_group independently; all temporal prerequisites belong in its evidence.
+Content support and time support are separate: an independent undated confirmation
+still supports the content, even though it does not support the dated message's time.
+For example, d says 'In May 2024 I visited Bluebird Cafe in Lisbon', and u says
+'I have visited Bluebird Cafe in Lisbon once'. Preserve 'Visited Bluebird Cafe in Lisbon'
+with support_groups [["d"],["u"]] and event_time evidence from d only (May 2024,
+month precision). Do not discard u just because d already states the visit. Alternatively,
+separate facts may preserve both statements with their own supports and times.
+Do not combine different visits or explicit corrections as independent confirmations.
 Example: a message recorded 2026-01-01 in Asia/Shanghai saying '昨天' anchors 2025-12-31
 (day). '去年四月' anchors 2025-04-01 through 2025-04-30 (month), not January 2026.
 An undated 'I stayed in Kyoto once' has event_time null. '那时候' without an identified

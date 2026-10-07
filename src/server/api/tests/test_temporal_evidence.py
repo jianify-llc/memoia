@@ -92,6 +92,27 @@ def test_withdrawn_time_anchor_does_not_survive_independent_untimed_support():
     assert supported_event_time(period(), [["2"]]) is None
 
 
+@pytest.mark.asyncio
+async def test_extraction_contract_keeps_undated_content_support_without_requiring_time_support(monkeypatch):
+    body = ImportSource(idempotency_key="independent", source_id="visit", messages=[
+        {"message_id": "d", "role": "user", "content": "In May 2024 I visited Bluebird Cafe in Lisbon",
+         "occurred_at": "2026-10-03T00:00:00Z", "time_zone": "Asia/Shanghai"},
+        {"message_id": "u", "role": "user", "content": "I have visited Bluebird Cafe in Lisbon once",
+         "occurred_at": "2026-10-03T00:05:00Z", "time_zone": "Asia/Shanghai"}])
+    output = {"facts": [{"content": "Visited Bluebird Cafe in Lisbon", "topic": "life_event", "sub_topic": "travel",
+        "support_groups": [["d"], ["u"]],
+        "event_time": period("2024-05-01", "2024-05-31", "month", "May 2024", "d")}], "event_tags": []}
+    monkeypatch.setattr(source, "openai_complete", AsyncMock(return_value=json.dumps(output)))
+    monkeypatch.setattr(source, "record_completion_usage", AsyncMock())
+    extracted = await source.extract_source(body)
+    fact = extracted.facts[0]
+    assert fact["support_groups"] == [["d"], ["u"]]
+    assert fact["event_time"]["evidence"] == [{"message_id": "d", "expression": "May 2024"}]
+    remaining = source.retained_groups(fact["support_groups"], {"d"})
+    assert remaining == [["u"]]
+    assert supported_event_time(fact["event_time"], remaining) is None
+
+
 def test_render_retains_precision_raw_expression_and_labels_recording_time():
     gist = EventGistData(content="Sakura Hotel", event_time=period(), source_messages=[
         {"message_id": "1", "recorded_at": "2026-10-03T00:00:00Z", "time_zone": "Asia/Shanghai"}])

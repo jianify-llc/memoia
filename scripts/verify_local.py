@@ -21,6 +21,7 @@ QUICK_TESTS = (
     *["test_temporal_evidence.py::" + name for name in (
         "test_calendar_precision_and_unknown_are_not_invented_dates",
         "test_withdrawn_time_anchor_does_not_survive_independent_untimed_support",
+        "test_extraction_contract_keeps_undated_content_support_without_requiring_time_support",
         "test_render_retains_precision_raw_expression_and_labels_recording_time",
         "test_real_structured_validation_rejects_missing_or_invalid_time_without_echoing_content",
         "test_extraction_anchors_each_message_in_its_recorded_zone_and_rejects_fake_quote",

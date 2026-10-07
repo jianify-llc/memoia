@@ -7,6 +7,13 @@ of Memobase; it now exposes one `/api` contract and the `@jianify/memoia` SDK.
 Upstream HTTP routes and SDKs are retired. Consumers must upgrade together.
 Deployment and rollback boundaries are in the [release guide](../../../docs/guide/memoia-release.md).
 
+Source extraction deduplicates factual conclusions, not independent message support.
+An undated confirmation still supports a fact when a dated message is deleted;
+the removed message's event time must not survive. Repeated messages across Blobs
+retain their original message identity and do not become independent evidence.
+Structured validation checks the protocol and evidence references; real-model
+acceptance separately checks whether extraction preserves all relevant support.
+
 Memobase is a user memory system designed for LLM Applications. It provides a FastAPI-based server that manages user profiles, memories, and various types of data blobs. Details of developing it in [here](./DEVELOPMENT.md).
 
 ## Core Components
