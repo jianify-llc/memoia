@@ -31,6 +31,14 @@ TEA_NEGATIONS = ("dislike rooibos", "dislikes rooibos", "hate rooibos", "hates r
 
 
 CASES = (
+    QualityCase("removable_user_name", (
+        ("u-name", "user", "My real name is Renata Calder."),
+        ("u-food", "user", "My favourite food is lemon risotto, and it has been my favourite for years."),
+    ), (
+        ExpectedFact((("renata calder",), ("name",)), (("u-name",),)),
+        ExpectedFact((("user",), ("risotto",), ("favorite", "favourite", "prefer")),
+                     (("u-food",),), forbidden=("renata", "calder"), subject=("user",)),
+    )),
     QualityCase("self_preferences", (
         ("u-tea", "user", "Rooibos tea is my favorite drink. I drink it every evening."),
         ("u-trains", "user", "I collect model trains as a hobby. I spend weekends working on my model railway."),

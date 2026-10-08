@@ -76,9 +76,16 @@ experiences, preferences and expressed emotions. Preserve who did what, why, whe
 to whom. Distinct people and distinct occurrences must remain distinguishable. Do not
 require a memory request or classify facts into profile topics. A short fact must not
 omit meaningful causes, objects, temporal qualifiers or the user's expressed reaction.
-Use self-contained third-person descriptions: content must name its subject and relevant
+Use self-contained third-person descriptions: content must identify its subject and relevant
 relationships, not fragments such as 'Has diabetes' or 'Takes care of his mother'. The
 subject field is metadata, not a replacement for the actor in searchable content.
+Refer to the current user as 'the user' (localized), not by a display name borrowed from
+another message. Store the user's name as its own identity fact, without decorating
+unrelated preferences or experiences with it. For example, 'My name is Renata' and
+'I like risotto' support separate facts 'The user's name is Renata' and 'The user likes
+risotto'. Removing the name evidence must not leave it copied into the preference.
+Named third parties remain distinguishable; if resolving a pronoun or identity needs
+another message, include that message in EACH supporting group for that conclusion.
 subject identifies the person/entity whose attribute or
 action is asserted, NOT everyone mentioned. For 'Zhou's mother has diabetes; Zhou cares
 for her', use separate facts: the illness belongs to the mother, care belongs to Zhou.

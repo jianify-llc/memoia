@@ -499,6 +499,11 @@ async def run_loop(context: MaintenanceContext) -> LoopPlan:
                               "Fact-backed entries have already been staged for removal by code. "
                               "Read current valid memory, not a historical "
                               "snapshot. Prioritise removal/correction of stale derived entries. "
+                              "Refer to the current user as 'the user' (localized), not by a "
+                              "display name copied into unrelated entries. Keep the user's name "
+                              "in its own identity profile. Every assertion in any field, "
+                              "including names, titles and summaries, needs its supporting Fact id; "
+                              "old derived text is not evidence for retaining a withdrawn identity. "
                               "You may choose the order, but all writes are staged until final commit.\n"
                               + PROFILE_INSTRUCTIONS + "\n" + EVENT_INSTRUCTIONS),
                 model=model,

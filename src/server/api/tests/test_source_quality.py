@@ -50,11 +50,22 @@ def test_prompt_clarifies_self_evidence_without_forcing_nonempty_or_slot_filteri
     assert "user AND relevant people" in source.EXTRACT_SYSTEM
     assert "NOT everyone mentioned" in source.EXTRACT_SYSTEM
     assert "self-contained third-person" in source.EXTRACT_SYSTEM
+    assert "without decorating" in source.EXTRACT_SYSTEM
+    assert "include that message in EACH supporting group" in source.EXTRACT_SYSTEM
     assert "does not make its contents asserted" in source.EXTRACT_SYSTEM
     assert "NOT independent evidence" in source.EXTRACT_SYSTEM
     assert "Do not infer a breakup" in source.EXTRACT_SYSTEM
     assert "not invent a fact" in source.EXTRACT_SYSTEM
     assert source.Extraction.model_validate({"facts": []}).facts == []
+
+
+def test_removable_name_fixture_rejects_identity_copied_into_independent_preference():
+    case = next(case for case in CASES if case.name == "removable_user_name")
+    name = fact("The user's name is Renata Calder", [["u-name"]])
+    preference = fact("The user's favourite food is lemon risotto", [["u-food"]])
+    assert all(grade(case, [name, preference]).values())
+    leaked = {**preference, "content": "Renata Calder's favourite food is lemon risotto"}
+    assert not all(grade(case, [name, leaked]).values())
 
 
 @pytest.mark.asyncio
@@ -251,7 +262,7 @@ async def test_extraction_preserves_out_of_profile_evidence_without_duplicate_cl
 
 
 def test_fixed_grade_rejects_wrong_message_support_and_unexpected_fact():
-    case = CASES[0]
+    case = next(case for case in CASES if case.name == "self_preferences")
     correct = [fact("Rooibos tea is my favorite drink", [["u-tea"]]), fact("Collects model trains", [["u-trains"]])]
     assert all(grade(case, correct).values())
     assert not all(grade(case, [*correct, fact("Lives on Mars", [["u-tea"]])]).values())

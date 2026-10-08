@@ -156,6 +156,8 @@ async def test_unified_runner_reads_stages_and_returns_only_after_final(transpor
     assert context.plans == 1
     first = transport["requests"][0]
     assert first["model"] == "gpt-6-luna"
+    assert "Every assertion in any field" in first["instructions"]
+    assert "in its own identity profile" in first["instructions"]
     assert first["reasoning"] == {"effort": "high"}
     assert all(body["service_tier"] == "flex" for body in transport["requests"])
     assert first["parallel_tool_calls"] is False

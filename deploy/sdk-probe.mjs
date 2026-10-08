@@ -255,11 +255,20 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     evidence.checks.partial_maintenance = true;
     const remainingProfiles = await client.getProfiles(uid, options());
     const remainingHistory = await client.getHistory(uid, options());
-    requireTrue(remainingSource.deleted_message_ids.includes("name") && remainingSource.evidence.length > 0 &&
-      remainingSource.evidence.every((f) => !withdrawn.has(f.fact_id) && f.support_groups.every((g) => !g.includes("name"))));
-    requireTrue(remainingProfiles.profiles.length > 0 &&
-      remainingProfiles.profiles.every((p) => !p.content.toLowerCase().includes("renata calder")));
-    requireTrue(historyProfiles(remainingHistory).every((p) => p.fact_ids.every((id) => !withdrawn.has(id))));
+    // Leave separate, payload-free proof before cleanup removes this fixture.
+    evidence.diagnostics = { partial: {
+      message_tombstone: remainingSource.deleted_message_ids.includes("name"),
+      surviving_facts: remainingSource.evidence.length > 0,
+      evidence_removed: remainingSource.evidence.every((f) => !withdrawn.has(f.fact_id) &&
+        f.support_groups.every((g) => !g.includes("name"))),
+      surviving_profiles: remainingProfiles.profiles.length > 0,
+      name_removed_from_profiles: remainingProfiles.profiles.every((p) => !p.content.toLowerCase().includes("renata calder")),
+      history_evidence_removed: historyProfiles(remainingHistory).every((p) => p.fact_ids.every((id) => !withdrawn.has(id))),
+      name_in_surviving_fact: remainingSource.evidence.some((f) => f.content.toLowerCase().includes("renata calder")),
+    } };
+    await record("partial.validation");
+    const { name_in_surviving_fact, ...partialChecks } = evidence.diagnostics.partial;
+    requireTrue(Object.values(partialChecks).every(Boolean));
     evidence.counts.profiles_after_partial = remainingProfiles.profiles.length;
     evidence.checks.partial_retract = true;
     const retracted = await complete("retract", evidence.ids.retract_key, () => client.deleteMessages(uid, imported.source_id,

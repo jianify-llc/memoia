@@ -42,14 +42,15 @@ async function fixture(mode = "complete", version = "0.9.0") {
     message_ids: ["name", "food"], event_ids: phase === 3 ? [] : [eventId], created_at: new Date().toISOString() });
   const source = () => ({ source_id: sourceId, blobs: [blob()], message_ids: ["name", "food"],
     deleted_message_ids: phase === 1 ? [] : phase === 2 ? ["name"] : ["name", "food"],
-    evidence: phase === 1 ? [{ fact_id: nameId, support_groups: [["name"]] }, { fact_id: foodId, support_groups: [["food"]] }] :
-      phase === 2 ? [{ fact_id: foodId, support_groups: [["food"]] }] : [],
+    evidence: phase === 1 ? [{ fact_id: nameId, content: "The user's name is Renata Calder", support_groups: [["name"]] },
+      { fact_id: foodId, content: "The user enjoys lemon risotto", support_groups: [["food"]] }] :
+      phase === 2 ? [{ fact_id: foodId, content: mode === "partial-name-leak" ? "Renata Calder enjoys lemon risotto" : "The user enjoys lemon risotto", support_groups: [["food"]] }] : [],
     next_message_offset: null, next_blob_offset: null, next_evidence_offset: null });
   const MemoiaClient = class {
     constructor(options) { assert.equal(options.maxAttempts, 1); }
     async getProfiles() { return { profiles: phase === 1 ? [profile(nameId, "Renata Calder"), profile(foodId, "lemon risotto"),
       ...(mode === "replay-profiles-grow" && counters.completedReplays ? [profile(extraId, "fixture")] : [])] :
-      phase === 2 ? [profile(foodId, "lemon risotto")] : [] }; }
+      phase === 2 ? [profile(foodId, mode === "partial-name-leak" ? "Renata Calder enjoys lemon risotto" : "lemon risotto")] : [] }; }
     async importBlob(uid, input) {
       counters.imports++;
       if (counters.forgets) {
@@ -325,6 +326,20 @@ test("history exposing withdrawn evidence fails even when the mutation succeeded
   assert.equal(result.checks.cleanup, true);
   assert.equal(counters.deletes, 0);
   assert.equal(counters.forgets, 1);
+  assert.equal(result.diagnostics.partial.history_evidence_removed, false);
+});
+
+test("partial deletion preserves payload-free failure diagnostics before cleanup", async () => {
+  const records = [];
+  const { result } = await probe("partial-name-leak", "0.9.0", async record => records.push(record));
+  assert.equal(result.success, false);
+  assert.equal(result.checks.cleanup, true);
+  const partial = records.find(record => record.stage === "partial.validation");
+  assert.equal(partial.diagnostics.partial.name_removed_from_profiles, false);
+  assert.equal(partial.diagnostics.partial.name_in_surviving_fact, true);
+  assert.equal(partial.diagnostics.partial.evidence_removed, true);
+  assert.equal(partial.diagnostics.partial.history_evidence_removed, true);
+  assert.doesNotMatch(JSON.stringify(records), /Renata|risotto|protected-fixture-token/);
 });
 
 for (const mode of ["final-history-leak", "final-search-leak"]) {
@@ -438,6 +453,7 @@ test("checkpoint precedes every mutation and persists cumulative receipts before
         const count = { "first_import.before": [0, 0, 0], "first_import.receipt": [1, 0, 0],
           "operation_replay.before": [1, 0, 0], "operation_replay.receipt": [2, 0, 0],
           "partial_retract.before": [2, 0, 0], "partial_retract.receipt": [2, 1, 0],
+          "partial.validation": [2, 1, 0],
           "retract.before": [2, 1, 0], "retract.receipt": [2, 2, 0],
           "import_flush.before": [1, 0, 0], "import_flush.receipt": [1, 0, 0],
           "partial_flush.before": [2, 1, 0], "partial_flush.receipt": [2, 1, 0],
@@ -451,7 +467,7 @@ test("checkpoint precedes every mutation and persists cumulative receipts before
         records.push(record);
       } });
     assert.equal(result.success, true);
-    assert.equal(records.length, 21);
+    assert.equal(records.length, 22);
     const first = records.find((r) => r.stage === "first_import.before");
     assert.ok(first.ids.user_id && first.ids.import_key && first.ids.late_import_key && first.ids.late_input_source_id);
     assert.equal(first.outcome_unknown, true);
