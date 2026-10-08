@@ -168,7 +168,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     const body = { idempotency_key: evidence.ids.import_key, source_id: evidence.ids.input_source_id,
       metadata: { sdk_probe: true }, messages: [
         { message_id: "name", role: "user", content: "My real name is Renata Calder. Please remember my name.", occurred_at: occurredAt },
-        { message_id: "food", role: "user", content: "My favourite food is lemon risotto, and it has been my favourite for years.", occurred_at: occurredAt },
+        { message_id: "food", role: "user", content: "My favourite food is lemon risotto, and it has been my favourite for years. On 12 April 2026 I cooked lemon risotto at home for my friend Lina, and she said she enjoyed it.", occurred_at: occurredAt },
       ] };
     const readSource = async () => {
       const source = await client.getSource(uid, body.source_id, options());

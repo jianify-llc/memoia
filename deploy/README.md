@@ -204,7 +204,7 @@ ShellCheck/actionlint/Bash 语法仅静态验证。test_workflow.py 解析真实
 
 导入／删除 completed 只确认 Fact。探针先验证无需 Event 的 Fact 召回，再单次 flush 并查询该原 Operation，确认固定 Blob 集合完成后才检查画像／Event／历史。超时、失败或退避中的原错误均验收失败，保留原 Operation 和批次，不自动重导入或调用维护恢复；新 flush 的成功不能替代原批次验收。
 
-探针使用随机 UUID 新用户，验证 Bearer 正反例、隐式创建用户、固定 key／operation 查询、来源证据、Fact 召回、非空画像／Event 和维护版本的画像历史。首次已明确 completed 后只进行一次同正文／key 的幂等重放，必须返回原操作／Fact 水位；重新读取来源、画像和完整事件列表，确认身份和数量不增长。依次删除两条消息，每次等待固定回执水位后验证剩余证据和失效内容过滤。业务检查通过后调用 v2 `forgetUser`，严格确认同 UUID／`forgotten: true`；仅在确认后重复一次同 UUID 的 DELETE。再以预先记录的新 key 单次尝试迟到导入，必须得到 SDK `MemoiaError` HTTP 410／`user_forgotten`／`retryable: false`／`outcome: rejected`，其它拒绝或意外接纳均不通过。
+探针使用随机 UUID 新用户，固定输入含姓名、长期饮食喜好及有明确人物／时间／地点的做饭经历；非空 Event 的验收不要求模型从静态喜好编造故事。验证 Bearer 正反例、隐式创建用户、固定 key／operation 查询、来源证据、Fact 召回、非空画像／Event 和维护版本的画像历史。首次已明确 completed 后只进行一次同正文／key 的幂等重放，必须返回原操作／Fact 水位；重新读取来源、画像和完整事件列表，确认身份和数量不增长。依次删除两条消息，每次等待固定回执水位后验证剩余证据和失效内容过滤。业务检查通过后调用 v2 `forgetUser`，严格确认同 UUID／`forgotten: true`；仅在确认后重复一次同 UUID 的 DELETE。再以预先记录的新 key 单次尝试迟到导入，必须得到 SDK `MemoiaError` HTTP 410／`user_forgotten`／`retryable: false`／`outcome: rejected`，其它拒绝或意外接纳均不通过。
 
 除已确认完成的导入回放和已确认提交的遗忘重复这两项明确测试外，每个 mutation 最多发送一次。导入仍 processing 或丢失 ACK 未确认时只按固定 key 查询，绝不重发正文、自动调用 retryOperation 或重置身份；遗忘、遗忘重复或迟到导入的未知结果直接失败，不发送后续 mutation，也不自动清理。迟到导入若意外返回 operation，保留全部已知 operation/source/event/profile IDs，不因为它已 completed 或 failed 就把验收记为通过。
 
