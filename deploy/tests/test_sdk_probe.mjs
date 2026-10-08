@@ -111,11 +111,11 @@ async function fixture(mode = "complete", version = "0.9.0") {
     async getOperation() { return imported; }
     async flushUser(uid, input) {
       assert.equal(uid, userId);
-      const pending = mode === "maintenance-pending" || (mode === "maintenance-lag" && flushReads === 0);
+      const pending = mode === "maintenance-pending" || mode === "maintenance-first-failure" || (mode === "maintenance-lag" && flushReads === 0);
       const failed = mode === "maintenance-failed" || (mode === "partial-maintenance-failed" && phase === 2);
       const status = failed ? "failed" : pending ? "processing" : "completed";
       const blob_ids = mode === "maintenance-false-completed" ? [] : [blobId];
-      const error = failed ? { code: "model_unavailable", retryable: true } : null;
+      const error = failed || mode === "maintenance-first-failure" ? { code: "model_unavailable", retryable: true } : null;
       const id = randomUUID();
       currentFlush = { operation_id: id, key: input.idempotency_key, kind: "flush", source_id: null,
         blob_id: null, status, result: status === "completed" ? { blob_ids, profile_ids: [], event_ids: [] } : null,
@@ -246,7 +246,7 @@ test("Fact completion seals and waits for its fixed flush before validating deri
   assert.equal(result.counts.delete_memory_version, 3);
 });
 
-for (const mode of ["maintenance-pending", "maintenance-failed", "maintenance-retrying-error",
+for (const mode of ["maintenance-pending", "maintenance-failed", "maintenance-retrying-error", "maintenance-first-failure",
   "maintenance-false-completed", "maintenance-missing-request"]) {
   test(`${mode} stops derived acceptance without replaying or explicitly recovering the Fact operation`, async () => {
     const { result, counters } = await probe(mode);

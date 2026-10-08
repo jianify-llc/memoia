@@ -25,9 +25,11 @@ def test_worker_health_requires_fresh_heartbeat_and_live_process(tmp_path):
 
 @pytest.mark.parametrize("record", ["not-json", {"pid": "invalid", "updated_at": 0},
                                    {"pid": 999999999, "updated_at": time.time()},
-                                   {"pid": os.getpid(), "updated_at": time.time() + 60}])
+                                   {"pid": os.getpid(), "updated_at": "future"}])
 def test_worker_health_rejects_corrupt_or_invalid_heartbeat(tmp_path, record):
     path = tmp_path / "heartbeat.json"
+    if isinstance(record, dict) and record["updated_at"] == "future":
+        record = {**record, "updated_at": time.time() + 60}
     path.write_text(record if isinstance(record, str) else json.dumps(record))
     assert not worker.healthy(path)
 

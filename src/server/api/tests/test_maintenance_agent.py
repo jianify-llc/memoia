@@ -847,9 +847,10 @@ async def test_malformed_error_usage_is_not_hidden_by_fallback(transport, usage,
 
 @pytest.mark.asyncio
 async def test_standard_fallback_uses_remaining_loop_time_not_a_new_deadline(transport, monkeypatch):
-    monkeypatch.setattr(module, "MAX_SECONDS", 0.05)
+    # 留出 SDK 初始化及覆盖率开销；总延迟超过共享期限，但不超过错误重置后的期限。
+    monkeypatch.setattr(module, "MAX_SECONDS", 3)
     transport["outcomes"] = [http_failure(429), completion()]
-    transport["delays"] = [0.03, 0.04]
+    transport["delays"] = [1, 2.5]
     context = Context()
     with pytest.raises(MaintenanceRunError, match="MAINTENANCE_TIMEOUT"):
         await run_loop(context)
