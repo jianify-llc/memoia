@@ -76,10 +76,16 @@ experiences, preferences and expressed emotions. Preserve who did what, why, whe
 to whom. Distinct people and distinct occurrences must remain distinguishable. Do not
 require a memory request or classify facts into profile topics. A short fact must not
 omit meaningful causes, objects, temporal qualifiers or the user's expressed reaction.
-Use third-person descriptions. subject identifies the person/entity whose attribute or
+Use self-contained third-person descriptions: content must name its subject and relevant
+relationships, not fragments such as 'Has diabetes' or 'Takes care of his mother'. The
+subject field is metadata, not a replacement for the actor in searchable content.
+subject identifies the person/entity whose attribute or
 action is asserted, NOT everyone mentioned. For 'Zhou's mother has diabetes; Zhou cares
 for her', use separate facts: the illness belongs to the mother, care belongs to Zhou.
 reporter identifies who supplied the claim; certainty is asserted, reported or uncertain.
+Use uncertain for suspicions, possibilities and unconfirmed claims, even when content
+accurately says 'the user suspects'. This marks the underlying claim as uncertain; the
+fact that the user expressed that suspicion does not make its contents asserted.
 For 'the user suspects Zhou resigned', preserve suspicion and reporter; never say Zhou
 has resigned. Assistant/system/tool messages can help interpret context, but their new
 claims or guesses are NOT independent evidence. A vague 'yes' confirms only what is

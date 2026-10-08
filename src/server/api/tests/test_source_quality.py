@@ -49,6 +49,8 @@ def fact(content, groups):
 def test_prompt_clarifies_self_evidence_without_forcing_nonempty_or_slot_filtering():
     assert "user AND relevant people" in source.EXTRACT_SYSTEM
     assert "NOT everyone mentioned" in source.EXTRACT_SYSTEM
+    assert "self-contained third-person" in source.EXTRACT_SYSTEM
+    assert "does not make its contents asserted" in source.EXTRACT_SYSTEM
     assert "NOT independent evidence" in source.EXTRACT_SYSTEM
     assert "Do not infer a breakup" in source.EXTRACT_SYSTEM
     assert "not invent a fact" in source.EXTRACT_SYSTEM
@@ -269,17 +271,35 @@ def test_people_subject_and_uncertainty_grade_reject_wrong_owner_or_asserted_gue
              "subject": "Zhou", "certainty": "uncertain"}
     assert all(grade(case, [busy, guess]).values())
     assert not all(grade(case, [busy, {**guess, "certainty": "asserted"}]).values())
+    colleague = {**fact("Zhou is the user's colleague", [["u-busy"]]), "subject": "Zhou"}
+    assert all(grade(case, [busy, guess, colleague]).values())
 
 
 def test_two_cancellations_grade_requires_matching_actor_cause_and_month():
     case = next(row for row in CASES if row.name == "two_cancellations")
     lin = {**fact("Lin cancelled the hiking plan because of rain", [["M5a"]]), "subject": "Lin",
-           "event_time": {"start_date": "2025-02-01", "end_date": "2025-02-28"}}
+           "event_time": {"start": "2025-02-01", "end": "2025-02-28"}}
     zhou = {**fact("Zhou cancelled the hiking plan because of overtime", [["M5b"]]), "subject": "Zhou",
-            "event_time": {"start_date": "2025-03-01", "end_date": "2025-03-31"}}
+            "event_time": {"start": "2025-03-01", "end": "2025-03-31"}}
     assert all(grade(case, [lin, zhou]).values())
     assert not all(grade(case, [lin, {**zhou, "event_time": lin["event_time"]}]).values())
     assert not all(grade(case, [lin, {**zhou, "support_groups": [["M5a"]]}]).values())
+
+
+def test_quality_dates_follow_actual_extraction_serialization():
+    case = next(row for row in CASES if row.name == "two_cancellations")
+    rows = []
+    for subject, cause, message_id, expression, start, end in (
+        ("Lin", "rain", "M5a", "In February 2025", "2025-02-01", "2025-02-28"),
+        ("Zhou", "overtime", "M5b", "In March 2025", "2025-03-01", "2025-03-31"),
+    ):
+        parsed = source.ExtractedFact.model_validate({
+            **fact(f"{subject} cancelled the hiking plan because of {cause}", [[message_id]]),
+            "subject": subject, "event_time": {"start": start, "end": end, "precision": "month",
+                "evidence": [{"message_id": message_id, "expression": expression}]},
+        })
+        rows.append(parsed.model_dump(mode="json"))
+    assert all(grade(case, rows).values())
 
 
 @pytest.mark.parametrize("groups", [

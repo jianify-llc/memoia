@@ -50,7 +50,7 @@ def grade(case, facts):
             and (not expected.subject or any(word in str(fact.get("subject", "")).casefold() for word in expected.subject))
             and (not expected.certainty or fact.get("certainty") in expected.certainty)
             and (not expected.event_dates or
-                 (event_time.get("start_date"), event_time.get("end_date")) == expected.event_dates)
+                 (event_time.get("start"), event_time.get("end")) == expected.event_dates)
             and any(groups == {frozenset(group) for group in option}
                     for option in (expected.groups, *expected.alternative_groups))
         )

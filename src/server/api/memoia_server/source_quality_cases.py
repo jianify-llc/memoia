@@ -100,6 +100,7 @@ CASES = (
         ("a-guess", "assistant", "He is probably moving to Shanghai for a new job."),
     ), (
         ExpectedFact((("zhou",), ("busy",)), (("u-busy",),), subject=("zhou",)),
+        ExpectedFact((("zhou",), ("colleague",)), (("u-busy",),), subject=("zhou",), required=False),
         ExpectedFact((("zhou",), ("suspect", "might", "uncertain", "possibly"), ("quit", "resign")),
                      (("u-busy",),), ("has resigned", "has quit", "shanghai", "new job"),
                      subject=("zhou", "user"), certainty=("uncertain",)),
