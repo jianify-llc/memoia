@@ -46,11 +46,13 @@ class ProfileMutation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: Literal["upsert", "remove"]
-    id: str | None = Field(default=None, max_length=128)
+    id: str | None = Field(default=None, max_length=128,
+        description="Use null to create a new profile; to update/remove, copy the exact id returned by a read or stage tool. Never invent an id.")
     content: str | None = Field(default=None, max_length=8000)
     topic: str | None = Field(default=None, max_length=128)
     sub_topic: str | None = Field(default=None, max_length=256)
-    fact_ids: list[str] = Field(default_factory=list, max_length=100)
+    fact_ids: list[str] = Field(default_factory=list, max_length=100,
+        description="Copy exact Fact ids read from current valid facts. Message, Source and Blob ids are not Fact ids.")
 
     @model_validator(mode="after")
     def validate_change(self):
@@ -69,7 +71,8 @@ class EventMutation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     action: Literal["upsert", "remove"]
-    id: str | None = Field(default=None, max_length=128)
+    id: str | None = Field(default=None, max_length=128,
+        description="Use null to create a new event; to update/remove, copy the exact id returned by a read or stage tool. Never invent an id.")
     title: str | None = Field(default=None, max_length=500)
     summary: str | None = Field(default=None, max_length=4000)
     keywords: str | None = Field(default=None, max_length=1000)
@@ -78,7 +81,8 @@ class EventMutation(BaseModel):
     content: str | None = Field(default=None, max_length=16000)
     interpretation: str | None = Field(default=None, max_length=4000)
     event_tags: list[EventTag] = Field(default_factory=list, max_length=50)
-    fact_ids: list[str] = Field(default_factory=list, max_length=100)
+    fact_ids: list[str] = Field(default_factory=list, max_length=100,
+        description="Copy exact Fact ids read from current valid facts. Message, Source and Blob ids are not Fact ids.")
 
     @model_validator(mode="after")
     def validate_change(self):
@@ -387,7 +391,11 @@ def _maintenance_tools():
                           collection: ReadCollection, ids: list[str] | None = None,
                           cursor: str | None = None, query: str | None = None,
                           limit: int = 100) -> dict:
-        """Read complete current-user entries. Follow next_cursor; byte-sized pages may contain fewer than limit."""
+        """Read complete current-user entries. ids must be exact returned UUIDs, never names/labels.
+
+        Use query for text/name matching; ids=null for directory selection. Follow next_cursor.
+        Byte-sized pages may contain fewer than limit.
+        """
         if not 1 <= limit <= MAX_PAGE_SIZE or (ids is not None and len(ids) > MAX_PAGE_SIZE):
             raise MaintenanceRunError("MAINTENANCE_READ_LIMIT")
         if query is not None and len(query) > 500:
@@ -505,6 +513,11 @@ async def run_loop(context: MaintenanceContext) -> LoopPlan:
                               "including names, titles and summaries, needs its supporting Fact id; "
                               "old derived text is not evidence for retaining a withdrawn identity. "
                               "You may choose the order, but all writes are staged until final commit.\n"
+                              "Internal Fact/Profile/Event ids are opaque UUIDs: copy exact returned ids, "
+                              "never names, labels, message ids, fabricated ids or placeholders. "
+                              "For a new Profile or Event set id=null; the tool returns its generated id. "
+                              "For existing entries, read the exact target before using its id. "
+                              "Use query/search for names, not an ids argument.\n"
                               + PROFILE_INSTRUCTIONS + "\n" + EVENT_INSTRUCTIONS),
                 model=model,
                 model_settings=ModelSettings(parallel_tool_calls=False,

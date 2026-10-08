@@ -158,6 +158,8 @@ async def test_unified_runner_reads_stages_and_returns_only_after_final(transpor
     assert first["model"] == "gpt-6-luna"
     assert "Every assertion in any field" in first["instructions"]
     assert "in its own identity profile" in first["instructions"]
+    assert "For a new Profile or Event set id=null" in first["instructions"]
+    assert "Use query/search for names, not an ids argument" in first["instructions"]
     assert first["reasoning"] == {"effort": "high"}
     assert all(body["service_tier"] == "flex" for body in transport["requests"])
     assert first["parallel_tool_calls"] is False
@@ -170,6 +172,12 @@ async def test_unified_runner_reads_stages_and_returns_only_after_final(transpor
     assert transport["paths"] == ["/v1/responses"] * 3
     tools = {entry["name"]: entry["parameters"] for entry in first["tools"]}
     assert set(tools) == {"read_memory", "stage_profile", "stage_event", "search_memory", "read_changes"}
+    for name in ("stage_profile", "stage_event"):
+        definition = tools[name]["properties"]["changes"]["items"]
+        if "$ref" in definition:
+            definition = tools[name]["$defs"][definition["$ref"].rsplit("/", 1)[-1]]
+        assert "Use null" in definition["properties"]["id"]["description"]
+        assert "Copy exact Fact ids" in definition["properties"]["fact_ids"]["description"]
     assert "project_id" not in tools["read_memory"]["properties"]
     assert "user_id" not in tools["read_memory"]["properties"]
     assert "deleted-fact" not in first["input"][-1]["content"]
