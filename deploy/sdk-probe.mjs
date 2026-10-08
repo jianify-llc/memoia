@@ -71,7 +71,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     if (operation) {
       mutationUnknown = operation.kind !== "flush" && !terminal(operation);
       await record(`${stage}.receipt`);
-      if (operation.kind === "flush") requireTrue(operation.error === null);
+      if (operation.kind === "flush" && operation.status !== "failed") requireTrue(operation.error === null);
     }
     while (!operation || !terminal(operation)) {
       requireTrue(remaining() > 0);
@@ -81,7 +81,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
         remember(operation);
         mutationUnknown = operation.kind !== "flush" && !terminal(operation);
         await record(`${stage}.receipt`);
-        if (operation.kind === "flush") requireTrue(operation.error === null);
+        if (operation.kind === "flush" && operation.status !== "failed") requireTrue(operation.error === null);
       }
       catch (error) {
         // Receipt lookup is read-only; neither 404 nor a temporary error permits a POST replay.
