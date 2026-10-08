@@ -264,6 +264,7 @@ def complete_flush(session, claim, plan):
 
 
 def fail_claim(claim, error):
+    from ..env import LOG
     from openai import APIConnectionError, APIStatusError
     from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
     from sqlalchemy.exc import OperationalError, TimeoutError as DatabaseTimeoutError
@@ -286,7 +287,9 @@ def fail_claim(claim, error):
         if row is None:
             return False
         _release_failure(session, row, code, retryable)
-        return True
+    LOG.warning("Flush rejected: operation=%s code=%s retryable=%s attempt=%s",
+                claim.operation_id, code, retryable, claim.attempts)
+    return True
 
 
 def retry_flush(user_id, project_id, operation_id):
@@ -378,7 +381,7 @@ def _uuid(value):
     try:
         return UUID(str(value))
     except (ValueError, TypeError, AttributeError):
-        raise SourceError("invalid_model_output", "Memory identifier is invalid", 502) from None
+        raise SourceError("maintenance_invalid_identifier", "Memory identifier is invalid", 502) from None
 
 
 class DBMaintenanceContext:
@@ -646,19 +649,19 @@ class DBMaintenanceContext:
         else:
             ident = str(_uuid(change.id))
             if ident not in self.readset[collection]:
-                raise SourceError("invalid_model_output", "Read the target entry before changing it", 502)
+                raise SourceError("maintenance_target_unread", "Read the target entry before changing it", 502)
             if self.readset[collection][ident] is None and ident not in staged:
-                raise SourceError("invalid_model_output", "Cannot replace an absent entry with a supplied id", 502)
+                raise SourceError("maintenance_target_absent", "Cannot replace an absent entry with a supplied id", 502)
         if change.action == "upsert":
             if kind == "profile" and change.topic not in self.allowed_topics:
-                raise SourceError("invalid_model_output", "Profile topic is outside the configured topics", 502)
+                raise SourceError("maintenance_invalid_topic", "Profile topic is outside the configured topics", 502)
             if kind == "event":
                 allowed_tags = {definition["name"] for definition in self.event_tag_definitions}
                 if any(tag.tag not in allowed_tags for tag in change.event_tags):
-                    raise SourceError("invalid_model_output", "Event tag is outside the configured tags", 502)
+                    raise SourceError("maintenance_invalid_tag", "Event tag is outside the configured tags", 502)
             for fact_id in change.fact_ids:
                 if self.readset["facts"].get(str(_uuid(fact_id))) is None:
-                    raise SourceError("invalid_model_output", "Read valid supporting facts before staging memory", 502)
+                    raise SourceError("maintenance_support_unread", "Read valid supporting facts before staging memory", 502)
         staged[ident] = change
         return ident
 
@@ -770,7 +773,7 @@ def _verify_resolution(session, claim, plan, kind):
         _associated_entries(table, collection, claim.user_id, claim.project_id, changed_ids)))))
     resolved = {str(_uuid(change.id)) for change in getattr(plan, collection)}
     if affected - resolved:
-        raise SourceError("invalid_model_output", "Changed evidence still has unreviewed derived entries", 502)
+        raise SourceError("maintenance_unresolved_entries", "Changed evidence still has unreviewed derived entries", 502)
 
 
 def _apply_plan(session, claim, plan, kind):
@@ -802,9 +805,9 @@ def _apply_plan(session, claim, plan, kind):
         ident = _uuid(change.id)
         collection = "profiles" if kind == "profile" else "events"
         if str(ident) not in plan.readset[collection]:
-            raise SourceError("invalid_model_output", "Maintenance target was not registered in the read set", 502)
+            raise SourceError("maintenance_target_unread", "Maintenance target was not registered in the read set", 502)
         if any(plan.readset["facts"].get(str(_uuid(value))) is None for value in change.fact_ids):
-            raise SourceError("invalid_model_output", "Maintenance support was not read as valid Fact evidence", 502)
+            raise SourceError("maintenance_support_unread", "Maintenance support was not read as valid Fact evidence", 502)
         table = UserProfile.__table__ if kind == "profile" else UserEvent.__table__
         existing = session.execute(select(table).where(_scope(table, claim.user_id, claim.project_id),
                                                        table.c.id == ident)).mappings().one_or_none()

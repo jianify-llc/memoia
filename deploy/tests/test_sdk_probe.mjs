@@ -273,6 +273,17 @@ test("partial deletion checks synchronous Fact removal but does not accept stale
   assert.equal(counters.retracts, 1);
 });
 
+test("flush failure code is checkpointed before fixture cleanup without error text", async () => {
+  const records = [];
+  const { result } = await probe("maintenance-failed", "0.9.0", async record => records.push(record));
+  const receipt = records.find(record => record.stage === "import_flush.receipt");
+  assert.equal(receipt.maintenance.import.error_code, "model_unavailable");
+  assert.equal(receipt.maintenance.import.retryable, true);
+  assert.equal(result.maintenance.import.error_code, "model_unavailable");
+  assert.equal(result.checks.cleanup, true);
+  assert.doesNotMatch(JSON.stringify(records), /protected-fixture-token|Renata|risotto/);
+});
+
 for (const mode of ["processing", "lost-ack"]) {
   test(`${mode} waits for confirmed completion before its one deliberate replay`, async () => {
     const { result, counters } = await probe(mode);

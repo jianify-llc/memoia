@@ -60,6 +60,8 @@ Operation(kind=flush) 是唯一调度和恢复身份，source_id/blob_id 为 nul
 
 Operation.status 是终态真相源：待领取、执行及自动退避均为 processing，退避可携带 retryable 的末次错误；不可恢复或四次耗尽才为 failed，提交回执后才为 completed。flush.status 对应 pending/running、failed、completed，不独立猜终态。Worker 每轮独立回收过期租约，第四次崩溃也收敛到 failed；重复恢复 processing 不重置预算。
 
+维护校验拒绝使用具体安全错误码（例如 maintenance_invalid_identifier、maintenance_target_unread、maintenance_support_unread）；回执和 Worker 日志保留原 operation_id、次数及是否可重试，不记录模型参数、正文或异常文本。验收探针在清理自己的临时用户前持久化首次错误码，不用后续成功覆盖首次失败。
+
 一个 OpenAI Agents SDK Agent 同时查询并暂存 Profile/Event，模型自行安排处理顺序；不能修改 Fact。只使用 Agent、异步 Runner、函数工具和 Pydantic，不使用 handoff、持久线程、MCP、Shell/文件工具。禁用外部 tracing/正文 debug，transport max_retries=0。项目 llm_model/reasoning_effort 默认继承 gpt-6-luna/high，运行固定配置、最终再次校验；不静默切模型或降低等级。
 
 Fact 用 Standard（service_tier=default）；Loop 先 Flex，临时供应商失败/超时后本轮余下请求用 Standard。只重试未执行工具的模型请求，Flex fallback 同样占一次请求，不重启会话或重置限制。鉴权、输入、拒绝/过滤、失锁和预算错误不能借 fallback 绕过。单次生成最多 32768 tokens，一次 Loop 最多 10 次模型请求/300 秒；无累计 64K 上限，用量仍记录。Responses 适配器 store=false，原生 context_management.compact_threshold=262144；不增加摘要模型调用，数据库读集和暂存修改不压缩。模型/入口真实兼容性单独验收。

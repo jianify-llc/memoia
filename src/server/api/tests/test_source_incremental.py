@@ -192,7 +192,7 @@ async def test_out_of_scope_model_profile_cannot_commit_but_fact_receipt_remains
         return context.get_plan(LoopUsage())
     assert not await maintain(source_user, invalid)
     assert imported.status == "completed" and len(imported.result.fact_ids) == 2
-    assert status(source_user, "__root__")["error"]["code"] == "invalid_model_output"
+    assert status(source_user, "__root__")["error"]["code"] == "maintenance_invalid_topic"
     assert source.get_source(source_user, "__root__", source_id=imported.source_id).evidence
     assert not (await profile.get_user_profiles(source_user, "__root__")).data().profiles
 

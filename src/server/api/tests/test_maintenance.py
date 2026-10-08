@@ -61,6 +61,26 @@ def row(op_id):
 
 
 @pytest.mark.asyncio
+async def test_failed_flush_records_precise_guard_code_without_tool_content(source_user, caplog):
+    batch(source_user)
+    maintenance.flush(source_user, "__root__", "diagnostic")
+    claim = claim_for(source_user)
+    async with maintenance.TaskLease(claim) as lease:
+        context = maintenance.DBMaintenanceContext(claim, lease)
+        change = ProfileMutation(action="upsert", id=str(uuid4()), content="protected-tool-content",
+            topic=context.allowed_topics[0], sub_topic="fixture", fact_ids=[str(uuid4())])
+        with pytest.raises(SourceError) as rejected:
+            await context.stage_profile(change)
+        assert rejected.value.code == "maintenance_target_unread"
+    assert maintenance.fail_claim(claim, rejected.value)
+    assert row(claim.operation_id)["error"] == {"code": "maintenance_target_unread", "retryable": False}
+    assert "maintenance_target_unread" in caplog.text
+    assert "protected-tool-content" not in caplog.text
+    assert not maintenance.fail_claim(claim, SourceError("maintenance_target_unread", "private-error-text", 502))
+    assert "private-error-text" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_fact_rollback_cannot_leave_flush_intent(source_user):
     with pytest.raises(RuntimeError):
         with Session.begin() as session:

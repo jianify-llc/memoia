@@ -41,7 +41,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
       await checkpoint({ ...structuredClone(evidence), kind: "boundary", stage, outcome_unknown: unknown });
     } catch (error) { checkpointFailed = true; throw error; }
   };
-  const remember = (operation) => {
+  const remember = (operation, stage) => {
     if (!operation) return;
     if (!evidence.ids.operation_ids.includes(operation.operation_id)) evidence.ids.operation_ids.push(operation.operation_id);
     if (operation.source_id) {
@@ -52,6 +52,15 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
       for (const id of operation.result?.[kind] ?? []) {
         if (!evidence.ids[kind].includes(id)) evidence.ids[kind].push(id);
       }
+    }
+    if (operation.kind === "flush") {
+      evidence.maintenance[stage.replace(/_flush$/, "")] = {
+        operation_id: operation.operation_id, status: operation.flush.status,
+        blob_ids: operation.flush.blob_ids, attempts: operation.flush.attempts,
+        failed: operation.error !== null,
+        error_code: operation.error?.code ?? null,
+        retryable: operation.error?.retryable ?? null,
+      };
     }
   };
   const complete = async (stage, key, post) => {
@@ -67,7 +76,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
       }
       await record(`${stage}.unknown`);
     }
-    remember(operation);
+    remember(operation, stage);
     if (operation) {
       mutationUnknown = operation.kind !== "flush" && !terminal(operation);
       await record(`${stage}.receipt`);
@@ -78,7 +87,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
       await delay(Math.min(pollIntervalMs, remaining()));
       try {
         operation = await client.getOperationByKey(evidence.ids.user_id, key, options());
-        remember(operation);
+        remember(operation, stage);
         mutationUnknown = operation.kind !== "flush" && !terminal(operation);
         await record(`${stage}.receipt`);
         if (operation.kind === "flush" && operation.status !== "failed") requireTrue(operation.error === null);
@@ -90,11 +99,6 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
       }
     }
     mutationUnknown = false;
-    if (operation.kind === "flush") {
-      evidence.maintenance[stage.replace(/_flush$/, "")] = { operation_id: operation.operation_id,
-        status: operation.flush.status, blob_ids: operation.flush.blob_ids,
-        attempts: operation.flush.attempts, failed: operation.error !== null };
-    }
     requireTrue(operation.status === "completed");
     return operation;
   };
@@ -122,7 +126,8 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
       const progress = state.flushes.find((item) => item.operation_id === sealed.operation_id);
       requireTrue(progress && progress.blob_ids.includes(operation.blob_id));
       evidence.maintenance[stage] = { operation_id: progress.operation_id, status: progress.status,
-        blob_ids: progress.blob_ids, attempts: progress.attempts, failed: progress.error !== null };
+        blob_ids: progress.blob_ids, attempts: progress.attempts, failed: progress.error !== null,
+        error_code: progress.error?.code ?? null, retryable: progress.error?.retryable ?? null };
       // Preserve the first model failure; do not wait through retries until it passes.
       requireTrue(progress.status === "completed" && progress.error === null);
       return sealed;
