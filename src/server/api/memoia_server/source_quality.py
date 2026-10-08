@@ -43,14 +43,19 @@ def grade(case, facts):
     def matches(fact, expected):
         content = fact["content"].casefold()
         groups = {frozenset(group) for group in fact["support_groups"]}
+        event_time = fact.get("event_time") or {}
         return (
             all(any(word in content for word in concept) for concept in expected.concepts)
             and not any(word in content for word in expected.forbidden)
+            and (not expected.subject or any(word in str(fact.get("subject", "")).casefold() for word in expected.subject))
+            and (not expected.certainty or fact.get("certainty") in expected.certainty)
+            and (not expected.event_dates or
+                 (event_time.get("start_date"), event_time.get("end_date")) == expected.event_dates)
             and any(groups == {frozenset(group) for group in option}
                     for option in (expected.groups, *expected.alternative_groups))
         )
 
-    found = [any(matches(fact, expected) for fact in facts) for expected in case.expected]
+    found = [any(matches(fact, expected) for fact in facts) for expected in case.expected if expected.required]
     supported = [any(matches(fact, expected) for expected in case.expected) for fact in facts]
     return {"expected_concepts": all(found), "no_unexpected_facts": all(supported),
             "empty_when_expected": bool(facts) == bool(case.expected)}
@@ -110,7 +115,9 @@ async def run_quality(settings, *, cases=CASES, client=None):
                         continue
                     try:
                         extracted = await asyncio.wait_for(source.extract_source(request, rules=rules, project_id="quality-only"), remaining)
-                        row["facts"] = [{key: fact[key] for key in ("content", "topic", "sub_topic", "support_groups")} for fact in extracted.facts]
+                        row["facts"] = [{key: fact[key] for key in (
+                            "content", "subject", "reporter", "certainty", "support_groups", "event_time", "corrects")}
+                            for fact in extracted.facts]
                         row["checks"] = grade(case, row["facts"])
                         row["passed"] = all(row["checks"].values())
                     except source.SourceError as error:

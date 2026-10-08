@@ -7,6 +7,8 @@ from sqlalchemy import (
     text,
     VARCHAR,
     Integer,
+    BigInteger,
+    UniqueConstraint,
     ForeignKey,
     TIMESTAMP,
     Table,
@@ -430,6 +432,7 @@ class UserProfile(Base):
     )
 
     attributes: Mapped[dict] = mapped_column(JSONB, nullable=True, default=None)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default="1")
 
     project_id: Mapped[str] = mapped_column(
         VARCHAR(64),
@@ -485,6 +488,7 @@ class UserEvent(Base):
     embedding: Mapped[Vector] = mapped_column(
         Vector(dim=CONFIG.embedding_dim), nullable=True, default=None
     )
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default="1")
 
     related_user_event_gists: Mapped[list["UserEventGist"]] = relationship(
         "UserEventGist",
@@ -496,6 +500,7 @@ class UserEvent(Base):
 
     __table_args__ = (
         PrimaryKeyConstraint("id", "project_id"),
+        UniqueConstraint("id", "user_id", "project_id"),
         Index("idx_user_events_user_id_project_id", "user_id", "project_id"),
         Index("idx_user_events_user_id_id_project_id", "user_id", "project_id", "id"),
         ForeignKeyConstraint(

@@ -58,6 +58,11 @@ def redis_command(command, *args):
                       'REDISCLI_AUTH="$REDIS_PASSWORD" exec redis-cli "$@"', "sh", *args]
 
 
+def writers(config):
+    # Old paired snapshots remain API-only; new stacks have exactly one Worker.
+    return ["memoia", *(["maintenance"] if "maintenance" in config["services"] else [])]
+
+
 def check_quiet(command, config, postgres_container):
     sql = "SELECT count(*) FROM buffer_zones WHERE status IN ('processing','failed')"
     count = run(postgres_command(postgres_container, "psql", "-U", "jianify_app", "-d", "memoia", "-Atc", sql))
@@ -79,10 +84,20 @@ def check_quiet(command, config, postgres_container):
         batches = "memory_blobs"
     else:
         raise RuntimeError("Unknown memory schema blocks maintenance; verify migrations without clearing state")
-    for table, predicate in (("memory_operations", "status='processing'"),
+    flush_schema = run(base + ["""SELECT count(*) FROM information_schema.columns
+        WHERE table_schema=current_schema() AND table_name='memory_operations'
+        AND column_name IN ('kind','lease_owner','lease_until')"""]) == "3"
+    operation_predicate = "status='processing' AND kind!='flush'" if flush_schema else "status='processing'"
+    for table, predicate in (("memory_operations", operation_predicate),
                              (batches, "status IN ('processing','rebuilding')")):
         if run(base + [f"SELECT count(*) FROM {table} WHERE {predicate}"]) != "0":
             raise RuntimeError("Unfinished v2 operations block maintenance; resolve without clearing state")
+    if flush_schema:
+        if run(base + ["SELECT count(*) FROM memory_operations WHERE kind='flush' AND lease_owner IS NOT NULL AND lease_until > now()"] ) != "0":
+            raise RuntimeError("Active derived-memory execution blocks maintenance")
+    if run(base + ["SELECT count(*) FROM information_schema.tables WHERE table_schema=current_schema() AND table_name='memory_maintenance_tasks'"]) == "1":
+        if run(base + ["SELECT count(*) FROM memory_maintenance_tasks WHERE lease_owner IS NOT NULL AND lease_until > now()"] ) != "0":
+            raise RuntimeError("Active derived-memory execution blocks maintenance")
 
 
 def wait_healthy(command, service):
@@ -111,17 +126,24 @@ def validate_isolation(config, target, source_config):
     name = config["name"]
     if not name.startswith("memoia-restore-") or name == source_config["name"]:
         raise RuntimeError("Restore must use a unique isolated project")
-    if config["services"]["memoia"].get("ports"):
-        raise RuntimeError("Restore API must not publish any host port")
+    for service in writers(config):
+        if config["services"][service].get("ports"):
+            raise RuntimeError("Restored application must not publish any host port")
+        if config["services"][service]["volumes"][0]["source"] != str(target / "api/config.yaml"):
+            raise RuntimeError("Restored application config mount is not isolated")
     for service, destination in (("postgres", "/var/lib/postgresql/data"), ("redis", "/data")):
         volumes = config["services"][service]["volumes"]
         if len(volumes) != 1 or volumes[0]["source"] != str(target / "data" / service) or volumes[0]["target"] != destination:
             raise RuntimeError("Restore data mount is not isolated")
         if config["services"][service].get("ports"):
             raise RuntimeError("Restore database ports must not be published")
-    for field, host in (("DATABASE_URL", "jianify-postgres"), ("REDIS_URL", "redis")):
-        if urlsplit(config["services"]["memoia"]["environment"][field]).hostname != host:
-            raise RuntimeError("Restore connections must target isolated Compose services")
+    for service in writers(config):
+        environment = config["services"][service]["environment"]
+        for field, host in (("DATABASE_URL", "jianify-postgres"), ("REDIS_URL", "redis")):
+            if urlsplit(environment[field]).hostname != host:
+                raise RuntimeError("Restore connections must target isolated Compose services")
+            if environment[field] != config["services"]["memoia"]["environment"][field]:
+                raise RuntimeError("Restored Worker connection differs from the restored API")
     if "jianify-postgres" not in config["services"]["postgres"].get("networks", {}).get("data", {}).get("aliases", []):
         raise RuntimeError("Isolated PostgreSQL must own the expected database alias")
     db = urlsplit(config["services"]["memoia"]["environment"]["DATABASE_URL"])
@@ -138,9 +160,11 @@ def validate_isolation(config, target, source_config):
                 or (key != "ingress" and network.get("internal") is not True)):
             raise RuntimeError("Restore cannot reuse an existing network")
     expected = {"postgres": {"data"}, "redis": {"backend"}, "memoia": {"backend", "ingress", "data"}}
+    if "maintenance" in config["services"]:
+        expected["maintenance"] = expected["memoia"]
     for service, membership in expected.items():
         if set(config["services"][service].get("networks", [])) != membership:
-            raise RuntimeError("Only the restored API may use the isolated outbound network")
+            raise RuntimeError("Only the restored application may use the isolated outbound network")
 
 
 def backup():
@@ -163,23 +187,28 @@ def backup():
     if run(["bash", str(Path(__file__).with_name("infra-fingerprint.sh")), str(ROOT)]) != (state / "infra-config.sha256").read_text().strip():
         raise RuntimeError("Infrastructure configuration changed")
     check_quiet(command, config, postgres["container_id"])
-    api = run(command + ["ps", "-q", "memoia"])
-    live = inspect(api)
-    if live["Config"]["Image"] != image or live["State"].get("Health", {}).get("Status") != "healthy":
-        raise RuntimeError("Backup requires the accepted healthy API")
-    api_database = [item.removeprefix("DATABASE_URL=") for item in live["Config"]["Env"]
-                    if item.startswith("DATABASE_URL=")]
-    if api_database != [config["services"]["memoia"]["environment"]["DATABASE_URL"]]:
-        raise RuntimeError("Running API database connection differs from the paired backup source")
+    containers = {}
+    for service in writers(config):
+        containers[service] = run(command + ["ps", "-q", service])
+        live = inspect(containers[service])
+        if (live["Config"]["Image"] != image or live["State"].get("Health", {}).get("Status") != "healthy"
+                or live["State"].get("OOMKilled") or live.get("RestartCount", 0)):
+            raise RuntimeError("Backup requires accepted healthy API and Worker")
+        environment = dict(item.split("=", 1) for item in live["Config"]["Env"] if "=" in item)
+        for field in ("DATABASE_URL", "REDIS_URL"):
+            expected = config["services"][service]["environment"].get(field)
+            if expected is not None and environment.get(field) != expected:
+                raise RuntimeError("Running application connection differs from the paired backup source")
     identifier = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8]
     directory = state / "backups" / identifier
     directory.mkdir(parents=True, mode=0o700)
     pending = state / "pending-maintenance"
     pending.write_text(f"backup {directory}\n")
-    run(command + ["stop", "--timeout", "90", "memoia"])
-    stopped = inspect(api)["State"]
-    if stopped.get("Running") or stopped.get("ExitCode") != 0:
-        raise RuntimeError("API did not stop gracefully; no backup accepted")
+    run(command + ["stop", "--timeout", "90", *writers(config)])
+    for container in containers.values():
+        stopped = inspect(container)["State"]
+        if stopped.get("Running") or stopped.get("ExitCode") != 0:
+            raise RuntimeError("API or Worker did not stop gracefully; no backup accepted")
     current_postgres = company_postgres()
     if (current_postgres["container_id"] != postgres["container_id"]
             or current_postgres["fingerprint"] != postgres["fingerprint"]):
@@ -208,9 +237,10 @@ def backup():
                 "postgres_image": postgres["image"], "postgres_fingerprint": postgres["fingerprint"],
                 "hashes": hashes, "database_counts": counts, "redis_probe": [probe_key, probe_value]}
     (directory / "backup.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    # 切点成功后才恢复同一个已验收 API；任何失败保留停写和维护标记。
-    run(command + ["up", "-d", "--no-deps", "--no-build", "memoia"])
-    wait_healthy(command, "memoia")
+    # 切点成功后才恢复同一已验收 API/Worker；任何失败保留停写和维护标记。
+    run(command + ["up", "-d", "--no-deps", "--no-build", *writers(config)])
+    for service in writers(config):
+        wait_healthy(command, service)
     pending.unlink()
     print(f"Paired backup complete: {directory}")
 
@@ -223,10 +253,11 @@ def isolated_config(source, manifest, target):
     for network, values in config["networks"].items():
         values.pop("external", None)
         values["name"] = config["name"] + "_" + network
-        # Startup validates real model/embedding credentials; only API may egress.
+        # Application startup/model tools may egress, but only on isolated networks.
         values["internal"] = network != "ingress"
     config["services"]["redis"]["networks"] = {"backend": {}}
-    config["services"]["memoia"]["networks"] = {"backend": {}, "ingress": {}, "data": {}}
+    for service in writers(config):
+        config["services"][service]["networks"] = {"backend": {}, "ingress": {}, "data": {}}
     config["services"]["redis"]["volumes"][0]["source"] = str(target / "data/redis")
     database = urlsplit(config["services"]["memoia"]["environment"]["DATABASE_URL"])
     if (database.hostname != "jianify-postgres" or database.path != "/memoia"
@@ -242,8 +273,9 @@ def isolated_config(source, manifest, target):
                         "interval": "10s", "timeout": "5s", "retries": 12},
         "networks": {"data": {"aliases": ["jianify-postgres"]}},
     }
-    config["services"]["memoia"].pop("ports", None)
-    config["services"]["memoia"]["volumes"][0]["source"] = str(target / "api/config.yaml")
+    for service in writers(config):
+        config["services"][service].pop("ports", None)
+        config["services"][service]["volumes"][0]["source"] = str(target / "api/config.yaml")
     # 先从 RDB 加载；禁止正式 AOF 配置抢先覆盖 RDB。
     config["services"]["redis"]["command"][2] = 'exec redis-server --appendonly no --requirepass "$${REDIS_PASSWORD}"'
     return config
@@ -323,17 +355,19 @@ def restore(directory, target):
     redis_container = run(command + ["ps", "-q", "redis"])
     if run(redis_command(command, "GET", key)) != value:
         raise RuntimeError("AOF restart verification failed")
-    run(command + ["up", "-d", "--no-deps", "--no-build", "memoia"])
-    wait_healthy(command, "memoia")
-    api_container = run(command + ["ps", "-q", "memoia"])
-    api = inspect(api_container)
-    api_environment = dict(item.split("=", 1) for item in api["Config"]["Env"] if "=" in item)
-    if (api["Config"].get("Image") != manifest["image"] or api["HostConfig"].get("PortBindings")
-            or any(api_environment.get(field) != config["services"]["memoia"]["environment"][field]
-                   for field in ("DATABASE_URL", "REDIS_URL"))):
-        raise RuntimeError("Restored API connections or host ports differ from the isolated configuration")
+    run(command + ["up", "-d", "--no-deps", "--no-build", *writers(config)])
+    containers = {}
+    for service in writers(config):
+        wait_healthy(command, service)
+        containers[service] = run(command + ["ps", "-q", service])
+        live = inspect(containers[service])
+        environment = dict(item.split("=", 1) for item in live["Config"]["Env"] if "=" in item)
+        if (live["Config"].get("Image") != manifest["image"] or live["HostConfig"].get("PortBindings")
+                or any(environment.get(field) != config["services"][service]["environment"][field]
+                       for field in ("DATABASE_URL", "REDIS_URL"))):
+            raise RuntimeError("Restored application connections or host ports differ from the isolated configuration")
     expected_networks = sorted(network["name"] for network in config["networks"].values())
-    for service, container in (("postgres", postgres_container), ("redis", redis_container), ("memoia", api_container)):
+    for service, container in {"postgres": postgres_container, "redis": redis_container, **containers}.items():
         actual = inspect(container)["NetworkSettings"]["Networks"]
         membership = {config["networks"][key]["name"] for key in config["services"][service]["networks"]}
         if set(actual) != membership:
@@ -346,12 +380,13 @@ def restore(directory, target):
                "connections": {"postgres": {"host": "jianify-postgres", "database": "memoia", "user": "jianify_app",
                                                "container_id": postgres_container},
                                "redis": {"host": "redis", "database": "0", "container_id": redis_container},
-                               "api_container_id": api_container},
+                               "api_container_id": containers["memoia"],
+                               **({"worker_container_id": containers["maintenance"]} if "maintenance" in containers else {})},
                "data_mounts": {service: str(target / "data" / service) for service in ("postgres", "redis")}}
     receipt_path = target / "restore-verified.json"
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
     receipt_path.chmod(0o600)
-    print(f"Isolated paired PostgreSQL, RDB→AOF and API restart verified: {target}")
+    print(f"Isolated paired PostgreSQL, RDB→AOF and application restart verified: {target}")
 
 
 def main():

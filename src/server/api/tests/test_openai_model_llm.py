@@ -71,11 +71,12 @@ def openai_transport(monkeypatch):
         lambda: client,
     )
     monkeypatch.setattr(llms, "project_cost_token_billing", AsyncMock())
+    monkeypatch.setattr(CONFIG, "llm_reasoning_effort", "high")
     return state, client
 
 
 @pytest.mark.asyncio
-async def test_luna_uses_medium_reasoning_and_total_budget(openai_transport):
+async def test_luna_uses_default_reasoning_and_total_budget(openai_transport):
     state, client = openai_transport
     history = [{"role": "assistant", "content": "prior answer"}]
     try:
@@ -92,7 +93,7 @@ async def test_luna_uses_medium_reasoning_and_total_budget(openai_transport):
         )
         assert result == "answer"
         body = state["requests"][0]
-        assert body["reasoning_effort"] == "medium"
+        assert body["reasoning_effort"] == "high"
         assert "temperature" not in body
         assert body["max_completion_tokens"] == 32768
         assert body["response_format"] == {"type": "json_object"}
@@ -121,7 +122,7 @@ async def test_luna_removes_all_unsupported_sampling_parameters(openai_transport
             top_logprobs=2,
         )
         body = state["requests"][0]
-        assert body["reasoning_effort"] == "medium"
+        assert body["reasoning_effort"] == "high"
         assert body["max_completion_tokens"] == 32768
         assert not {
             "temperature", "top_p", "logprobs", "top_logprobs", "max_tokens"
@@ -137,16 +138,17 @@ async def test_luna_removes_all_unsupported_sampling_parameters(openai_transport
         {"max_tokens": 16},
         {"max_tokens": 1024},
         {"reasoning_effort": "none", "max_tokens": 1024},
+        {"reasoning_effort": "max", "max_tokens": 1024},
     ],
 )
-async def test_luna_default_budget_ignores_old_limits_and_fixes_reasoning(
+async def test_luna_default_budget_ignores_old_limits_and_preserves_reasoning(
     openai_transport, caller_options
 ):
     state, client = openai_transport
     try:
         await openai_complete("gpt-6-luna", "input", **caller_options)
         body = state["requests"][0]
-        assert body["reasoning_effort"] == "medium"
+        assert body["reasoning_effort"] == caller_options.get("reasoning_effort", "high")
         assert body["max_completion_tokens"] == 32768
         assert "max_tokens" not in body
     finally:
@@ -163,7 +165,7 @@ async def test_explicit_completion_budget_is_preserved(openai_transport, budget)
         )
         body = state["requests"][0]
         assert body["max_completion_tokens"] == budget
-        assert body["reasoning_effort"] == "medium"
+        assert body["reasoning_effort"] == "high"
         assert "max_tokens" not in body
     finally:
         await client.close()
@@ -226,7 +228,7 @@ async def test_empty_structured_content_flush_fails_without_event(
 @pytest.mark.asyncio
 async def test_complete_structured_empty_facts_flush_succeeds_without_event(openai_transport):
     state, model_client = openai_transport
-    state["content"] = '{"facts": [], "event_tags": []}'
+    state["content"] = '{"facts": []}'
     client = TestClient(app, headers={"Authorization": f"Bearer {os.environ['ACCESS_TOKEN']}"})
     uid = client.post("/api/users", json={}).json()["id"]
     try:
@@ -264,7 +266,7 @@ async def test_luna_json_mode_preserves_legacy_parser_contract(
         assert result.data() == expected
         body = state["requests"][0]
         assert body["response_format"] == {"type": "json_object"}
-        assert body["reasoning_effort"] == "medium"
+        assert body["reasoning_effort"] == "high"
         assert body["max_completion_tokens"] == 32768
         assert "temperature" not in body and "max_tokens" not in body
     finally:
@@ -325,7 +327,7 @@ async def test_startup_sanity_uses_dedicated_completion_budget(openai_transport,
         await llms.llm_sanity_check()
         await asyncio.sleep(0)
         body = state["requests"][0]
-        assert body["reasoning_effort"] == "medium"
+        assert body["reasoning_effort"] == "high"
         assert body["max_completion_tokens"] == 4096
         assert "temperature" not in body and "max_tokens" not in body
         assert "OK" in body["messages"][-1]["content"]
@@ -362,5 +364,17 @@ async def test_missing_usage_metadata_does_not_discard_valid_text(openai_transpo
     state["usage"] = False
     try:
         assert await openai_complete("gpt-6-luna", "input") == "answer"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_luna_service_default_is_used_only_without_explicit_effort(openai_transport, monkeypatch):
+    state, client = openai_transport
+    monkeypatch.setattr(CONFIG, "llm_reasoning_effort", "low")
+    try:
+        await openai_complete("gpt-6-luna", "default")
+        await openai_complete("gpt-6-luna", "project override", reasoning_effort="high")
+        assert [body["reasoning_effort"] for body in state["requests"]] == ["low", "high"]
     finally:
         await client.close()

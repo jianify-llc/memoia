@@ -16,6 +16,7 @@ from memoia_server.models.database import User, UserEvent
 from memoia_server.models.source import (
     ImportSource, DeleteMessages, memory_sources, memory_blobs, memory_messages,
     memory_operations, memory_facts,
+    memory_fact_corrections,
 )
 
 
@@ -40,17 +41,9 @@ def uid(db_env):
 def models(monkeypatch):
     async def extract(request, **kwargs):
         return source.ExtractedSource([dict(id=uuid4(), content="Likes chess", topic="interest", sub_topic="hobby",
-            support_groups=[[m.message_id]], occurred_at=m.occurred_at) for m in request.messages], [])
-    async def reconcile(facts, **kwargs):
-        return source.Reconciliation(decisions=[source.FactDecision(fact_id=f["id"], include=True) for f in facts],
-            profiles=[source.DerivedProfile(content=f["content"], topic=f["topic"], sub_topic=f["sub_topic"],
-                                           fact_ids=[f["id"]]) for f in facts])
+            support_groups=[[m.message_id]], occurred_at=m.occurred_at) for m in request.messages])
     monkeypatch.setattr(source, "extract_source", extract)
-    monkeypatch.setattr(source, "reconcile_facts", reconcile)
     monkeypatch.setattr(CONFIG, "enable_event_embedding", False)
-    async def tags(*args, **kwargs):
-        return []
-    monkeypatch.setattr(source, "rebuild_event_tags", tags)
 
 
 @pytest.mark.asyncio
@@ -101,7 +94,8 @@ async def test_deleting_message_rebuilds_all_blobs_without_original_text(uid, mo
     await source.import_source(uid, "__root__", body("b", "1", "2"))
     operation = await source.delete_messages(uid, "__root__", "dialog-1",
         DeleteMessages(idempotency_key="delete-1", message_ids=["1"]))
-    assert operation.status == "completed" and operation.blob_id is None
+    assert operation.status == "completed" and operation.blob_id is not None
+    assert source.get_blob(uid, "__root__", operation.blob_id).kind == "retract"
     group = source.get_source(uid, "__root__", source_id="dialog-1")
     assert group.deleted_message_ids == ["1"]
     assert [f.support_groups for f in group.evidence] == [[["2"]]]
@@ -109,6 +103,124 @@ async def test_deleting_message_rebuilds_all_blobs_without_original_text(uid, mo
     late = await source.import_source(uid, "__root__", body("late", "1"))
     assert late.status == "completed" and not late.result.event_ids
     assert len(source.get_source(uid, "__root__", source_id="dialog-1").evidence) == 1
+
+
+@pytest.mark.asyncio
+async def test_correction_has_its_own_evidence_and_deleted_proof_restores_old_fact(uid, models, monkeypatch):
+    async def extract(request, **kwargs):
+        related = kwargs["rules"].get("related_facts", [])
+        if request.idempotency_key == "old":
+            return source.ExtractedSource([dict(id=uuid4(), content="User lives in Beijing", subject="user",
+                reporter="user", certainty="asserted", corrects=[], support_groups=[["1"]])])
+        return source.ExtractedSource([dict(id=uuid4(), content="User lives in Shanghai", subject="user",
+            reporter="user", certainty="asserted", support_groups=[["2"], ["4"]],
+            corrects=[{"fact_id": related[0]["id"], "support_groups": [["2"]]}])])
+    monkeypatch.setattr(source, "extract_source", extract)
+    old = await source.import_source(uid, "__root__", body("old", "1"))
+    newer = await source.import_source(uid, "__root__", body("correction", "2", "4"))
+    with Session() as session:
+        old_id, new_id = old.result.fact_ids[0], newer.result.fact_ids[0]
+        assert not session.scalar(select(memory_facts.c.active).where(memory_facts.c.id == old_id))
+        assert session.scalar(select(memory_facts.c.active).where(memory_facts.c.id == new_id))
+    await source.delete_messages(uid, "__root__", "dialog-1",
+        DeleteMessages(idempotency_key="remove-correction", message_ids=["2"]))
+    with Session() as session:
+        assert session.scalar(select(memory_facts.c.active).where(memory_facts.c.id == old_id))
+        assert session.scalar(select(memory_facts.c.support_groups).where(memory_facts.c.id == new_id)) == [["4"]]
+        assert session.scalar(select(func.count()).select_from(memory_fact_corrections).where(
+            memory_fact_corrections.c.user_id == uid)) == 0
+        changed = [c for batch in session.scalars(select(memory_blobs.c.fact_changes).where(memory_blobs.c.user_id == uid)) for c in batch]
+        assert any(c["fact_id"] == str(old_id) and c["kind"] == "updated" for c in changed)
+        assert all("messages" not in request for request in session.scalars(select(memory_operations.c.request).where(
+            memory_operations.c.user_id == uid)))
+
+
+@pytest.mark.asyncio
+async def test_normal_time_change_is_not_an_explicit_correction(uid, models):
+    await source.import_source(uid, "__root__", body("earlier", "1"))
+    await source.import_source(uid, "__root__", body("later", "2"))
+    with Session() as session:
+        assert session.scalar(select(func.count()).select_from(memory_facts).where(memory_facts.c.user_id == uid,
+            memory_facts.c.active)) == 2
+        assert session.scalar(select(func.count()).select_from(memory_fact_corrections).where(
+            memory_fact_corrections.c.user_id == uid)) == 0
+
+
+@pytest.mark.asyncio
+async def test_cross_source_correction_reads_related_old_assertion_not_full_sentence_and(uid, models, monkeypatch):
+    old = await source.import_source(uid, "__root__", body("old", "1", source_id="earlier"))
+    with Session.begin() as session:
+        session.execute(update(memory_facts).where(memory_facts.c.id == old.result.fact_ids[0])
+                        .values(content="User lives in Beijing"))
+    async def extract(request, **kwargs):
+        related = kwargs["rules"]["related_facts"]
+        assert [f["id"] for f in related] == [str(old.result.fact_ids[0])]
+        return source.ExtractedSource([dict(id=uuid4(), content="User lives in Shanghai", subject="user",
+            reporter="user", certainty="asserted", support_groups=[["2"]],
+            corrects=[{"fact_id": related[0]["id"], "support_groups": [["2"]]}])])
+    monkeypatch.setattr(source, "extract_source", extract)
+    corrected = body("correct", "2", source_id="new-dialog")
+    corrected.messages[0].content = "Correction: I misspoke about Beijing; actually I live in Shanghai."
+    await source.import_source(uid, "__root__", corrected)
+    with Session() as session:
+        assert not session.scalar(select(memory_facts.c.active).where(memory_facts.c.id == old.result.fact_ids[0]))
+
+
+@pytest.mark.asyncio
+async def test_capacity_repair_explicitly_resumes_original_import_receipt(uid, models, monkeypatch):
+    original = source._related_facts
+    def too_large(*args):
+        raise source.SourceError("related_facts_too_large", "fixture capacity", 413)
+    monkeypatch.setattr(source, "_related_facts", too_large)
+    with pytest.raises(source.SourceError):
+        await source.import_source(uid, "__root__", body("capacity", "1"))
+    failed = source.get_operation(uid, "__root__", key="capacity")
+    assert failed.status == "failed" and not failed.error.retryable
+    monkeypatch.setattr(source, "_related_facts", original)
+    done = await source.retry_operation(uid, "__root__", failed.operation_id)
+    assert done.operation_id == failed.operation_id and done.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_empty_fact_and_repeated_batch_have_completable_maintenance_watermark(uid, models, monkeypatch):
+    from tests.maintenance_support import maintain
+    from memoia_server.controllers import maintenance
+    async def empty(*args, **kwargs):
+        return source.ExtractedSource([])
+    monkeypatch.setattr(source, "extract_source", empty)
+    first = await source.import_source(uid, "__root__", body("empty", "1"))
+    assert first.result.fact_ids == [] and first.result.memory_version > 0
+    assert await maintain(uid)
+    again = await source.import_source(uid, "__root__", body("repeated", "1"))
+    assert await maintain(uid)
+    state = maintenance.get_status(uid, "__root__")
+    assert state["pending_blob_count"] == 0
+    assert all(row["status"] == "completed" for row in state["flushes"])
+    assert source.get_operation(uid, "__root__", operation_id=first.operation_id) == first
+    # An empty extraction still has input identities, all of which can be deleted.
+    await source.delete_messages(uid, "__root__", "dialog-1",
+        DeleteMessages(idempotency_key="delete-empty", message_ids=["1"]))
+    assert source.get_blob(uid, "__root__", first.blob_id).status == "retracted"
+
+
+@pytest.mark.asyncio
+async def test_fact_search_does_not_require_event_and_deletion_is_immediate(uid, models, monkeypatch):
+    from memoia_server.controllers import event
+    from memoia_server.models.utils import Promise
+    async def unavailable(*args, **kwargs):
+        return Promise.reject("fixture lexical-only")
+    monkeypatch.setattr(event, "get_embedding", unavailable)
+    imported = await source.import_source(uid, "__root__", body("indexed", "1"))
+    found = (await event.hybrid_search_user_events(uid, "__root__", "chess")).data()
+    assert [f.id for f in found.facts] == imported.result.fact_ids
+    assert not found.events
+    with Session.begin() as session:
+        # Legacy inclusion only governs old Profile selection, not factual validity.
+        session.execute(update(memory_facts).where(memory_facts.c.id == imported.result.fact_ids[0]).values(included=False))
+    assert (await event.hybrid_search_user_events(uid, "__root__", "chess")).data().facts
+    await source.delete_messages(uid, "__root__", "dialog-1",
+        DeleteMessages(idempotency_key="removed", message_ids=["1"]))
+    assert not (await event.hybrid_search_user_events(uid, "__root__", "chess")).data().facts
 
 
 @pytest.mark.asyncio
@@ -159,7 +271,7 @@ async def test_delete_fences_inflight_batch_and_resume_cannot_restore_contributi
 async def test_joint_support_failure_and_independent_surviving_group(uid, models, monkeypatch):
     async def extract(request, **kwargs):
         return source.ExtractedSource([dict(id=uuid4(), content="Likes chess", topic="interest", sub_topic="hobby",
-            support_groups=[["1", "2"], ["3"]], occurred_at=request.messages[-1].occurred_at)], [])
+            support_groups=[["1", "2"], ["3"]], occurred_at=request.messages[-1].occurred_at)])
     monkeypatch.setattr(source, "extract_source", extract)
     imported = await source.import_source(uid, "__root__", body("a", "1", "2", "3"))
     await source.delete_messages(uid, "__root__", "dialog-1", DeleteMessages(idempotency_key="d2", message_ids=["2"]))

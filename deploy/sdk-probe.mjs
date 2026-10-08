@@ -7,7 +7,8 @@ import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const names = ["input", "sdk_version", "authentication", "user_absent", "first_import",
-  "operation_replay", "source_evidence", "profiles", "embedding_search", "history",
+  "operation_replay", "source_evidence", "fact_search", "profiles", "embedding_search", "history",
+  "flush", "partial_maintenance", "delete_maintenance",
   "partial_retract", "retract", "profile_history", "forget_user", "forget_repeat", "late_import_rejected", "cleanup"];
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 const requireTrue = (condition) => { if (!condition) throw new Error("Probe check failed"); };
@@ -20,7 +21,7 @@ const profileState = (rows) => rows.map((profile) => [profile.id, profile.conten
 
 export async function runProbe(input, sdkEntry, { transport = fetch, pollIntervalMs = 1000, checkpoint = async () => {} } = {}) {
   const evidence = { success: false, outcome_unknown: false,
-    checks: Object.fromEntries(names.map((name) => [name, false])), ids: {}, counts: {} };
+    checks: Object.fromEntries(names.map((name) => [name, false])), ids: {}, counts: {}, maintenance: {} };
   let origin, token, deadline, client, MemoiaError;
   let ownedUser = false, mutationUnknown = false, forgetStarted = false, checkpointFailed = false;
   const remaining = () => Math.max(0, deadline - Date.now());
@@ -68,7 +69,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     }
     remember(operation);
     if (operation) {
-      mutationUnknown = !terminal(operation);
+      mutationUnknown = operation.kind !== "flush" && !terminal(operation);
       await record(`${stage}.receipt`);
     }
     while (!operation || !terminal(operation)) {
@@ -77,7 +78,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
       try {
         operation = await client.getOperationByKey(evidence.ids.user_id, key, options());
         remember(operation);
-        mutationUnknown = !terminal(operation);
+        mutationUnknown = operation.kind !== "flush" && !terminal(operation);
         await record(`${stage}.receipt`);
       }
       catch (error) {
@@ -87,8 +88,44 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
       }
     }
     mutationUnknown = false;
+    if (operation.kind === "flush") {
+      evidence.maintenance[stage.replace(/_flush$/, "")] = { operation_id: operation.operation_id,
+        status: operation.flush.status, blob_ids: operation.flush.blob_ids,
+        attempts: operation.flush.attempts, failed: operation.error !== null };
+    }
     requireTrue(operation.status === "completed");
     return operation;
+  };
+  const maintain = async (operation, stage) => {
+    const version = operation.result?.memory_version;
+    requireTrue(Number.isSafeInteger(version) && version >= 0);
+    evidence.counts[`${stage}_memory_version`] = version;
+    const key = randomUUID();
+    evidence.ids[`${stage}_flush_key`] = key;
+    const sealed = await complete(`${stage}_flush`, key,
+      () => client.flushUser(evidence.ids.user_id, { idempotency_key: key }, options()));
+    requireTrue(sealed.kind === "flush" && sealed.source_id === null && sealed.blob_id === null &&
+      sealed.result.blob_ids.includes(operation.blob_id));
+    evidence.ids[`${stage}_flush_operation_id`] = sealed.operation_id;
+    while (true) {
+      requireTrue(remaining() > 0);
+      let state;
+      try { state = await client.getMaintenance(evidence.ids.user_id, options()); }
+      catch (error) {
+        // Read-only transient lookup failures never authorize replay or recovery.
+        if (![null, 429, 500, 502, 503, 504].includes(error.status)) throw error;
+        await delay(Math.min(pollIntervalMs, remaining()));
+        continue;
+      }
+      const progress = state.flushes.find((item) => item.operation_id === sealed.operation_id);
+      requireTrue(progress && progress.blob_ids.includes(operation.blob_id));
+      evidence.maintenance[stage] = { operation_id: progress.operation_id, status: progress.status,
+        blob_ids: progress.blob_ids, attempts: progress.attempts, failed: progress.error !== null };
+      // Preserve the first model failure; do not wait through retries until it passes.
+      requireTrue(progress.status === "completed" && progress.error === null);
+      return sealed;
+      await delay(Math.min(pollIntervalMs, remaining()));
+    }
   };
   try {
     const url = new URL(input.origin);
@@ -103,7 +140,7 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     evidence.checks.input = true;
     const entry = resolve(sdkEntry);
     const manifest = JSON.parse(await readFile(resolve(dirname(entry), "../package.json"), "utf8"));
-    requireTrue(manifest.name === "@jianify/memoia" && manifest.version === "0.7.0");
+    requireTrue(manifest.name === "@jianify/memoia" && manifest.version === "0.9.0");
     const sdk = await import(pathToFileURL(entry).href);
     const { MemoiaClient } = sdk;
     MemoiaError = sdk.MemoiaError;
@@ -153,25 +190,31 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
       fact.support_groups.some((group) => group.length === 1 && group[0] === id))));
     evidence.counts.evidence_before = stored.evidence.length;
     evidence.checks.source_evidence = true;
+    const factSearch = await client.search(uid, "Renata Calder", 10, options());
+    requireTrue(factSearch.facts.some((fact) => fact.source_id === imported.source_id));
+    evidence.checks.fact_search = true;
+    const importFlush = await maintain(imported, "import");
+    evidence.checks.flush = true;
     const profiles = await client.getProfiles(uid, options());
     requireTrue(profiles.profiles.length > 0 && profiles.profiles.every((p) => p.source_ids.includes(imported.source_id)));
     evidence.counts.profiles_before = profiles.profiles.length;
+    evidence.ids.profile_ids.push(...ids(profiles.profiles));
     evidence.checks.profiles = true;
     const search = await client.search(uid, "Renata Calder", 10, options());
-    requireTrue(search.events.length > 0 && search.events.some((e) => e.source_id === imported.source_id));
-    evidence.counts.events_before = search.events.length;
+    requireTrue(search.facts.length > 0 && search.facts.some((fact) => fact.source_id === imported.source_id));
+    evidence.counts.facts_before = search.facts.length;
     evidence.checks.embedding_search = true;
     const history = await client.getHistory(uid, options());
-    requireTrue(history.entries.some((r) => r.operation_id === imported.operation_id) && historyProfiles(history).length > 0);
+    requireTrue(history.entries.some((r) => r.operation_id === importFlush.operation_id) && historyProfiles(history).length > 0);
     evidence.counts.history_before = history.entries.length;
     evidence.checks.history = true;
     const sourcesBefore = await client.listSources(uid, { ...options(), limit: 100 });
     const events = async () => (await client.getEvents(uid, { limit: 100 }, options())).events;
     const eventsBefore = await events();
-    requireTrue(same(ids(sourcesBefore.sources, "source_id"), [imported.source_id]) &&
-      same(ids(eventsBefore), [...imported.result.event_ids].sort()));
+    requireTrue(same(ids(sourcesBefore.sources, "source_id"), [imported.source_id]) && eventsBefore.length > 0);
     evidence.counts.sources_before_replay = sourcesBefore.sources.length;
     evidence.counts.events_before_replay = eventsBefore.length;
+    evidence.ids.event_ids.push(...ids(eventsBefore));
     // Deliberate replay is allowed only after this exact import has confirmed completion.
     // Its own lost acknowledgement remains unknown: never send a third POST or clean it away.
     await record("operation_replay.before", true);
@@ -207,6 +250,8 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
       { idempotency_key: evidence.ids.partial_retract_key, message_ids: ["name"] }, options()));
     evidence.ids.partial_operation_id = partial.operation_id;
     const remainingSource = await readSource();
+    await maintain(partial, "partial");
+    evidence.checks.partial_maintenance = true;
     const remainingProfiles = await client.getProfiles(uid, options());
     const remainingHistory = await client.getHistory(uid, options());
     requireTrue(remainingSource.deleted_message_ids.includes("name") && remainingSource.evidence.length > 0 &&
@@ -223,10 +268,13 @@ export async function runProbe(input, sdkEntry, { transport = fetch, pollInterva
     requireTrue(finalSource.blobs.every((b) => b.status === "retracted") && finalSource.evidence.length === 0 &&
       ["name", "food"].every((id) => finalSource.deleted_message_ids.includes(id)));
     evidence.checks.retract = true;
+    await maintain(retracted, "delete");
+    evidence.checks.delete_maintenance = true;
     const finalProfiles = await client.getProfiles(uid, options());
     const finalHistory = await client.getHistory(uid, options());
     const finalSearch = await client.search(uid, "Renata Calder", 10, options());
-    requireTrue(finalProfiles.profiles.length === 0 && historyProfiles(finalHistory).length === 0 && finalSearch.events.length === 0);
+    requireTrue(finalProfiles.profiles.length === 0 && historyProfiles(finalHistory).length === 0 &&
+      finalSearch.facts.length === 0 && finalSearch.events.length === 0 && finalSearch.profiles.length === 0);
     evidence.counts.profiles_after = finalProfiles.profiles.length;
     evidence.counts.history_profiles_after = historyProfiles(finalHistory).length;
     evidence.counts.events_after = finalSearch.events.length;

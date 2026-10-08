@@ -13,12 +13,15 @@ from sqlalchemy import select, update
 from memoia_server.models.source import EventTime, ImportSource, DeleteMessages, SourceMessage, memory_facts
 from memoia_server.models.response import EventGistData, UserData
 from memoia_server.models.database import User, UserEvent, UserEventGist
-from memoia_server.controllers import source, user, event
+from memoia_server.controllers import source, user, event, maintenance
 from memoia_server.connectors import Session
 from memoia_server.models.utils import Promise
 from memoia_server.env import CONFIG
-from memoia_server.temporal import supported_event_time, render_gist, source_observations
+from memoia_server.temporal import supported_event_time, render_gist, render_search_fact, source_observations
 from memoia_server.llms import embeddings
+from memoia_server.maintenance_agent import EventMutation, LoopUsage
+from tests.maintenance_support import derive, maintain, status
+from tests.test_maintenance import ready
 
 
 def period(start="2025-04-01", end="2025-04-30", precision="month", expression="去年四月", mid="1"):
@@ -43,13 +46,12 @@ async def test_embedding_input_contains_only_fact_and_supported_event_time(monke
     fact = {"content": "Kyoto hotel stay", "event_time": event_time,
             "occurred_at": "2026-10-06T00:00:00Z", "source_id": "private-source"}
     before = json.dumps(fact, sort_keys=True)
-    content, vectors = await source._event_vectors("__root__", [fact])
+    vectors = await source._fact_vectors("__root__", [fact])
     text = "Kyoto hotel stay" if label is None else f"Kyoto hotel stay\n[Event time: {label}]"
-    assert content == f"- {text}"
     factory.assert_awaited_once_with(CONFIG.embedding_model, [text], "document")
     assert len(vectors) == 1
     assert json.dumps(fact, sort_keys=True) == before
-    assert "2026-10-06" not in content and "private-source" not in content
+    assert "2026-10-06" not in text and "private-source" not in text
 
 
 @pytest.mark.asyncio
@@ -57,8 +59,8 @@ async def test_embedding_disabled_retains_supported_time_for_lexical_search(monk
     monkeypatch.setattr(CONFIG, "enable_event_embedding", False)
     factory = AsyncMock()
     monkeypatch.setattr(source, "get_embedding", factory)
-    content, vectors = await source._event_vectors("__root__", [{"content": "Kyoto hotel", "event_time": period()}])
-    assert content == "- Kyoto hotel\n[Event time: 2025-04; precision: month]"
+    vectors = await source._fact_vectors("__root__", [{"content": "Kyoto hotel", "event_time": period()}])
+    assert render_search_fact("Kyoto hotel", period()) == "Kyoto hotel\n[Event time: 2025-04; precision: month]"
     assert vectors == [None]
     factory.assert_not_awaited()
 
@@ -71,7 +73,7 @@ async def test_time_marker_uses_complete_embedding_input_budget_without_truncati
     factory = AsyncMock(return_value=np.ones((1, CONFIG.embedding_dim)))
     monkeypatch.setitem(embeddings.FACTORIES, CONFIG.embedding_provider, factory)
     with pytest.raises(source.SourceError) as result:
-        await source._event_vectors("__root__", [{"content": "Kyoto", "event_time": period()}])
+        await source._fact_vectors("__root__", [{"content": "Kyoto", "event_time": period()}])
     assert result.value.code == "embedding_input_too_long"
     factory.assert_not_awaited()
 
@@ -99,9 +101,10 @@ async def test_extraction_contract_keeps_undated_content_support_without_requiri
          "occurred_at": "2026-10-03T00:00:00Z", "time_zone": "Asia/Shanghai"},
         {"message_id": "u", "role": "user", "content": "I have visited Bluebird Cafe in Lisbon once",
          "occurred_at": "2026-10-03T00:05:00Z", "time_zone": "Asia/Shanghai"}])
-    output = {"facts": [{"content": "Visited Bluebird Cafe in Lisbon", "topic": "life_event", "sub_topic": "travel",
+    output = {"facts": [{"content": "Visited Bluebird Cafe in Lisbon", "subject": "user",
+        "reporter": "user", "certainty": "asserted", "corrects": [],
         "support_groups": [["d"], ["u"]],
-        "event_time": period("2024-05-01", "2024-05-31", "month", "May 2024", "d")}], "event_tags": []}
+        "event_time": period("2024-05-01", "2024-05-31", "month", "May 2024", "d")}]}
     monkeypatch.setattr(source, "openai_complete", AsyncMock(return_value=json.dumps(output)))
     monkeypatch.setattr(source, "record_completion_usage", AsyncMock())
     extracted = await source.extract_source(body)
@@ -126,10 +129,11 @@ def test_render_retains_precision_raw_expression_and_labels_recording_time():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("event_time", ["missing", "wrong type", period(end="2025-04-29")])
 async def test_real_structured_validation_rejects_missing_or_invalid_time_without_echoing_content(monkeypatch, event_time):
-    fact = {"content": "private temporal validation marker", "topic": "life_event", "sub_topic": "travel", "support_groups": [["1"]]}
+    fact = {"content": "private temporal validation marker", "subject": "user", "reporter": "user",
+            "certainty": "asserted", "corrects": [], "support_groups": [["1"]]}
     if event_time != "missing":
         fact["event_time"] = event_time
-    monkeypatch.setattr(source, "openai_complete", AsyncMock(return_value=json.dumps({"facts": [fact], "event_tags": []})))
+    monkeypatch.setattr(source, "openai_complete", AsyncMock(return_value=json.dumps({"facts": [fact]})))
     monkeypatch.setattr(source, "record_completion_usage", AsyncMock())
     with pytest.raises(source.SourceError) as result:
         await source._structured(source.Extraction, "bounded input", source.EXTRACT_SYSTEM)
@@ -146,15 +150,17 @@ async def test_extraction_anchors_each_message_in_its_recorded_zone_and_rejects_
     seen = []
     async def structured(model, prompt, system, **kwargs):
         seen.append(json.loads(prompt))
-        return source.Extraction(facts=[source.ExtractedFact(content="Kyoto visit", topic="life_event", sub_topic="travel",
-            support_groups=[["1"]], event_time=period("2025-12-31", "2025-12-31", "day", "昨天"))], event_tags=[])
+        return source.Extraction(facts=[source.ExtractedFact(content="Kyoto visit", subject="user",
+            reporter="user", certainty="asserted", corrects=[],
+            support_groups=[["1"]], event_time=period("2025-12-31", "2025-12-31", "day", "昨天"))])
     monkeypatch.setattr(source, "_structured", structured)
     result = await source.extract_source(body)
     assert [m["local_recorded_date"] for m in seen[0]["messages"]] == ["2026-01-01", "2025-12-31", None]
     assert result.facts[0]["occurred_at"].year == 2025
     assert result.facts[0]["event_time"]["start"] == "2025-12-31"
-    bad = source.Extraction(facts=[source.ExtractedFact(content="Kyoto", topic="life_event", sub_topic="travel",
-        support_groups=[["1"]], event_time=period(expression="fabricated quote"))], event_tags=[])
+    bad = source.Extraction(facts=[source.ExtractedFact(content="Kyoto", subject="user",
+        reporter="user", certainty="asserted", corrects=[],
+        support_groups=[["1"]], event_time=period(expression="fabricated quote"))])
     monkeypatch.setattr(source, "_structured", AsyncMock(return_value=bad))
     with pytest.raises(source.SourceError, match="original source"):
         await source.extract_source(body)
@@ -177,12 +183,25 @@ async def test_storage_read_search_and_retraction_keep_separate_time_evidence(te
     async def extract(body, **kwargs):
         return source.ExtractedSource([{"id": uuid4(), "content": "Stayed at Sakura Hotel in Kyoto",
             "topic": "life_event", "sub_topic": "travel", "support_groups": [["1"], ["2"]],
-            "occurred_at": body.messages[0].occurred_at, "event_time": period()}], [])
-    async def reconcile(facts, **kwargs):
-        return source.Reconciliation(decisions=[source.FactDecision(fact_id=f["id"], include=True) for f in facts],
-            profiles=[source.DerivedProfile(content=f["content"], topic=f["topic"], sub_topic=f["sub_topic"], fact_ids=[f["id"]]) for f in facts])
+            "occurred_at": body.messages[0].occurred_at, "event_time": period()}])
+    async def runner(context):
+        nonlocal fail_story_next
+        if fail_story_next:
+            fail_story_next = False
+            raise source.SourceError("story_model_unavailable", "Controlled story model failure", 503, True)
+        await derive()(context)
+        facts = (await context.read("facts"))["items"]
+        stories = (await context.read("events"))["items"]
+        for fact in facts:
+            old = next((story for story in stories if fact["id"] in story["fact_ids"]), None)
+            await context.stage_event(EventMutation(action="upsert", id=old["id"] if old else None,
+                title=fact["content"], content=render_search_fact(fact["content"], fact["event_time"]),
+                time=json.dumps(fact["event_time"], ensure_ascii=False) if fact["event_time"] else None,
+                fact_ids=[fact["id"]]))
+        return context.get_plan(LoopUsage())
     document_inputs = []
     fail_next = False
+    fail_story_next = False
     async def embedding(_, texts, **kwargs):
         nonlocal fail_next
         if kwargs.get("phase") != "query":
@@ -191,17 +210,18 @@ async def test_storage_read_search_and_retraction_keep_separate_time_evidence(te
                 fail_next = False
                 return Promise.reject(503, "Controlled embedding failure")
         return Promise.resolve(np.ones((len(texts), CONFIG.embedding_dim)))
+    story_embedding = AsyncMock(side_effect=AssertionError("Maintenance must not embed derived stories"))
     monkeypatch.setattr(CONFIG, "enable_event_embedding", True)
     monkeypatch.setattr(source, "extract_source", extract)
-    monkeypatch.setattr(source, "reconcile_facts", reconcile)
     monkeypatch.setattr(source, "get_embedding", embedding)
     monkeypatch.setattr(event, "get_embedding", embedding)
-    monkeypatch.setattr(source, "_structured", AsyncMock(return_value=source.EventTagging(event_tags=[])))
+    monkeypatch.setattr(embeddings, "get_embedding", story_embedding)
     body = ImportSource(idempotency_key="temporal", source_id="dialog", messages=[
         {"message_id": "1", "role": "user", "content": "去年四月住京都樱花酒店", "occurred_at": "2026-10-03T00:00:00Z", "time_zone": "Asia/Shanghai"},
         {"message_id": "2", "role": "user", "content": "我住过京都樱花酒店", "occurred_at": "2026-10-03T00:05:00Z", "time_zone": "Asia/Shanghai"}])
     first = await source.import_source(temporal_user, "__root__", body)
-    assert first.status == "completed"
+    assert first.status == "completed" and first.result.memory_version is not None
+    assert first.result.event_ids == []
     assert await source.import_source(temporal_user, "__root__", body) == first
     assert document_inputs == [[
         "Stayed at Sakura Hotel in Kyoto\n[Event time: 2025-04; precision: month]",
@@ -213,18 +233,25 @@ async def test_storage_read_search_and_retraction_keep_separate_time_evidence(te
         stored = session.execute(select(memory_facts).where(memory_facts.c.user_id == temporal_user)).mappings().one()
         assert stored["event_time"]["precision"] == "month"
         assert stored["content"] == "Stayed at Sakura Hotel in Kyoto"
+        assert stored["search_text"] == "Stayed at Sakura Hotel in Kyoto\n[Event time: 2025-04; precision: month]"
+        assert session.query(UserEvent).filter_by(user_id=temporal_user, project_id="__root__").count() == 0
+    found = await event.hybrid_search_user_events(temporal_user, "__root__", "Kyoto 2025-04")
+    assert found.ok() and found.data().events == []
+    assert found.data().facts[0].evidence.event_time.precision == "month"
+    assert "去年四月" in str(found.data().facts[0].evidence.event_time)
+    assert await maintain(temporal_user, runner)
+    with Session.begin() as session:
         derived = session.query(UserEvent).filter_by(user_id=temporal_user, project_id="__root__").one()
-        assert derived.event_data["event_tip"] == "- Stayed at Sakura Hotel in Kyoto\n[Event time: 2025-04; precision: month]"
-        assert session.query(UserEventGist).filter_by(user_id=temporal_user, project_id="__root__").one().gist_data["content"] == stored["content"]
-        # An old recording timestamp must not exclude a relevant undated/dated event.
+        assert derived.event_data["event_tip"] == "Stayed at Sakura Hotel in Kyoto\n[Event time: 2025-04; precision: month]"
+        assert session.query(UserEventGist).filter_by(user_id=temporal_user, project_id="__root__").count() == 0
+        # Fact recall remains independent of the associated story's recording time.
         session.execute(update(UserEvent).where(UserEvent.user_id == temporal_user).values(created_at=datetime(2020, 1, 1, tzinfo=timezone.utc)))
     found = await event.hybrid_search_user_events(temporal_user, "__root__", "Kyoto 2025-04")
-    assert found.ok() and found.data().events[0].evidence[0].event_time.precision == "month"
-    assert "去年四月" in str(found.data().events[0].evidence[0].event_time)
+    assert found.ok() and found.data().facts[0].evidence.event_time.precision == "month"
     with monkeypatch.context() as context:
         context.setattr(CONFIG, "enable_event_embedding", False)
         lexical = await event.hybrid_search_user_events(temporal_user, "__root__", "2025-04")
-        assert lexical.ok() and [e.source_id for e in lexical.data().events] == ["dialog"]
+        assert lexical.ok() and [f.source_id for f in lexical.data().facts] == ["dialog"]
     deletion = DeleteMessages(idempotency_key="withdraw", message_ids=["1"])
     if fail_rebuild:
         fail_next = True
@@ -234,32 +261,54 @@ async def test_storage_read_search_and_retraction_keep_separate_time_evidence(te
         failed = source.get_operation(temporal_user, "__root__", key="withdraw")
         assert failed.status == "failed"
         with Session() as session:
-            assert session.query(UserEvent).filter_by(user_id=temporal_user, project_id="__root__").count() == 0
+            fact = session.execute(select(memory_facts).where(memory_facts.c.user_id == temporal_user)).mappings().one()
+            assert fact["support_groups"] == [["1"], ["2"]] and fact["event_time"] is not None
+            assert session.query(UserEvent).filter_by(user_id=temporal_user, project_id="__root__").count() == 1
             assert session.query(UserEventGist).filter_by(user_id=temporal_user, project_id="__root__").count() == 0
-        assert (await event.hybrid_search_user_events(temporal_user, "__root__", "Kyoto")).data().events == []
+        assert (await event.hybrid_search_user_events(temporal_user, "__root__", "Kyoto")).data().facts[0].evidence.event_time is not None
         deleted = await source.retry_operation(temporal_user, "__root__", failed.operation_id)
         assert deleted.operation_id == failed.operation_id
     else:
         deleted = await source.delete_messages(temporal_user, "__root__", "dialog", deletion)
-    assert deleted.status == "completed"
+    assert deleted.status == "completed" and deleted.result.memory_version > first.result.memory_version
     remaining = source.get_source(temporal_user, "__root__", source_id="dialog").evidence[0]
     assert remaining.support_groups == [["2"]] and remaining.event_time is None
     assert [m.message_id for m in remaining.source_messages] == ["2"]
     assert document_inputs[1:] == [["Stayed at Sakura Hotel in Kyoto"]] * (2 if fail_rebuild else 1)
+    recalled = await event.hybrid_search_user_events(temporal_user, "__root__", "Kyoto")
+    assert recalled.data().facts[0].evidence.event_time is None
+    with monkeypatch.context() as context:
+        context.setattr(CONFIG, "enable_event_embedding", False)
+        assert (await event.hybrid_search_user_events(temporal_user, "__root__", "2025-04")).data().facts == []
     with Session() as session:
         derived = session.query(UserEvent).filter_by(user_id=temporal_user, project_id="__root__").one()
-        assert derived.event_data["event_tip"] == "- Stayed at Sakura Hotel in Kyoto"
-        assert derived.event_data["evidence"][0]["event_time"] is None
-        gist = session.query(UserEventGist).filter_by(event_id=derived.id, project_id="__root__").one()
-        assert gist.gist_data["search_text"] == "Stayed at Sakura Hotel in Kyoto"
-        assert derived.embedding is None
+        assert "2025-04" in derived.event_data["event_tip"]
+        assert event.event_view(session, derived)["evidence"][0]["event_time"] is None
+        assert session.execute(select(memory_facts.c.search_text).where(memory_facts.c.user_id == temporal_user)).scalar_one() == "Stayed at Sakura Hotel in Kyoto"
+    if fail_rebuild:
+        fail_story_next = True
+        assert not await maintain(temporal_user, runner)
+        state = status(temporal_user, "__root__")
+        assert state["error"]["code"] == "story_model_unavailable"
+        assert source.get_operation(temporal_user, "__root__", key="withdraw") == deleted
+        maintenance.retry_flush(temporal_user, "__root__", state["operation_id"])
+        ready(temporal_user)
+        assert await maintain(temporal_user, runner)
+    else:
+        assert await maintain(temporal_user, runner)
+    with Session() as session:
+        derived = session.query(UserEvent).filter_by(user_id=temporal_user, project_id="__root__").one()
+        assert derived.event_data["event_tip"] == "Stayed at Sakura Hotel in Kyoto" and derived.event_data["time"] is None
+        assert event.event_view(session, derived)["evidence"][0]["event_time"] is None
+        assert session.query(UserEventGist).filter_by(event_id=derived.id, project_id="__root__").count() == 0
     assert await source.delete_messages(temporal_user, "__root__", "dialog", deletion) == deleted
     assert len(document_inputs) == (3 if fail_rebuild else 2)
+    story_embedding.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_original_timezone_enrichment_preserves_legacy_identity_without_reinterpreting_dates(temporal_user, monkeypatch):
-    monkeypatch.setattr(source, "extract_source", AsyncMock(return_value=source.ExtractedSource([], [])))
+    monkeypatch.setattr(source, "extract_source", AsyncMock(return_value=source.ExtractedSource([])))
     message = {"message_id": "1", "role": "user", "content": "Undated hotel visit", "occurred_at": "2026-01-01T00:00:00Z"}
     old = ImportSource(idempotency_key="old-no-zone", source_id="dialog", messages=[message])
     first = await source.import_source(temporal_user, "__root__", old)

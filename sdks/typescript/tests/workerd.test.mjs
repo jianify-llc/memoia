@@ -21,6 +21,7 @@ const complete = (externalId) => ({
   result: { event_ids: [], profile_ids: [] },
   error: null,
 });
+const searchResult = { facts: [], events: [], profiles: [] };
 const json = (value, status = 200) => new RuntimeResponse(JSON.stringify(value), {
   status,
   headers: { "Content-Type": "application/json" },
@@ -54,6 +55,12 @@ export default {
     try {
       const value = action === "read"
         ? await client.getOperationByKey(${JSON.stringify(userId)}, marker)
+        : action === "search"
+        ? await client.search(${JSON.stringify(userId)}, "probe:" + marker, 5, {
+            max_token_size: 1500, exclude_fact_ids: [${JSON.stringify(userId)}],
+            exclude_event_ids: [${JSON.stringify(userId)}], exclude_profile_ids: [${JSON.stringify(userId)}],
+            exclude_profile_topics: ["basic_info"],
+          })
         : action === "forget"
         ? await client.forgetUser(${JSON.stringify(forgetUsers)}[marker])
         : await client.importBlob(${JSON.stringify(userId)}, {
@@ -95,7 +102,7 @@ export default {
       const input = body ? JSON.parse(body) : null;
       const pathId = decodeURIComponent(url.pathname.split("/").at(-1));
       const marker = input
-        ? input.source_id.slice("probe:".length)
+        ? (input.source_id ?? input.query).slice("probe:".length)
         : forgetMarkers[pathId] ?? pathId;
       calls.push({
         marker, origin: url.origin, method: request.method,
@@ -122,6 +129,7 @@ export default {
         return json({ detail: { code: "operation_not_found", message: "not found", retryable: false } }, 404);
       }
       if (request.method === "DELETE") return json({ user_id: pathId, forgotten: true });
+      if (url.pathname.endsWith("/search")) return json(searchResult);
       return json(complete(input.source_id));
     },
   }));
@@ -149,6 +157,19 @@ function assertOriginOnly() {
 
 describe("Memoia SDK in the real workerd runtime", { concurrency: false }, () => {
   for (const mode of ["default", "native", "wrapped", "bound"]) {
+    it(`uses ${mode} fetch for private structured search with shared budget and exclusions`, async () => {
+      const marker = `normal-${mode}-search`;
+      const result = await probe(marker, "search", mode);
+      assert.deepEqual(result, { ok: true, value: searchResult });
+      const [call] = received(marker);
+      assert.equal(received(marker).length, 1);
+      assert.equal(call.path, `/api/users/${userId}/search`);
+      assert.equal(call.method, "POST");
+      assert.deepEqual(JSON.parse(call.body), { query: `probe:${marker}`, limit: 5, max_token_size: 1500,
+        exclude_fact_ids: [userId], exclude_event_ids: [userId], exclude_profile_ids: [userId], exclude_profile_topics: ["basic_info"] });
+      assert.equal(call.authorization, `Bearer ${apiKey}`);
+      assertOriginOnly();
+    });
     it(`uses ${mode} fetch without changing its receiver and preserves a real GET 404`, async () => {
       const marker = `normal-${mode}-read`;
       const result = await probe(marker, "read", mode);

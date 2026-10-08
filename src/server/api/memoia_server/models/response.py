@@ -108,6 +108,13 @@ class EventGistData(BaseModel):
 
 
 class EventData(BaseModel):
+    title: str | None = None
+    summary: str | None = None
+    keywords: str | None = None
+    time: str | None = None
+    location: str | None = None
+    content: str | None = None
+    interpretation: str | None = None
     source_id: str | None = None
     blob_id: UUID | None = None
     evidence: list[Evidence] = Field(default_factory=list)

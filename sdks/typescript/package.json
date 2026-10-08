@@ -1,6 +1,6 @@
 {
   "name": "@jianify/memoia",
-  "version": "0.7.0",
+  "version": "0.9.0",
   "description": "Typed, bounded Memoia client for Node.js and Workers",
   "license": "Apache-2.0",
   "type": "module",

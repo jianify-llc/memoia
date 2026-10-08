@@ -7,6 +7,7 @@ from memoia_server.models.database import DEFAULT_PROJECT_ID
 from memoia_server.models.blob import BlobType
 from memoia_server.models.utils import Promise
 from memoia_server.env import CONFIG
+from tests.maintenance_support import maintain
 import numpy as np
 
 
@@ -207,6 +208,14 @@ async def test_chat_buffer_modal(
     await controllers.buffer.flush_buffer(u_id, DEFAULT_PROJECT_ID, BlobType.chat)
 
     p = await controllers.profile.get_user_profiles(u_id, DEFAULT_PROJECT_ID)
+    assert p.ok() and p.data().profiles == []
+    p = await controllers.event.get_user_events(u_id, DEFAULT_PROJECT_ID)
+    assert p.ok() and p.data().events == []
+    p = await controllers.user.get_user_all_blobs(u_id, DEFAULT_PROJECT_ID, BlobType.chat)
+    assert p.ok() and p.data().ids == []
+    assert await maintain(u_id)
+
+    p = await controllers.profile.get_user_profiles(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
     assert len(p.data().profiles) == 4
     print(p.data())
@@ -217,7 +226,7 @@ async def test_chat_buffer_modal(
 
     p = await controllers.event.get_user_events(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
-    assert len(p.data().events) == 1
+    assert len(p.data().events) == 4
 
     p = await controllers.buffer.get_buffer_capacity(
         u_id, DEFAULT_PROJECT_ID, BlobType.chat
@@ -300,6 +309,10 @@ async def test_chat_merge_modal(
     )
     assert p.ok()
     await controllers.buffer.flush_buffer(u_id, DEFAULT_PROJECT_ID, BlobType.chat)
+
+    p = await controllers.profile.get_user_profiles(u_id, DEFAULT_PROJECT_ID)
+    assert p.ok() and sorted(profile.content for profile in p.data().profiles) == sorted(PROFILES)
+    assert await maintain(u_id)
 
     p = await controllers.profile.get_user_profiles(u_id, DEFAULT_PROJECT_ID)
     assert p.ok() and len(p.data().profiles) == len(PROFILES) + 4

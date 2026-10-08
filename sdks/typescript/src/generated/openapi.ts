@@ -119,6 +119,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/users/{user_id}/maintenance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Maintenance */
+        get: operations["getMaintenance"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/{user_id}/flush": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Flush User */
+        post: operations["flushUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/users/{user_id}/blobs/{blob_id}": {
         parameters: {
             query?: never;
@@ -475,6 +509,13 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /**
+             * Kind
+             * @default import
+             * @enum {string}
+             */
+            kind: "import" | "retract";
+            flush?: components["schemas"]["FlushProgress"] | null;
         };
         /** Context */
         Context: {
@@ -534,6 +575,20 @@ export interface components {
         };
         /** EventData */
         EventData: {
+            /** Title */
+            title?: string | null;
+            /** Summary */
+            summary?: string | null;
+            /** Keywords */
+            keywords?: string | null;
+            /** Time */
+            time?: string | null;
+            /** Location */
+            location?: string | null;
+            /** Content */
+            content?: string | null;
+            /** Interpretation */
+            interpretation?: string | null;
             /** Source Id */
             source_id?: string | null;
             /** Blob Id */
@@ -622,14 +677,67 @@ export interface components {
             /** Content */
             content: string;
             /** Topic */
-            topic: string;
+            topic?: string | null;
             /** Sub Topic */
-            sub_topic: string;
+            sub_topic?: string | null;
+            /** Subject */
+            subject?: string | null;
+            /** Reporter */
+            reporter?: string | null;
+            /**
+             * Certainty
+             * @default legacy
+             * @enum {string}
+             */
+            certainty: "asserted" | "reported" | "uncertain" | "legacy";
+            /**
+             * Revision
+             * @default 1
+             */
+            revision: number;
             /** Support Groups */
             support_groups: string[][];
             event_time?: components["schemas"]["EventTime"] | null;
             /** Source Messages */
             source_messages?: components["schemas"]["SourceObservation"][];
+        };
+        /** FlushInput */
+        FlushInput: {
+            /** Idempotency Key */
+            idempotency_key: string;
+        };
+        /** FlushProgress */
+        FlushProgress: {
+            /**
+             * Operation Id
+             * Format: uuid
+             */
+            operation_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "running" | "completed" | "failed";
+            /** Blob Ids */
+            blob_ids: string[];
+            /** Attempts */
+            attempts: number;
+            /** Available At */
+            available_at: string | null;
+            error: components["schemas"]["OperationError"] | null;
+            /** Retryable */
+            retryable: boolean;
+        };
+        /** FlushResult */
+        FlushResult: {
+            /** Blob Ids */
+            blob_ids: string[];
+            /** Profile Ids */
+            profile_ids: string[];
+            /** Event Ids */
+            event_ids: string[];
+            /** Memory Version */
+            memory_version?: number | null;
         };
         /** ForgottenUser */
         ForgottenUser: {
@@ -687,13 +795,12 @@ export interface components {
              * Format: uuid
              */
             revision_id: string;
-            /**
-             * Operation Id
-             * Format: uuid
-             */
-            operation_id: string;
+            /** Operation Id */
+            operation_id: string | null;
             /** Source Id */
-            source_id: string;
+            source_id: string | null;
+            /** Maintenance Version */
+            maintenance_version?: number | null;
             /**
              * Created At
              * Format: date-time
@@ -769,6 +876,13 @@ export interface components {
             /** Token */
             token: string;
         };
+        /** MaintenanceStatus */
+        MaintenanceStatus: {
+            /** Pending Blob Count */
+            pending_blob_count: number;
+            /** Flushes */
+            flushes: components["schemas"]["FlushProgress"][];
+        };
         /** ManagedKey */
         ManagedKey: {
             /**
@@ -810,16 +924,24 @@ export interface components {
              */
             operation_id: string;
             /**
+             * Kind
+             * @default import
+             * @enum {string}
+             */
+            kind: "import" | "retract" | "legacy_import" | "flush";
+            /**
              * Status
              * @enum {string}
              */
             status: "processing" | "completed" | "failed";
             /** Source Id */
-            source_id: string;
+            source_id: string | null;
             /** Blob Id */
             blob_id: string | null;
-            result: components["schemas"]["SourceResult"] | null;
+            /** Result */
+            result: components["schemas"]["SourceResult"] | components["schemas"]["FlushResult"] | null;
             error: components["schemas"]["OperationError"] | null;
+            flush?: components["schemas"]["FlushProgress"] | null;
         };
         /** OperationError */
         OperationError: {
@@ -961,6 +1083,45 @@ export interface components {
             occurred_at: string;
             /** Evidence */
             evidence?: components["schemas"]["Evidence"][];
+            /** Title */
+            title?: string | null;
+            /** Summary */
+            summary?: string | null;
+            /** Interpretation */
+            interpretation?: string | null;
+            /** Keywords */
+            keywords?: string | null;
+            /** Time */
+            time?: string | null;
+            /** Location */
+            location?: string | null;
+            /** Fact Ids */
+            fact_ids?: string[];
+        };
+        /** SearchFact */
+        SearchFact: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Content */
+            content: string;
+            /** Source Id */
+            source_id: string;
+            /**
+             * Blob Id
+             * Format: uuid
+             */
+            blob_id: string;
+            /** Score */
+            score: number;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            evidence: components["schemas"]["Evidence"];
         };
         /** SearchInput */
         SearchInput: {
@@ -971,11 +1132,65 @@ export interface components {
              * @default 10
              */
             limit: number;
+            /**
+             * Max Token Size
+             * @default 4000
+             */
+            max_token_size: number;
+            /** Exclude Fact Ids */
+            exclude_fact_ids?: string[];
+            /** Exclude Event Ids */
+            exclude_event_ids?: string[];
+            /** Exclude Profile Ids */
+            exclude_profile_ids?: string[];
+            /** Exclude Profile Topics */
+            exclude_profile_topics?: string[];
+            /**
+             * Include Events
+             * @default true
+             */
+            include_events: boolean;
+            /** Event Max Tokens */
+            event_max_tokens?: number | null;
+        };
+        /** SearchProfile */
+        SearchProfile: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Content */
+            content: string;
+            /** Topic */
+            topic: string;
+            /** Sub Topic */
+            sub_topic: string;
+            /** Fact Ids */
+            fact_ids: string[];
+            /** Source Ids */
+            source_ids: string[];
+            /** Score */
+            score: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
         };
         /** SearchResult */
         SearchResult: {
             /** Events */
             events: components["schemas"]["SearchEvent"][];
+            /** Facts */
+            facts: components["schemas"]["SearchFact"][];
+            /** Profiles */
+            profiles: components["schemas"]["SearchProfile"][];
         };
         /** Source */
         Source: {
@@ -1040,6 +1255,10 @@ export interface components {
             event_ids: string[];
             /** Profile Ids */
             profile_ids: string[];
+            /** Memory Version */
+            memory_version?: number | null;
+            /** Fact Ids */
+            fact_ids?: string[];
         };
         /** SourceSummary */
         SourceSummary: {
@@ -1360,6 +1579,72 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Operation"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    getMaintenance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MaintenanceStatus"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    flushUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FlushInput"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

@@ -11,6 +11,7 @@ fixture = Path(os.environ["MEMOIA_FIXTURE"])
 old_image = "ghcr.io/jianify/memoia@sha256:" + "a" * 64
 images = {"redis": "redis:7.4@sha256:" + "c" * 64,
           "memoia": os.getenv("FIXTURE_CURRENT_IMAGE", (fixture / "image").read_text())}
+images["maintenance"] = os.getenv("FIXTURE_WORKER_IMAGE", images["memoia"])
 
 
 def output(value):
@@ -48,10 +49,19 @@ elif command == "docker":
                            "labels": {"io.jianify.environment": os.getenv("FIXTURE_ENV", "test")},
                            "environment": {"PROJECT_ID": "fixture", "DATABASE_URL": os.getenv("FIXTURE_DATABASE_URL", "postgresql://jianify_app:fixture@jianify-postgres/memoia"), "REDIS_URL": "redis://:fixture@redis/0"}},
             }
+            services["maintenance"] = {
+                **services["memoia"],
+                "environment": {**services["memoia"]["environment"], "MAINTENANCE_CONCURRENCY": "2"},
+                "command": ["/app/.venv/bin/python", "-m", "memoia_server.maintenance_worker"],
+                "healthcheck": {"test": ["CMD", "/app/.venv/bin/python", "-m", "memoia_server.maintenance_worker", "--healthcheck"]},
+            }
+            if os.getenv("FIXTURE_WORKER_CONFIG_DRIFT"):
+                services["maintenance"]["environment"]["DATABASE_URL"] = "postgresql://wrong/other"
             output(json.dumps({"name": "memoia-" + os.getenv("FIXTURE_ENV", "test"), "services": services,
                                "networks": {"data": {"name": "jianify-data", "external": True}}}))
         elif action == "ps":
-            if not os.getenv("FIXTURE_EMPTY_STACK"):
+            worker_missing = args[-1] == "maintenance" and os.getenv("FIXTURE_WORKER_MISSING") and not (fixture / "worker-started").exists()
+            if not os.getenv("FIXTURE_EMPTY_STACK") and not worker_missing:
                 output(args[-1])
         elif action == "exec":
             if os.getenv("FIXTURE_NO_DRAIN_PROBES"):
@@ -61,8 +71,10 @@ elif command == "docker":
             with (fixture / "actions").open("a") as file:
                 file.write(json.dumps({"args": args, "image": os.getenv("MEMOIA_IMAGE")}) + "\n")
             if action == "up":
-                if args[-1] == "memoia":
+                if "memoia" in args:
                     (fixture / "image").write_text(os.environ["MEMOIA_IMAGE"])
+                if "maintenance" in args:
+                    (fixture / "worker-started").touch()
             elif action == "run" and os.getenv("FIXTURE_MIGRATION_FAIL"):
                 sys.exit("Migration failed")
     elif args[0] == "inspect":
@@ -71,24 +83,34 @@ elif command == "docker":
             if ".Config.Image" in args[args.index("--format") + 1]:
                 output(images[service])
             elif ".State.ExitCode" in args[args.index("--format") + 1]:
-                output("137" if os.getenv("FIXTURE_FORCE_KILL") else "0")
+                output("137" if os.getenv("FIXTURE_FORCE_KILL") or (service == "maintenance" and os.getenv("FIXTURE_WORKER_FORCE_KILL")) else "0")
             elif ".State.OOMKilled" in args[args.index("--format") + 1]:
-                output("true 1" if os.getenv("FIXTURE_OOM") else "false 0")
+                output("true 1" if (service == "memoia" and os.getenv("FIXTURE_OOM")) or (service == "maintenance" and os.getenv("FIXTURE_WORKER_OOM")) else "false 0")
             else:
-                output("unhealthy" if os.getenv("FIXTURE_UNHEALTHY") and service == "memoia" else "healthy")
+                output("unhealthy" if (os.getenv("FIXTURE_UNHEALTHY") and service == "memoia") or (os.getenv("FIXTURE_WORKER_UNHEALTHY") and service == "maintenance") else "healthy")
         else:
-            if service == "memoia":
+            if service in ("memoia", "maintenance"):
                 db_url = os.getenv("FIXTURE_LIVE_DATABASE_URL", os.getenv("FIXTURE_DATABASE_URL", "postgresql://jianify_app:fixture@jianify-postgres/memoia"))
-                output(json.dumps([{"Config": {"Env": ["DATABASE_URL=" + db_url]}, "Mounts": []}]))
+                redis_url = os.getenv("FIXTURE_LIVE_REDIS_URL", "redis://:fixture@redis/0")
+                project_id = os.getenv("FIXTURE_LIVE_PROJECT_ID", "fixture")
+                if service == "maintenance":
+                    redis_url = os.getenv("FIXTURE_WORKER_REDIS_URL", redis_url)
+                    project_id = os.getenv("FIXTURE_WORKER_PROJECT_ID", project_id)
+                output(json.dumps([{"Config": {"Env": ["DATABASE_URL=" + db_url,
+                    "REDIS_URL=" + redis_url, "PROJECT_ID=" + project_id]}, "Mounts": []}]))
             else:
                 output(json.dumps([{"Mounts": [{"Source": "/opt/memoia/data/" + service, "Destination": "/data"}]}]))
     elif args[0] == "exec":
         if os.getenv("FIXTURE_DB_UNAVAILABLE"):
             sys.exit("Company database query failed")
-        if "information_schema.columns" in args[-1]:
+        if "information_schema.columns" in args[-1] and "lease_owner" in args[-1]:
+            output("0")
+        elif "information_schema.columns" in args[-1]:
             output(os.getenv("FIXTURE_MEMORY_LAYOUT", "memory_blobs.source_id\nmemory_blobs.status\nmemory_operations.source_id\nmemory_operations.status\nmemory_sources.source_id"))
-        elif "to_regclass" in args[-1]:
-            output("memory_table" if os.getenv("FIXTURE_V2_TABLES") else "")
+        elif "information_schema.tables" in args[-1]:
+            output("1" if os.getenv("FIXTURE_MAINTENANCE_TABLE") else "0")
+        elif "memory_maintenance_tasks" in args[-1]:
+            output(os.getenv("FIXTURE_MAINTENANCE_ACTIVE", "0"))
         elif "buffer_zones" in args[-1]:
             actions = (fixture / "actions").read_text() if (fixture / "actions").exists() else ""
             stopped = '"stop"' in actions

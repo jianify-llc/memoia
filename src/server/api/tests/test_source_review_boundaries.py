@@ -10,7 +10,10 @@ from sqlalchemy.exc import IntegrityError
 from tests.test_source_groups import uid, models, body
 from tests.test_schema_adoption import legacy_schema, install_legacy, migrate
 from memoia_server.connectors import DB_ENGINE, Session
-from memoia_server.controllers import source, profile
+from memoia_server.controllers import source, profile, maintenance
+from memoia_server.env import CONFIG
+from tests.maintenance_support import derive, maintain, status
+from tests.test_maintenance import ready
 from memoia_server.controllers.buffer import flush_buffer_by_ids
 from memoia_server.models.database import GeneralBlob, BufferZone, UserProfile
 from memoia_server.models.blob import BlobType
@@ -19,7 +22,8 @@ from memoia_server.models.source import DeleteMessages, memory_operations, memor
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["provider", "capacity", "cancel"])
-async def test_partial_support_change_hides_closed_scope_until_rebuild(uid, models, monkeypatch, failure):
+async def test_partial_support_change_commits_fact_and_preserves_pending_derived_scope(uid, models, monkeypatch, failure):
+    monkeypatch.setattr(CONFIG, "enable_event_embedding", False)
     async def extract(request, **kwargs):
         return source.ExtractedSource([
             dict(id=uuid4(), content="Lives in Beijing", topic="work", sub_topic="city",
@@ -28,20 +32,12 @@ async def test_partial_support_change_hides_closed_scope_until_rebuild(uid, mode
                  support_groups=[["2"]], occurred_at=request.messages[1].occurred_at),
             dict(id=uuid4(), content="Likes chess", topic="interest", sub_topic="hobby",
                  support_groups=[["2"]], occurred_at=request.messages[1].occurred_at),
-        ], [])
-
-    async def latest(facts, **kwargs):
-        cities = [fact for fact in facts if fact["topic"] == "work"]
-        winner = max(cities, key=lambda fact: fact["occurred_at"])
-        included = [fact for fact in facts if fact is winner or fact["topic"] == "interest"]
-        return source.Reconciliation(
-            decisions=[source.FactDecision(fact_id=fact["id"], include=fact in included) for fact in facts],
-            profiles=[source.DerivedProfile(content=fact["content"], topic=fact["topic"],
-                sub_topic=fact["sub_topic"], fact_ids=[fact["id"]]) for fact in included])
+        ])
 
     monkeypatch.setattr(source, "extract_source", extract)
-    monkeypatch.setattr(source, "reconcile_facts", latest)
     await source.import_source(uid, "__root__", body("batch", "1", "2", "3"))
+    runner = derive(latest=True, queries=("Lives in",))
+    assert await maintain(uid, runner)
     with Session() as session:
         unrelated = session.query(UserProfile).filter_by(user_id=uid, content="Likes chess").one()
         unchanged = (unrelated.id, unrelated.updated_at)
@@ -51,22 +47,31 @@ async def test_partial_support_change_hides_closed_scope_until_rebuild(uid, mode
             raise asyncio.CancelledError()
         raise source.SourceError("reconciliation_too_large" if failure == "capacity" else "model_unavailable",
                                  "fixture failure", 413 if failure == "capacity" else 503, failure != "capacity")
-    monkeypatch.setattr(source, "reconcile_facts", fail)
-    with pytest.raises(asyncio.CancelledError if failure == "cancel" else source.SourceError):
-        await source.delete_messages(uid, "__root__", "dialog-1",
-            DeleteMessages(idempotency_key="delete-3", message_ids=["3"]))
-    assert [p.content for p in (await profile.get_user_profiles(uid, "__root__")).data().profiles] == ["Likes chess"]
-    assert all(p.content != "Lives in Beijing" for entry in source.get_history(uid, "__root__")
-               for field in (entry.profiles, entry.added, entry.removed) for p in field)
+    operation = await source.delete_messages(uid, "__root__", "dialog-1",
+        DeleteMessages(idempotency_key="delete-3", message_ids=["3"]))
+    assert operation.status == "completed"
+    if failure == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            await maintain(uid, fail)
+    else:
+        assert not await maintain(uid, fail)
+    # Failure does not roll back the synchronous Fact receipt, and stale text is
+    # explicitly permitted while the independent maintenance status is pending.
+    assert {p.content for p in (await profile.get_user_profiles(uid, "__root__")).data().profiles} == {
+        "Lives in Beijing", "Likes chess"}
+    assert source.get_operation(uid, "__root__", key="delete-3") == operation
     with Session() as session:
         fact = session.execute(select(memory_facts).where(memory_facts.c.user_id == uid,
             memory_facts.c.content == "Lives in Beijing")).mappings().one()
         assert fact["support_groups"] == [["1"]] and fact["occurred_at"].day == 1
         unrelated = session.get(UserProfile, (unchanged[0], "__root__"))
         assert (unrelated.id, unrelated.updated_at) == unchanged
-    monkeypatch.setattr(source, "reconcile_facts", latest)
-    operation = source.get_operation(uid, "__root__", key="delete-3")
-    assert (await source.retry_operation(uid, "__root__", operation.operation_id)).status == "completed"
+    state = status(uid, "__root__")
+    assert state["error"]["code"] == ("maintenance_cancelled" if failure == "cancel" else
+        "reconciliation_too_large" if failure == "capacity" else "model_unavailable")
+    maintenance.retry_flush(uid, "__root__", state["operation_id"])
+    ready(uid)
+    assert await maintain(uid, runner)
     assert {p.content for p in (await profile.get_user_profiles(uid, "__root__")).data().profiles} == {
         "Lives in Shanghai", "Likes chess"}
 

@@ -10,6 +10,165 @@ const source = { idempotency_key: "luvel:batch:1", source_id: sourceId, messages
 const json = (body, status = 200) => Response.json(body, { status });
 const client = (fetch, options = {}) => new MemoiaClient({ baseUrl: "https://memoia.example", apiKey: "private-project-token", fetch, ...options });
 
+describe("fixed Blob flush contract", () => {
+  const progress = { operation_id: eventId, status: "pending", blob_ids: [complete.blob_id],
+    attempts: 0, available_at: "2026-10-07T00:00:00Z", error: null, retryable: false };
+  const maintenance = { pending_blob_count: 1, flushes: [progress] };
+  const flush = { operation_id: eventId, kind: "flush", status: "processing", source_id: null,
+    blob_id: null, result: null, error: null, flush: progress };
+  it("accepts a fact-only receipt without waiting for or replaying derivatives", async () => {
+    const factOnly = { ...complete, result: { event_ids: [], profile_ids: [], fact_ids: [eventId], memory_version: 7 } };
+    let calls = 0;
+    const api = client(async () => { calls++; return json(factOnly); });
+    assert.deepEqual(await api.importBlob(user, source), factOnly);
+    assert.equal(calls, 1);
+  });
+
+  it("queries progress separately, seals batches and retries the original flush", async () => {
+    const calls = [];
+    const api = client(async (url, init) => { calls.push({ url, init }); return json(init.method === "GET" ? maintenance : flush, init.method === "GET" ? 200 : 202); });
+    assert.deepEqual(await api.getMaintenance(user), maintenance);
+    assert.deepEqual(await api.flushUser(user, { idempotency_key: "batch-flush" }), flush);
+    assert.deepEqual(await api.retryOperation(user, eventId), flush);
+    assert.equal(calls[0].url, `https://memoia.example/api/users/${user}/maintenance`);
+    assert.equal(calls[1].url, `https://memoia.example/api/users/${user}/flush`);
+    assert.equal(calls[1].init.method, "POST");
+    assert.deepEqual(JSON.parse(calls[1].init.body), { idempotency_key: "batch-flush" });
+    assert.equal(calls[2].url, `https://memoia.example/api/users/${user}/operations/${eventId}/retry`);
+  });
+
+  it("rejects a retry acknowledgement for a different flush", async () => {
+    const api = client(async () => json({ ...flush, operation_id: user }));
+    await assert.rejects(api.retryOperation(user, eventId),
+      (error) => error.code === "INVALID_RESPONSE" && error.outcome === "unknown");
+  });
+
+  it("preserves a retryable backoff error without declaring the original flush failed", async () => {
+    const error = { code: "maintenance_lease_expired", retryable: true };
+    const pending = { ...flush, error, flush: { ...progress, attempts: 1, error, retryable: true } };
+    assert.deepEqual(await client(async () => json(pending)).getOperation(user, eventId), pending);
+    const listed = { operations: [pending] };
+    assert.deepEqual(await client(async () => json(listed)).listOperations(user), listed);
+  });
+
+  it("rejects contradictory terminal/progress states instead of accepting a phantom success", async () => {
+    for (const invalid of [
+      { ...flush, flush: { ...progress, status: "failed" } },
+      { ...flush, status: "failed", error: { code: "maintenance_timeout", retryable: true } },
+      { ...flush, status: "completed", result: { blob_ids: progress.blob_ids, profile_ids: [], event_ids: [] } },
+      { ...flush, error: { code: "maintenance_capacity", retryable: false } },
+    ]) {
+      await assert.rejects(client(async () => json(invalid)).getOperation(user, eventId),
+        error => error.code === "INVALID_RESPONSE" && error.outcome === "rejected");
+    }
+  });
+
+  it("accepts empty completed flushes and rejects malformed user-scope receipts", async () => {
+    const empty = { ...flush, status: "completed", result: { blob_ids: [], profile_ids: [], event_ids: [] },
+      flush: { ...progress, status: "completed", blob_ids: [] } };
+    assert.deepEqual(await client(async () => json(empty)).flushUser(user, { idempotency_key: "empty" }), empty);
+    for (const invalid of [{ ...empty, source_id: sourceId }, { ...empty, flush: null },
+      { ...empty, result: complete.result }]) {
+      await assert.rejects(client(async () => json(invalid)).flushUser(user, { idempotency_key: "empty" }),
+        error => error.code === "INVALID_RESPONSE" && error.outcome === "unknown");
+    }
+  });
+
+  it("returns independent Fact hits with the legacy story expansion options", async () => {
+    let posted;
+    const response = { facts: [{ id: eventId, content: "Tokyo", score: .04, occurred_at: "2026-10-07T00:00:00Z",
+      source_id: sourceId, blob_id: complete.blob_id, evidence: {
+        fact_id: eventId, blob_id: complete.blob_id, content: "Tokyo", support_groups: [["1"]],
+        certainty: "asserted", revision: 1, source_messages: [] } }], events: [], profiles: [] };
+    const api = client(async (_url, init) => { posted = JSON.parse(init.body); return json(response); });
+    assert.deepEqual(await api.search(user, "Tokyo", 5, { include_events: true, event_max_tokens: 800 }), response);
+    assert.deepEqual(posted, { query: "Tokyo", limit: 5, include_events: true, event_max_tokens: 800 });
+  });
+});
+
+describe("structured bounded search contract", () => {
+  const evidence = { fact_id: eventId, blob_id: complete.blob_id, content: "Zhou cancelled hiking because of work.",
+    support_groups: [["1"]], certainty: "asserted", source_messages: [] };
+  const response = {
+    facts: [{ id: eventId, content: evidence.content, source_id: sourceId, blob_id: complete.blob_id,
+      score: .04, occurred_at: "2026-10-07T00:00:00Z", evidence }],
+    events: [{ id: sourceId, content: "The hiking plan changed after Zhou had to work.", source_id: null,
+      blob_id: null, score: .04, occurred_at: "2026-10-07T00:00:00Z", title: "Cancelled hiking",
+      summary: "Work prevented the planned trip.", keywords: "hiking, work", time: "Saturday", location: null,
+      interpretation: null, fact_ids: [eventId], evidence: [evidence] }],
+    profiles: [{ id: complete.blob_id, content: "Zhou is the user's colleague.", topic: "relationships",
+      sub_topic: "Zhou", fact_ids: [eventId], source_ids: [sourceId], score: .04,
+      created_at: "2026-10-07T00:00:00Z", updated_at: "2026-10-07T00:00:00Z" }],
+  };
+  it("preserves all three object classes and sends strict ID exclusions only in a private POST", async () => {
+    const calls = [];
+    const api = client(async (url, init) => { calls.push({ url, init }); return json(response); });
+    const options = { max_token_size: 1500, exclude_fact_ids: [eventId], exclude_event_ids: [sourceId],
+      exclude_profile_ids: [complete.blob_id], deadline: Date.now() + 5_000, signal: new AbortController().signal };
+    assert.deepEqual(await api.search(user, "Why was hiking cancelled?", 5, options), response);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, `https://memoia.example/api/users/${user}/search`);
+    assert.equal(calls[0].init.method, "POST");
+    assert.deepEqual(JSON.parse(calls[0].init.body), { query: "Why was hiking cancelled?", limit: 5,
+      max_token_size: 1500, exclude_fact_ids: [eventId], exclude_event_ids: [sourceId], exclude_profile_ids: [complete.blob_id] });
+  });
+
+  for (const field of ["exclude_fact_ids", "exclude_event_ids", "exclude_profile_ids"]) {
+    it(`${field} rejects malformed IDs and more than 500 entries without any request`, async () => {
+      let calls = 0;
+      const api = client(async () => { calls++; return json(response); });
+      for (const value of [["not-a-uuid"], Array(501).fill(eventId), null, eventId]) {
+        assert.throws(() => api.search(user, "hiking", 5, { [field]: value }),
+          (error) => error.code === "INVALID_INPUT" && error.outcome === "rejected");
+      }
+      assert.equal(calls, 0);
+      await api.search(user, "hiking", 5, { [field]: Array(500).fill(eventId) });
+      assert.equal(calls, 1);
+    });
+  }
+
+  it("rejects out-of-range budgets locally while retaining server defaults and both valid bounds", async () => {
+    const bodies = [];
+    const api = client(async (_url, init) => { bodies.push(JSON.parse(init.body)); return json({ facts: [], events: [], profiles: [] }); });
+    for (const max_token_size of [0, 10001, -1, 1.5, null, "4000"]) {
+      assert.throws(() => api.search(user, "hiking", 5, { max_token_size }), (error) => error.code === "INVALID_INPUT");
+    }
+    assert.equal(bodies.length, 0);
+    for (const max_token_size of [1, 10000]) await api.search(user, "hiking", 5, { max_token_size });
+    await api.search(user, "hiking");
+    assert.deepEqual(bodies, [{ query: "hiking", limit: 5, max_token_size: 1 },
+      { query: "hiking", limit: 5, max_token_size: 10000 }, { query: "hiking", limit: 10 }]);
+  });
+
+  it("filters Profile topics through the generated contract without limiting Fact or Event identity", async () => {
+    const bodies = [];
+    const api = client(async (_url, init) => { bodies.push(JSON.parse(init.body)); return json(response); });
+    for (const exclude_profile_topics of [[""], ["x".repeat(257)], Array(51).fill("basic_info"), null]) {
+      assert.throws(() => api.search(user, "hiking", 5, { exclude_profile_topics }),
+        (error) => error.code === "INVALID_INPUT");
+    }
+    assert.equal(bodies.length, 0);
+    assert.deepEqual(await api.search(user, "hiking", 5, { exclude_profile_topics: ["basic_info"] }), response);
+    await api.search(user, "hiking", 5, { exclude_profile_topics: Array(50).fill("x".repeat(256)) });
+    assert.deepEqual(bodies[0], { query: "hiking", limit: 5, exclude_profile_topics: ["basic_info"] });
+    assert.equal(bodies.length, 2);
+  });
+
+  it("validates Profile identity and rejects invented extra fields instead of treating them as Facts", async () => {
+    for (const profile of [{ ...response.profiles[0], id: "bad-id" },
+      { ...response.profiles[0], fact_ids: ["bad-id"] }, { ...response.profiles[0], revision: 9 }]) {
+      await assert.rejects(client(async () => json({ ...response, profiles: [profile] })).search(user, "hiking"),
+        (error) => error.code === "INVALID_RESPONSE" && error.outcome === "rejected");
+    }
+    for (const field of ["facts", "events", "profiles"]) {
+      const partial = { ...response };
+      delete partial[field];
+      await assert.rejects(client(async () => json(partial)).search(user, "hiking"),
+        (error) => error.code === "INVALID_RESPONSE" && error.outcome === "rejected");
+    }
+  });
+});
+
 describe("event time evidence contract", () => {
   it("sends source timezone and keeps it distinct from event dates", async () => {
     let posted;
@@ -25,7 +184,7 @@ describe("event time evidence contract", () => {
     const evidence = { fact_id: eventId, blob_id: complete.blob_id, content: "Kyoto hotel", topic: "life_event", sub_topic: "travel", support_groups: [["1"]],
       event_time: { start: "2025-04-01", end: "2025-04-30", precision: "month", evidence: [{ message_id: "1", expression: "去年四月" }] },
       source_messages: [{ message_id: "1", recorded_at: "2026-01-01T00:30:00+08:00", time_zone: "Asia/Shanghai" }] };
-    const body = { events: [{ id: eventId, content: "Kyoto hotel", source_id: "dialog-1", blob_id: complete.blob_id,
+    const body = { facts: [], profiles: [], events: [{ id: eventId, content: "Kyoto hotel", source_id: "dialog-1", blob_id: complete.blob_id,
       score: .03, occurred_at: "2026-01-01T00:30:00+08:00", evidence: [evidence] }] };
     const api = client(async () => json(body));
     assert.deepEqual(await api.search(user, "Kyoto hotel 2025-04"), body);
@@ -434,7 +593,7 @@ describe("single API private read contract", () => {
     const query = "not April 2025, April 2026 before the trip";
     const api = client(async (url, init) => {
       calls.push({ url, method: init.method, body: JSON.parse(init.body) });
-      return json(url.endsWith("/context") ? { context: "Kyoto\n[Time evidence]", entries: ["Kyoto\n[Time evidence]"] } : { events: [] });
+      return json(url.endsWith("/context") ? { context: "Kyoto\n[Time evidence]", entries: ["Kyoto\n[Time evidence]"] } : { facts: [], events: [], profiles: [] });
     });
     await api.search(user, query, 3);
     assert.deepEqual(await api.getContext(user, { query, max_token_size: 500 }), { context: "Kyoto\n[Time evidence]", entries: ["Kyoto\n[Time evidence]"] });

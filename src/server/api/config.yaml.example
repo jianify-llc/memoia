@@ -1,4 +1,6 @@
 llm_api_key: YOUR-OPENAI-KEY
+best_llm_model: gpt-6-luna
+llm_reasoning_effort: high
 
 # If you use the lstudio embedded provider, you can refer to the configuration below
 

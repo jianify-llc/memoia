@@ -56,7 +56,7 @@ class BackupBoundary(unittest.TestCase):
         config = {"services": {"memoia": {"environment": {"PROJECT_ID": "fixture"}}}}
         for layout in (LEGACY_LAYOUT, BLOB_LAYOUT):
             for counts in (["1"], ["0", "1"]):
-                with self.subTest(layout=layout, counts=counts), patch.object(recovery, "run", side_effect=["0", "", "", layout, *counts]):
+                with self.subTest(layout=layout, counts=counts), patch.object(recovery, "run", side_effect=["0", "", "", layout, "0", *counts]):
                     with self.assertRaisesRegex(RuntimeError, "Unfinished v2"):
                         recovery.check_quiet(["docker", "compose"], config, "company-postgres")
 
@@ -67,6 +67,17 @@ class BackupBoundary(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Unknown memory schema"):
                     recovery.check_quiet(["docker", "compose"], config, "company-postgres")
                 self.assertEqual(command.call_count, 4)
+
+    def test_active_worker_blocks_cutpoint_but_pending_tasks_can_be_preserved(self):
+        config = {"services": {"memoia": {"environment": {"PROJECT_ID": "fixture"}}}}
+        for active in ("0", "1"):
+            with self.subTest(active=active), patch.object(recovery, "run", side_effect=[
+                    "0", "", "", BLOB_LAYOUT, "0", "0", "0", "1", active]):
+                if active == "1":
+                    with self.assertRaisesRegex(RuntimeError, "Active derived-memory"):
+                        recovery.check_quiet(["docker", "compose"], config, "company-postgres")
+                else:
+                    recovery.check_quiet(["docker", "compose"], config, "company-postgres")
 
     def test_paired_backup_dumps_only_memoia_database_and_redis_at_one_cutpoint(self):
         (self.root / "api").mkdir()
@@ -80,6 +91,7 @@ class BackupBoundary(unittest.TestCase):
         database_url = "postgresql://jianify_app:fixture@jianify-postgres/memoia"
         config = {"name": "memoia-test", "services": {"redis": {"image": "redis-image"},
                   "memoia": {"environment": {"PROJECT_ID": "fixture", "DATABASE_URL": database_url}}}}
+        config["services"]["maintenance"] = copy.deepcopy(config["services"]["memoia"])
         postgres = {"container_id": "company-postgres", "image": "pgvector/pgvector:pg17@sha256:" + "a" * 64,
                     "fingerprint": "company-fingerprint"}
         calls = []
@@ -93,6 +105,10 @@ class BackupBoundary(unittest.TestCase):
             if args[0] == "bash":
                 return "current-fingerprint"
             if args[:3] == ["docker", "exec", "-i"]:
+                if "information_schema.tables" in args[-1]:
+                    return "1"
+                if "information_schema.columns" in args[-1] and "lease_owner" in args[-1]:
+                    return "0"
                 if "information_schema.columns" in args[-1]:
                     return LEGACY_LAYOUT
                 if "pg_dump" in args:
@@ -137,6 +153,8 @@ class BackupBoundary(unittest.TestCase):
         self.assertEqual(dump[-5:], ["-U", "jianify_app", "-d", "memoia", "-Fc"])
         self.assertLess(next(i for i, args in enumerate(calls) if "stop" in args),
                         next(i for i, args in enumerate(calls) if "pg_dump" in args))
+        self.assertEqual(next(args for args in calls if "stop" in args)[-2:], ["memoia", "maintenance"])
+        self.assertEqual(next(args for args in calls if "up" in args)[-2:], ["memoia", "maintenance"])
 
 
 class RestoreBoundary(unittest.TestCase):
@@ -193,7 +211,8 @@ class RestoreBoundary(unittest.TestCase):
 
     def inspect(self, container):
         environment = self.source["services"]["memoia"]["environment"]
-        networks = {"postgres": ["data"], "redis": ["backend"], "memoia": ["backend", "data", "ingress"]}
+        networks = {"postgres": ["data"], "redis": ["backend"], "memoia": ["backend", "data", "ingress"],
+                    "maintenance": ["backend", "data", "ingress"]}
         return {"State": {"Health": {"Status": "healthy"}, "ExitCode": 0}, "HostConfig": {"PortBindings": {}},
                 "Mounts": [{"Source": str(self.target / "data" / container)}],
                 "Config": {"Image": "fixture-image", "Env": [f"{key}={value}" for key, value in environment.items()]},
@@ -235,6 +254,40 @@ class RestoreBoundary(unittest.TestCase):
                 recovery.restore(self.backup, self.target)
         self.assertFalse((self.target / "restore-verified.json").exists())
 
+    def test_worker_is_restored_from_same_image_and_bound_into_receipt(self):
+        self.source["services"]["maintenance"] = copy.deepcopy(self.source["services"]["memoia"])
+        recovery.restore(self.backup, self.target)
+        config = json.loads((self.target / "docker-compose.yml").read_text())
+        self.assertFalse(config["services"]["maintenance"].get("ports"))
+        self.assertEqual(config["services"]["maintenance"]["volumes"][0]["source"], str(self.target / "api/config.yaml"))
+        receipt = json.loads((self.target / "restore-verified.json").read_text())
+        self.assertEqual(receipt["connections"]["worker_container_id"], "maintenance")
+        self.assertTrue(any(call[-2:] == ["memoia", "maintenance"] for call in self.calls if "up" in call))
+
+    def test_worker_health_failure_never_writes_restored_receipt(self):
+        self.source["services"]["maintenance"] = copy.deepcopy(self.source["services"]["memoia"])
+        def unhealthy(command, service):
+            if service == "maintenance":
+                raise RuntimeError("Worker not healthy")
+        with patch.object(recovery, "wait_healthy", side_effect=unhealthy):
+            with self.assertRaisesRegex(RuntimeError, "Worker not healthy"):
+                recovery.restore(self.backup, self.target)
+        self.assertFalse((self.target / "restore-verified.json").exists())
+
+    def test_worker_cannot_reuse_formal_database_config_mount_or_ports(self):
+        self.source["services"]["maintenance"] = copy.deepcopy(self.source["services"]["memoia"])
+        config = recovery.isolated_config(self.source, self.manifest, self.target)
+        for field in ("connection", "mount", "ports"):
+            bad = copy.deepcopy(config)
+            if field == "connection":
+                bad["services"]["maintenance"]["environment"]["DATABASE_URL"] = "postgresql://live/db"
+            elif field == "mount":
+                bad["services"]["maintenance"]["volumes"][0]["source"] = str(self.root / "api/config.yaml")
+            else:
+                bad["services"]["maintenance"]["ports"] = ["3000:3000"]
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                recovery.validate_isolation(bad, self.target, self.source)
+
     def test_actual_formal_network_blocks_restore_receipt(self):
         original = self.inspect
         def wrong_network(container):
@@ -266,6 +319,7 @@ class RestoreBoundary(unittest.TestCase):
             recovery.validate_isolation(config, self.target, self.source)
         config["name"] = "memoia-restore-fixture"
         config["services"]["memoia"].pop("ports")
+        config["services"]["memoia"]["volumes"][0]["source"] = str(self.target / "api/config.yaml")
         config["networks"]["backend"]["name"] = "memoia-restore-fixture_backend"
         config["networks"]["backend"]["internal"] = True
         config["networks"]["data"] = {"name": "memoia-restore-fixture_data", "internal": True}

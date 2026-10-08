@@ -18,6 +18,7 @@ from test_push import ROOT, local_env, run
 # 这些测试只使用纯计算、MockTransport 和内存 mock；不得靠不存在的标签筛选集成测试。
 QUICK_TESTS = (
     "test_llm_logging.py", "test_embedding_validation.py", "test_source_quality.py",
+    "test_maintenance_agent.py", "test_maintenance_worker.py", "test_project_model_config.py",
     *["test_temporal_evidence.py::" + name for name in (
         "test_calendar_precision_and_unknown_are_not_invented_dates",
         "test_withdrawn_time_anchor_does_not_survive_independent_untimed_support",
@@ -27,8 +28,9 @@ QUICK_TESTS = (
         "test_extraction_anchors_each_message_in_its_recorded_zone_and_rejects_fake_quote",
     )],
     *["test_openai_model_llm.py::" + name for name in (
-        "test_luna_uses_medium_reasoning_and_total_budget", "test_luna_removes_all_unsupported_sampling_parameters",
-        "test_luna_default_budget_ignores_old_limits_and_fixes_reasoning", "test_explicit_completion_budget_is_preserved",
+        "test_luna_uses_default_reasoning_and_total_budget", "test_luna_removes_all_unsupported_sampling_parameters",
+        "test_luna_default_budget_ignores_old_limits_and_preserves_reasoning", "test_explicit_completion_budget_is_preserved",
+        "test_luna_service_default_is_used_only_without_explicit_effort",
         "test_completed_empty_text_is_returned_unchanged", "test_empty_json_is_rejected_by_real_parser",
         "test_luna_json_mode_preserves_legacy_parser_contract", "test_parser_failure_keeps_existing_error_code",
         "test_incomplete_or_failed_response_is_not_success", "test_startup_sanity_uses_dedicated_completion_budget",
@@ -173,7 +175,7 @@ def verify(mode="full", base=None):
                 step([python, "-m", "unittest", "discover", "-s", "scripts/tests", "-v"], source)
             if selected["deploy"]:
                 step(["shellcheck", *map(str, sorted((source / "deploy").glob("*.sh")))], source)
-                for test in ("test_compose.py", "test_workflow.py", "test_recovery.py"):
+                for test in ("test_compose.py", "test_workflow.py", "test_recovery.py", "test_schema_maintenance.py"):
                     step([python, "-m", "unittest", "discover", "-s", "deploy/tests", "-p", test, "-v"], source)
             if selected["legacy"]:
                 step([python, "-m", "unittest", "discover", "-s", "deploy/cutover", "-p", "verify_legacy_patch.py", "-v"], source)

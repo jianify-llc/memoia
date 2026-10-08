@@ -20,12 +20,12 @@ services:
         max-file: "3"
     networks: [backend]
 
-  memoia:
+  memoia: &memoia-runtime
     image: ${MEMOIA_IMAGE:?Set an accepted Memoia manifest digest}
     restart: unless-stopped
     labels:
       io.jianify.environment: ${JIANIFY_ENV:?Set JIANIFY_ENV}
-    environment:
+    environment: &memoia-environment
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
       REDIS_URL: ${REDIS_URL:?Set REDIS_URL}
       ACCESS_TOKEN: ${ACCESS_TOKEN:?Set ACCESS_TOKEN}
@@ -51,6 +51,21 @@ services:
         max-size: 10m
         max-file: "3"
     networks: [backend, ingress, data]
+
+  maintenance:
+    <<: *memoia-runtime
+    command: ["/app/.venv/bin/python", "-m", "memoia_server.maintenance_worker"]
+    environment:
+      <<: *memoia-environment
+      MAINTENANCE_CONCURRENCY: "2"
+    ports: []
+    stop_grace_period: 90s
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python", "-m", "memoia_server.maintenance_worker", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
 networks:
   backend:

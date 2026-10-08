@@ -23,7 +23,23 @@ def identity(document, image, sha, run_id):
         raise RuntimeError("Schema evidence does not identify this exact candidate")
 
 
-def preflight(root, image, sha, run_id, evidence_path):
+def worker_only_addition(root, backup, image):
+    before = json.loads(run(compose(backup, image) + ["config", "--format", "json"]))
+    after = json.loads(run(compose(root, image) + ["config", "--format", "json"]))
+    if "maintenance" in before["services"] or "maintenance" not in after["services"]:
+        raise RuntimeError("Worker adoption requires an API-only paired backup")
+    after["services"].pop("maintenance")
+    # Relative config mounts resolve under the backup directory during inspection.
+    # The actual config bytes remain independently required to match the backup.
+    for config in (before, after):
+        for volume in config["services"]["memoia"].get("volumes", []):
+            if volume.get("target") == "/app/config.yaml":
+                volume["source"] = str(root / "api/config.yaml")
+    if before != after:
+        raise RuntimeError("First Worker adoption cannot change existing paired infrastructure")
+
+
+def preflight(root, image, sha, run_id, evidence_path, *, introduce_worker=False):
     document = load(evidence_path)
     identity(document, image, sha, run_id)
     policy = document.get("data_policy", "backup-required")
@@ -61,7 +77,10 @@ def preflight(root, image, sha, run_id, evidence_path):
             raise RuntimeError("Paired backup integrity mismatch")
     for name, actual in {".env": root / ".env", "config.yaml": root / "api/config.yaml", "docker-compose.yml": root / "docker-compose.yml"}.items():
         if manifest["hashes"][name] != digest(actual):
-            raise RuntimeError("Configuration changed since the paired backup")
+            if name == "docker-compose.yml" and introduce_worker:
+                worker_only_addition(root, backup, manifest["image"])
+            else:
+                raise RuntimeError("Configuration changed since the paired backup")
     receipt = load(restore / "restore-verified.json")
     restored_config = load(restore / "docker-compose.yml")
     project = receipt.get("project", "")
@@ -78,7 +97,8 @@ def preflight(root, image, sha, run_id, evidence_path):
                    {"host": "jianify-postgres", "database": "memoia", "user": "jianify_app"}.items())
             or any(connections.get("redis", {}).get(key) != value for key, value in {"host": "redis", "database": "0"}.items())
             or not all(connections.get(service, {}).get("container_id") for service in ("postgres", "redis"))
-            or not connections.get("api_container_id")):
+            or not connections.get("api_container_id")
+            or ("maintenance" in restored_config.get("services", {}) and not connections.get("worker_container_id"))):
         raise RuntimeError("Isolated restore was not verified for this paired backup")
     return {"image": image, "source_sha": sha, "run_id": run_id, "mode": "migrate-schema",
             "data_policy": policy,
@@ -100,7 +120,8 @@ def finalize(root, image, sha, run_id, evidence_path):
         raise RuntimeError("Another maintenance mode is pending")
     evidence = load(evidence_path)
     identity(evidence, image, sha, run_id)
-    required = {"authentication", "source_replay", "retract", "profile_history", "model", "embedding"}
+    required = {"authentication", "source_replay", "retract", "profile_history", "model", "embedding",
+                "flush"}
     if any(evidence.get("checks", {}).get(name) is not True for name in required):
         raise RuntimeError("Schema business acceptance is incomplete")
     files = evidence.get("evidence_files", [])
@@ -124,7 +145,8 @@ if __name__ == "__main__":
         if mode == "audit":
             audit(root, image)
         elif mode == "preflight":
-            print(json.dumps(preflight(root, image, sys.argv[4], sys.argv[5], Path(sys.argv[6]))))
+            print(json.dumps(preflight(root, image, sys.argv[4], sys.argv[5], Path(sys.argv[6]),
+                                      introduce_worker=len(sys.argv) == 8 and sys.argv[7] == "introduce-worker")))
         elif mode == "finalize":
             finalize(root, image, sys.argv[4], sys.argv[5], Path(sys.argv[6]))
         else:

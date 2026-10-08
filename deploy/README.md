@@ -29,7 +29,7 @@ gh workflow run deploy-test.yml --ref test --repo jianify-llc/memoia
 
 `push` 入口取得远端 Test 精确 SHA 后调用 `full --base`。基线缺失、不可读取、不是候选提交的祖先，或手动检查的工作区有未提交改动时扩大到全量；不使用历史成功记录或上一条提交猜基线。文档改动使用 Git 差异检查，hook 改动运行工具回归；部署探针依赖的 `src/client/memobase/` Python SDK 改动也执行业务和部署工具验证。业务 full 使用本批独占 PostgreSQL/Redis。依赖按所选范围要求 Python 3、uv/Python 3.12、Node、pnpm 10.12.4、ShellCheck、curl 和 Docker。依赖下载和公开词表准备不属于离线测试。
 
-quick 每次固定运行 `scripts/verify_local.py` 的离线名单，包含来源提取/证据质量的纯计算与 MockTransport 回归，以及时间解析、渲染、校验和时区锚定回归；不按业务文件差异跳过。`test_temporal_evidence.py` 同时包含数据库测试，因此只列入其中五个离线测试节点；存储、检索和撤回等集成行为由本地 full 验证。新增有价值的离线回归时同步维护此名单，并在网络禁令下验证。
+quick 每次固定运行 `scripts/verify_local.py` 的离线名单，包含来源提取/证据质量、项目模型配置和 Agents Loop 的纯计算与 MockTransport 回归，以及时间解析、渲染、校验和时区锚定回归；不按业务文件差异跳过。`test_temporal_evidence.py` 同时包含数据库测试，因此只列入其中六个离线测试节点；存储、检索和撤回等集成行为由本地 full 验证。新增有价值的离线回归时同步维护此名单，并在网络禁令下验证。
 
 本地使用排除业务 `.env`、真实 `config.yaml` 的临时源码与不含凭据的 Git 对象；业务子进程使用环境白名单，不继承平台/部署密钥。部署夹具与虚构业务连接配置分层，数据库只用本批独占 PostgreSQL/Redis 随机回环端口。JUnit/覆盖率写入忽略的 `.local-ci-results/<批次>/`，不是检查缓存。部署夹具使用官方 SHA-256 校验的 jq 1.8.1，容器无网络；依赖下载仅保留无认证代理。总预算 20 分钟；只清理本批资源，失败/超时/取消/清理异常均不得报告通过。
 
@@ -70,7 +70,7 @@ Test 长检查先于 Git 连接，hook 按目标 ref 验证本次提交和远端
 
 ## 上下文接口的隐私边界
 
-Luvel 用唯一固定 SDK 调用 `POST /api/users/{user_id}/context`，JSON body 为 query/max_token_size，成功返回 `{context}`。查询只在正文，GET 查询和旧版本路由不兼容；错误、日志、Trace 不回显正文。画像独立 GET profiles。Memoia、Luvel 和 Inspector 必须协调上线这一不兼容协议，部署与真实业务验收分别记录。
+Luvel 使用固定 SDK 调用 `POST /api/users/{user_id}/search`，JSON body 接收 query、总预算及 Fact/Event/Profile ID 排除，返回三个独立数组。本人画像独立 GET profiles；原 `/context` 保留字符串契约兼容，不复制新检索协议。查询只在正文，错误、日志、Trace 不回显正文。Fact 回执完成不等于 Profile/Event 维护完成；SDK 按回执的固定水位查询维护进度。Memoia、Luvel 和 Inspector 应协调验收，部署与真实业务验收分别记录。
 
 历史 GET URL 已可能进入 Cloudflare Workers Logs／Traces、Tunnel／代理访问日志或外部日志目的地；POST 切换不会清除这些记录。发布前核对各目的地的访问角色、导出设置及实际保留期限；有定向清理能力才按受影响时间及路径限定清理，否则限制访问并记录到期时间。实际账号和其它日志目的地须现场核实。
 
@@ -94,9 +94,9 @@ MEMOIA_IMAGE 可填初始候选总 manifest digest，不用 latest；所有应�
 
 ## 首次安装边界
 
-本 Compose 只有 Redis、API；公司 PostgreSQL 在 `/opt/postgres` 独立管理，先部署并通过 `postgresctl.py status` 验证，不允许日常 Memoia 发布重建它。数据库网络 `jianify-data` 为外部私有网络，Redis 无主机端口、开启 AOF，认证 healthcheck 确认 PONG。API 仅 127.0.0.1:8000；宿主机 Tunnel 连接该地址，应用 Compose 不含 cloudflared。YAML 使用只读 bind，不允许缺失文件被自动建成目录。
+本 Compose 包含 Redis、API 和独立 `maintenance` Worker。后两者使用同一 immutable digest、只读配置和项目凭据；Worker 无主机端口，通过 `python -m memoia_server.maintenance_worker` 启动，每进程最多并行处理两个不同用户，同一用户最多一个统一 AgentLoop，Profile/Event 与 flush 回执原子提交。健康检查验证 heartbeat 的时效与 PID 存活，不代表维护任务或真实模型已验收。公司 PostgreSQL 在 `/opt/postgres` 独立管理，日常发布不能重建；API 仅 127.0.0.1:8000，宿主机 Tunnel 仍连接该地址。应用 Compose 不含 cloudflared，Redis 无主机端口、开启 AOF；配置缺失时不能自动建成目录。
 
-首次启动由操作员使用 `deploy-memoia.sh init /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256`。init-config 不等于安装或验收。init 必须确认无现有应用容器、Redis 数据目录和公司 `memoia` 数据库均为空、解析后的 Redis 挂载与数据库网络正确、公司 PostgreSQL 状态健康。先启动 Redis，再用候选 API 镜像显式执行 `python -m alembic upgrade head` 和 `check_schema()`，成功后才启动 API；迁移失败保留 pending，不启动候选 API。启动后分别验证真实模型、embedding、Bearer 正反例、SDK 写入/flush/最终事件 ID/画像与事件/删除、重启持久性、容量和 IPv4/IPv6 无公网旁路，再 finalize，不能仅凭健康检查宣称业务通过。
+首次启动由操作员使用 `deploy-memoia.sh init /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256`。init-config 不等于验收。init 确认无既有应用容器、Redis 数据与 Memoia 数据库为空，先启动 Redis，再用候选镜像显式执行 Alembic 和 `check_schema()`；成功后一起启动 API／Worker。迁移失败保留 pending，不启动候选。业务验收要分别确认 Fact 回执、独立事实检索、Profile／Event 达到回执水位、删除和真实模型工具调用；健康检查不能代替这些验收。
 
 2026-09-30，Test 已完成旧独立 PostgreSQL 到公司共享实例 `memoia` 数据库的一次性停写切换；旧 PostgreSQL 已停止，当前 API 连接公司数据库，Test 发布入口已重新启用（本次规范推广后须明确手动验收）。此后按下文日常发布流程操作，不重跑 `backup-cutover` 或 `adopt-external-postgres`，也不以旧库快照覆盖新写入。一次性候选与旧版补丁见[历史切换说明](cutover/README.md)，实际迁移、数据及业务验收见[公司监控切换记录](https://github.com/jianify-llc/Jianify-llc/blob/main/ops/monitoring/test-cutover.md)。
 
@@ -108,27 +108,29 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 
 - 配置只读；MEMOIA_IMAGE 仅临时传入 Compose，不写 .env 或额外 image.env。
 - .deploy 保存锁、pending、成功身份、公司 PG/本地 Redis 容器及宿主机 Tunnel 身份。失败保留待确认记录，后续发布阻断，不盲目清除/重放。
-- 仅 --no-deps --no-build 更新 API；不重启基础设施，不跑 bootstrap、不调整 Swap。
-- 切换前核对实际 API 镜像与 deploy-state 的已验收 digest；人工替换造成漂移或缺少成功记录时停止，不自动修改记录来接受漂移。prepare 和 restore-api 使用同一检查，init 不要求已有版本。
-- 拉取及 OCI revision/schema 校验在停机前完成；旧 API 停止后必须 exit 0。超时强杀/非正常退出保留 pending，不继续启动候选。队列空或锁不存在不能替代退出判据。
+- 仅 --no-deps --no-build 更新 API 与 Worker；不重启基础设施、不跑 bootstrap、不调整 Swap。
+- 切换前核对两个进程的实际镜像、连接配置与 deploy-state；人工替换、Worker 缺失或漂移均阻断。prepare 和 restore-api 使用同一检查。
+- 拉取及 OCI revision/schema 校验在停机前完成；API／Worker 都正常退出后才启动同一候选 digest。强杀或非正常退出保留 pending；两个进程分别健康且无 OOM／重启，才能 finalize。队列空不能替代退出判据。
 - 旧 run/较新环境分支 HEAD/未完成的上次发布或维护/配置变化/Tunnel 未连接仍阻断。test 检查 `test` HEAD，online 检查 `release` HEAD。日常 prepare 和 restore-api 不查询 processing/failed buffer 或 Redis 锁队列，也不要求调用方先停写。
 - 指纹包含公司 PG 脱敏配置指纹、Redis/挂载/连接、外部网络及完整 YAML 哈希，同维度的 provider、模型或 endpoint 变化也不能静默发布。配置变更单独维护；仅轮换 .env 中密钥不等于向量迁移。两阶段间配置或 PG 容器变化禁止提交成功。
 
 .env 的 MEMOIA_IMAGE 是初始人工选择，后续实际版本以 .deploy/deploy-state 为准。不要直接用旧 .env 重建 API；恢复必须指定已验收 digest 并确认 schema/处理状态。finalize 保存 accepted/SHA；切到不同镜像时才更新 previous-accepted。相同版本重验不会覆盖真正的上一版本。
 
-日常更新假定候选与现有 schema、持久化队列和处理状态兼容；拉取镜像后正常停止旧 API，再启动新 API，接受短暂不可用。正常退出不等于每个请求已向调用方返回最终结果；中断/超时的写入由业务链保留未知结果，不在部署脚本中清队列、重置状态或自动重放。数据库结构、embedding 身份或处理状态协议不兼容的变化走单独维护，不沿用普通发布入口。
+日常更新假定候选与现有 schema、持久化队列和处理状态兼容；拉取镜像后正常停止旧 API／Worker，再启动同 digest 的新 API／Worker，接受短暂不可用。正常退出不等于每个请求已向调用方返回最终结果；中断/超时由业务链查询回执或接管过期租约，不在部署脚本中清队列、重置状态或自动重放。数据库结构、embedding 身份或处理状态协议不兼容的变化走单独维护，不沿用普通发布入口。
 
 ## Schema 维护与来源模型升级
 
-现有 v1 库升级 v2 是显式维护，不是普通 `prepare`。当前 Alembic 链依次为 `0001_v1_baseline`、`0002_sources_v2`、`0003_profile_history`、`0004_key_scopes_search`、`0005_user_tombstones`、`0006_source_blob_messages`、`0007_event_time_evidence`。0001 严格接纳匹配的完整 v1 库；漂移须停止调查，不重建历史数据。0005 增加永久用户墓碑；0006 将旧批次保留为 legacy 来源，建立 Blob／消息归属约束并清除完成输入原文，未完成输入暂留 7 天。0006 为不可逆原文清理及 v2/0.3 协议调整，调用方必须协调升级，不能走普通 API 更新或恢复旧 API。不要 stamp 或手填 schema 指纹绕过维护。迁移范围见[服务端迁移说明](../src/server/api/migrations/README)与[数据及恢复契约](../src/server/api/API-DESIGN.md)。
+现有 v1 库升级 v2 是显式维护，不是普通 `prepare`。当前 Alembic 链依次为 `0001_v1_baseline`、`0002_sources_v2`、`0003_profile_history`、`0004_key_scopes_search`、`0005_user_tombstones`、`0006_source_blob_messages`、`0007_event_time_evidence`、`0008_serial_maintenance`、`0009_blob_flush`。0001 严格接纳匹配的完整 v1 库；漂移须停止调查，不重建历史数据。0005 增加永久用户墓碑；0006 建立 Blob／消息归属约束、保留 legacy 来源并清除完成输入原文，未完成输入暂留 7 天。0008 建立 Fact 独立检索，导入 completed 改为 Fact 提交；0009 将旧维护进度/变更/失败转为固定 Blob 和可恢复 flush Operation 后移除任务表。旧执行租约不延续，不重新抽取已清除正文。不可兼容的协议须协调升级，不能普通更新或恢复旧 API。不要 stamp 或手填 schema 指纹。迁移范围见[服务端迁移说明](../src/server/api/migrations/README)与[数据及恢复契约](../src/server/api/API-DESIGN.md)。
+
+首次增加 Worker 也走这次显式 schema 维护：旧 API／Redis／数据库／网络契约必须与已验收基线相同，且没有旧 Worker。备份策略只允许在旧配套恢复证明上增加同镜像 Worker，不放宽配置或基础设施校验；迁移暂存新的 Worker 指纹，只有两个进程及业务验收通过才接纳。普通 prepare／finalize 仍拒绝拓扑漂移。
 
 本轮 `migrate-schema`／`finalize-schema` 仅允许 Test。操作顺序：
 
 1. 暂停外部写入，核对旧任务、processing／failed buffer、用户锁／队列及未知写入；确认结果，不清空状态来制造“无在途”。
 2. 通过下述 `backup` 取得 PostgreSQL＋Redis 配套切点，导出受保护的离机副本；用 `restore-data` 在隔离环境恢复，成功后由工具写 `restore-verified.json`，不能手工编造回执。
 3. 保存 root:root 0600 的候选维护证据，在 `.deploy` 下引用对应备份目录和隔离恢复目录；保留停写直到本次迁移及业务验收完成。
-4. 执行 `migrate-schema /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256 PREFLIGHT_JSON`。脚本校验候选 revision／Test HEAD、高水位、现有配置、备份哈希及真正恢复回执，先审计静止状态，记录旧 accepted/schema、pending-maintenance、候选指纹，再正常停止旧 API。停止后复查旧状态，才从候选镜像显式 `alembic upgrade head`＋`check_schema()`，随后仅启动 API；PG、Redis、宿主机 Tunnel 均不重启。
-5. 实际完成鉴权、幂等查询／重放、消息撤回、画像历史过滤、真实模型和 embedding 验收，保存受保护的证据文件。执行 `finalize-schema /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256 BUSINESS_JSON`，才更新已验收 schema 和 API 身份。普通 finalize 不能接纳 pending-maintenance；普通 prepare 仍拒绝 schema 指纹变化。
+4. 执行 `migrate-schema /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256 PREFLIGHT_JSON`。校验候选 revision／Test HEAD、高水位、配置、备份及恢复回执，审计静止状态并记录 pending 后，正常停止所有既有应用写入进程。复查旧状态，再从候选镜像执行 `alembic upgrade head`＋`check_schema()`，随后启动同 digest 的 API／Worker；PG、Redis、宿主机 Tunnel 均不重启。
+5. 完成鉴权、幂等查询／重放、删除消息、画像历史过滤、真实模型／embedding 与统一 flush 原子提交验收，保存受保护证据。执行 `finalize-schema /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256 BUSINESS_JSON`，才更新 schema 和应用身份。普通 finalize 不能接纳 pending-maintenance；普通 prepare 仍拒绝 schema 指纹变化。
 
 `PREFLIGHT_JSON` 格式（身份必须对应同一候选，不含秘密）：
 
@@ -144,9 +146,9 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 }
 ```
 
-这两项人工确认不能替代脚本前后两次的状态审计、备份校验和恢复证明。`BUSINESS_JSON` 使用相同 image/source_sha/run_id，附 `checks` 对象，键为 `authentication`、`source_replay`、`retract`、`profile_history`、`model`、`embedding`，各项只有真实通过才能为 true；另附非空 `evidence_files` 数组，每项为 `.deploy` 下 root:root 0600 证据文件的 `path` 和实际 `sha256`。模型 stub／本地测试不能填作真实调用通过。
+这两项人工确认不能替代脚本审计、备份校验和恢复证明。`BUSINESS_JSON` 使用相同 image/source_sha/run_id，附 `checks`：`authentication`、`source_replay`、`retract`、`profile_history`、`model`、`embedding`、`flush`，只有真实通过才能为 true；另附非空 `evidence_files`，每项是 `.deploy` 下 root:root 0600 证据文件的 `path` 和实际 `sha256`。模型 stub／本地测试不能填作真实调用通过。
 
-开发阶段 Test 数据明确可丢弃、且操作员单独授权不可恢复迁移时，`PREFLIGHT_JSON` 可显式使用 `data_policy: "disposable-test"`，省略备份／恢复目录和外部停写确认；身份与 `unknown_results_resolved: true` 仍必填。该策略不创建备份，不承诺恢复，记录 `backup_sha256: null`；仅接受 `memoia-test`／test 配置，仍正常停止 API、前后审计未完成处理、保留失败诊断及执行真实业务验收。不清空旧任务或未知结果。默认仍为 `backup-required`，不能自动判断数据不重要或将此例外用于 Online。
+开发阶段 Test 数据明确可丢弃、且操作员单独授权不可恢复迁移时，`PREFLIGHT_JSON` 可显式使用 `data_policy: "disposable-test"`，省略备份／恢复目录和外部停写确认；身份与 `unknown_results_resolved: true` 仍必填。该策略不创建备份，不承诺恢复，记录 `backup_sha256: null`；仅接受 `memoia-test`／test 配置，仍正常停止既有 API／Worker、前后审计未完成处理、保留失败诊断及执行真实业务验收。不清空旧任务或未知结果。默认仍为 `backup-required`，不能自动判断数据不重要或将此例外用于 Online。
 
 迁移失败保留 pending、旧指纹和诊断，不自动清标记重入或启动可能不兼容的旧 API。成功后旧 accepted/schema 进入 `.deploy/schema-archives/RUN_ID`，不再作为普通 restore-api 的恢复目标；run 高水位不下降。已产生需保留的新数据时不能用旧快照覆盖当前库。需要特殊恢复时先确认数据库实际 revision 和兼容性，交付前向修复或隔离恢复方案。
 
@@ -180,15 +182,15 @@ Actions 只上传脚本到 .deploy/candidates，不覆盖 Compose/.env/YAML。su
 
 旧嵌套目录 `/opt/jianify/memoia` 不作为兼容入口，脚本不会从该处自动搬移配置或数据。2026-09-26 的空目录及 Tunnel 路径维护记录只是当时的阶段证据；截至 2026-09-30，Test API 已在 `/opt/memoia` 运行，并完成实际发布和业务探针验收。后续恢复不能启动旧目录中的另一套服务共用当前数据。
 
-首次失败无旧镜像可回滚，保留数据/诊断、停止候选 API。不用旧快照覆盖新数据。兼容 API 恢复沿用正常停止/启动流程，不检查调用方是否停写；不兼容处理协议、schema/embedding 变化和配套数据恢复单独迁移演练。
+首次失败无旧镜像可回滚，保留数据/诊断、停止候选 API／Worker。不用旧快照覆盖新数据。兼容应用恢复沿用正常停止/启动流程，不检查调用方是否停写；不兼容处理协议、schema/embedding 变化和配套数据恢复单独迁移演练。
 
 `restore-api /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256` 只接受 previous-accepted 中的上一已验收版本，要求当前配置、schema 和持久化处理协议兼容；按同一服务停止/启动流程切换，随后公网验收并 finalize。恢复不会降低 run 高水位，也不恢复旧数据库快照。恢复不是失败后的自动动作。
 
-`backup /opt/memoia` 不依赖 standalone-mode，但仍要求当前已验收、无 pending/处理中或失败 buffer/锁队列，以及无 v2 处理中操作或处理／重建中的批次。这是配套备份的静止切点要求，不是日常发布门禁。正常停 API、复查静止切点后从公司 PostgreSQL 容器只导出 `memoia` 数据库，再同步 Redis SAVE 并确认 OK；API 停止期间业务写入不可用，不另查消费者身份。配套数据、配置、哈希、表行数、固定 PG 镜像身份与持久 Redis 探针保存在 .deploy/backups/唯一目录。公司实例备份不能代替这份 PG／Redis 配套恢复。仅切点成功才恢复同一 API；失败保留 pending-maintenance 与停写状态，人工核查，不自动重试。备份含秘密，必须保护并导出服务器外，不能放公开 artifact。
+`backup /opt/memoia` 要求当前已验收、无 pending／处理中或失败 buffer／锁队列、v2 未完成操作及有效维护执行租约；待处理任务可保留。这是配套备份的静止切点，不是日常发布门禁。正常停止 API／Worker、复查状态后只导出公司实例的 `memoia` 数据库，再同步 Redis SAVE；切点成功才恢复同一 digest 的两个进程，失败保留 pending-maintenance 和停写状态，不自动重试。配套数据、配置、哈希、行数、固定 PG 身份与持久 Redis 探针保存在 `.deploy/backups/唯一目录`。备份含秘密，需受保护并导出服务器外，不能放公开 artifact；公司实例备份不能代替这份 PG／Redis 配套恢复。
 
 备份仍由操作员手动触发，不新增定时任务。备份与 schema 维护共用只读静止检查：明确识别 0006 前的 Source 状态模型和 0006 后的 Blob 状态模型，分别阻断处理中操作及处理／重建中的批次；字段缺失、两种模型混杂或未知结构直接失败，不清理任务或跳过检查。`test_schema_adoption.py` 在真实隔离 PostgreSQL 上覆盖迁移前后模型、处理／重建状态和结构漂移，不能替代真实配套备份与恢复演练。
 
-`restore-data /opt/memoia BACKUP_DIRECTORY /opt/memoia/rehearsals/restore-UNIQUE` 只接受完整校验通过的本地配套备份及从未存在的目标目录；空但已存在的目录也拒绝。使用备份记录的 PG 镜像临时启动独立 PostgreSQL，给予它隔离网络内的 `jianify-postgres` 别名，绝不接入正式 `jianify-data`；Redis 和 API 同样使用独立 project/network/config/data，显式 --project-name 防止 .env 的正式 project 名覆盖隔离身份。不挂 Tunnel，不映射任何主机端口，检查解析后的连接目标及实际挂载。DB 和 Redis 使用 internal 网络；只有隔离 API 可通过自己的独立 ingress 网络外连模型，启动时仍需真实模型／embedding 检查，不能完全断网却宣称应用恢复通过。先关闭 AOF 加载 RDB，验证持久探针及 PG 表行数；再启用 AOF、等重写完成、正常停止、按正式 AOF 配置重启后再次验证，最后启动隔离 API 并验证健康及实际连接／网络。全部完成才写 root:root 0600 的 restore-verified.json，绑定备份 manifest 哈希、API digest、表行数、project、挂载、连接身份及 AOF 重启证明，供 schema 维护读取。失败不写成功回执，保留隔离数据供排查；不覆盖、清空或恢复当前业务库。
+`restore-data /opt/memoia BACKUP_DIRECTORY /opt/memoia/rehearsals/restore-UNIQUE` 只接受校验完整的配套备份及从未存在的目标目录。使用备份 PG 镜像，PG／Redis／API／Worker 全部使用独立 project/network/config/data，不接正式 `jianify-data`、不挂 Tunnel、不映射主机端口。旧 API-only 备份只恢复原拓扑。先加载 RDB 核对 Redis 探针及 PG 行数，再启用 AOF、正常停止重启并复查；最后启动备份中的应用进程，验证健康、镜像、挂载和实际连接。隔离 API／Worker 的独立 ingress 可调用模型，保留的待处理任务可能恢复执行，须使用获授权配置；不能断网却声称真实模型恢复通过。全部成功才写 root:root 0600 的 `restore-verified.json`，绑定备份哈希、digest、行数、隔离身份、API／Worker 容器 ID 及 AOF 重启证明。失败不写成功回执，保留隔离数据，不覆盖当前业务库。
 
 入口与自动测试不能代替真实验收。2026-09-30 测试环境数据库切换已记录配套备份、迁移后业务读写和实际容量；隔离恢复工具保留，不额外重复演练。镜像版本更新／恢复与远端 Actions 的验收仍按各自发布规则执行；Online 主机、Secrets、备份与恢复未验收，不能把工作流就绪误写为生产可发布。
 
@@ -198,9 +200,11 @@ ShellCheck/actionlint/Bash 语法仅静态验证。test_workflow.py 解析真实
 
 ### TypeScript SDK 真实探针
 
-`sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.7.0 已构建产物，不安装依赖、不构建源码、不重新打 SDK 包。stdin 是一个 JSON 对象：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 为整体等待预算，默认 360000、上限 900000；地址和 token 不放 argv 或日志。输入与输出都应保存为 root:root 0600 的受保护文件，不进入公开 artifact。探针的专用两消息来源必须确认消息、Blob、证据的 next_*_offset 全为 null，不能以部分页证明重放或删除完整性。
+`sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.9.0 已构建产物，不安装依赖或重新打包。stdin 是 JSON：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 是整体预算，默认 360000、上限 900000；地址和 token 不放 argv／日志。输入输出保存为 root:root 0600 受保护文件。两消息专用来源必须确认消息／Blob／证据的 next_*_offset 全为 null，不能用部分页证明完整性。Fact 回执确认后单次调用 flush 并查询原操作；核对固定 Blob 归属和两类派生结果，未知回执不重发，不自动恢复失败直到凑绿。
 
-探针使用随机 UUID 的专用新用户，分别验证缺失／错误 Bearer、首次导入隐式创建用户、固定幂等键和 operation ID 的结果查询、来源证据、非空画像、事件搜索、真实画像历史。只有首次导入已明确 completed 后，才进行一次显式幂等重放：以完全相同正文和 key 再 POST，必须立即返回同一已完成操作及 source/event IDs，重新读取来源、画像和专用用户的完整事件列表，确认身份和数量不增长。随后撤回一条消息验证剩余证据，撤回另一条验证画像／来源证据／历史内容／事件不再返回失效内容。历史审计行可以保留，但其失效画像内容不能返回。原有业务检查全部通过后，调用 v2 `forgetUser`，严格确认同 UUID／`forgotten: true` 提交回执；只有这次回执确认后，才明确重复一次同 UUID 的 DELETE 验证幂等。随后使用预先记录的新 key／external ID 单次尝试迟到导入，必须是 SDK `MemoiaError` 的 HTTP 410／`user_forgotten`／`retryable: false`／`outcome: rejected`，普通 404、鉴权失败或意外接纳均不通过。
+导入／删除 completed 只确认 Fact。探针先验证无需 Event 的 Fact 召回，再单次 flush 并查询该原 Operation，确认固定 Blob 集合完成后才检查画像／Event／历史。超时、失败或退避中的原错误均验收失败，保留原 Operation 和批次，不自动重导入或调用维护恢复；新 flush 的成功不能替代原批次验收。
+
+探针使用随机 UUID 新用户，验证 Bearer 正反例、隐式创建用户、固定 key／operation 查询、来源证据、Fact 召回、非空画像／Event 和维护版本的画像历史。首次已明确 completed 后只进行一次同正文／key 的幂等重放，必须返回原操作／Fact 水位；重新读取来源、画像和完整事件列表，确认身份和数量不增长。依次删除两条消息，每次等待固定回执水位后验证剩余证据和失效内容过滤。业务检查通过后调用 v2 `forgetUser`，严格确认同 UUID／`forgotten: true`；仅在确认后重复一次同 UUID 的 DELETE。再以预先记录的新 key 单次尝试迟到导入，必须得到 SDK `MemoiaError` HTTP 410／`user_forgotten`／`retryable: false`／`outcome: rejected`，其它拒绝或意外接纳均不通过。
 
 除已确认完成的导入回放和已确认提交的遗忘重复这两项明确测试外，每个 mutation 最多发送一次。导入仍 processing 或丢失 ACK 未确认时只按固定 key 查询，绝不重发正文、自动调用 retryOperation 或重置身份；遗忘、遗忘重复或迟到导入的未知结果直接失败，不发送后续 mutation，也不自动清理。迟到导入若意外返回 operation，保留全部已知 operation/source/event/profile IDs，不因为它已 completed 或 failed 就把验收记为通过。
 

@@ -122,23 +122,14 @@ async def delete_event(user_id: UUID, event_id: UUID, request: Request):
 
 @router.post("/users/{user_id}/context", response_model=Context, operation_id="getContext")
 async def context(user_id: UUID, body: ContextInput, request: Request):
-    from ..controllers.event import retrieve_user_facts, get_user_events
+    from ..controllers.event import retrieve_user_facts, recent_user_facts
     from ..temporal import render_gist
     from ..utils import get_encoded_tokens
     if body.query is not None:
         result = unwrap(await retrieve_user_facts(str(user_id), request.state.memobase_project_id, body.query))
         entries = [render_gist(fact.gist) for fact in result]
     else:
-        result = unwrap(await get_user_events(str(user_id), request.state.memobase_project_id, time_range_in_days=360))
-        entries = []
-        for row in result.events:
-            data = row.event_data
-            if not data.evidence:
-                entries.append(data.event_tip or "")
-                continue
-            entries.extend(render_gist(EventGistData(content=f.content, event_time=f.event_time,
-                source_id=data.source_id, blob_id=f.blob_id, fact_id=f.fact_id, source_messages=f.source_messages))
-                for f in data.evidence)
+        entries = [render_gist(fact) for fact in recent_user_facts(str(user_id), request.state.memobase_project_id)]
     # 事实与其证据共同计预算；大批次不能让全部短事实都被丢弃。
     kept = []
     for entry in entries:

@@ -1,4 +1,4 @@
-"""Fixed synthetic English evidence; never use production conversation data here."""
+"""Fixed synthetic evidence; never use production conversation data here."""
 
 from dataclasses import dataclass
 
@@ -10,6 +10,10 @@ class ExpectedFact:
     groups: tuple[tuple[str, ...], ...]
     forbidden: tuple[str, ...] = ()
     alternative_groups: tuple[tuple[tuple[str, ...], ...], ...] = ()
+    subject: tuple[str, ...] = ()
+    certainty: tuple[str, ...] = ()
+    event_dates: tuple[str, str] | None = None
+    required: bool = True
 
 
 @dataclass(frozen=True)
@@ -76,4 +80,47 @@ CASES = (
     QualityCase("strict_slots", (
         ("u-outside", "user", "I collect model trains as a hobby."),
     ), (ExpectedFact((("train", "railway", "railroad"),), (("u-outside",),), HOBBY_NEGATIONS),), strict=True),
+    QualityCase("past_relationship", (
+        ("M3", "user", "以前我的伴侣是林。林曾搬到杭州。"),
+    ), (
+        ExpectedFact((("lin", "林"), ("former", "previous", "ex-", "was", "used to", "以前", "曾", "前伴侣"),
+                      ("partner", "伴侣")), (("M3",),), ("current partner", "现任伴侣")),
+        ExpectedFact((("lin", "林"), ("hangzhou", "杭州"), ("move", "搬")), (("M3",),),
+                     ("user moved", "user lives in", "用户搬到", "用户住在")),
+    )),
+    QualityCase("people_subject", (
+        ("u-mother", "user", "My colleague Zhou's mother has diabetes. Zhou takes care of his mother every day."),
+    ), (
+        ExpectedFact((("diabetes",), ("mother",)), (("u-mother",),),
+                     ("zhou has diabetes", "user has diabetes"), subject=("mother",)),
+        ExpectedFact((("zhou",), ("care",), ("mother",)), (("u-mother",),), subject=("zhou",)),
+    )),
+    QualityCase("reported_uncertainty", (
+        ("u-busy", "user", "My colleague Zhou has been busy recently. I suspect Zhou might quit his job, but I do not know."),
+        ("a-guess", "assistant", "He is probably moving to Shanghai for a new job."),
+    ), (
+        ExpectedFact((("zhou",), ("busy",)), (("u-busy",),), subject=("zhou",)),
+        ExpectedFact((("zhou",), ("suspect", "might", "uncertain", "possibly"), ("quit", "resign")),
+                     (("u-busy",),), ("has resigned", "has quit", "shanghai", "new job"),
+                     subject=("zhou", "user"), certainty=("uncertain",)),
+    )),
+    QualityCase("two_cancellations", (
+        ("M5a", "user", "In February 2025 my friend Lin cancelled our hiking plan because of rain."),
+        ("M5b", "user", "In March 2025 my colleague Zhou cancelled our hiking plan because of overtime at work."),
+    ), (
+        ExpectedFact((("lin",), ("cancel",), ("hik",), ("rain",)), (("M5a",),),
+                     ("zhou", "overtime"), subject=("lin",), event_dates=("2025-02-01", "2025-02-28")),
+        ExpectedFact((("zhou",), ("cancel",), ("hik",), ("overtime",)), (("M5b",),),
+                     ("lin", "rain"), subject=("zhou",), event_dates=("2025-03-01", "2025-03-31")),
+        ExpectedFact((("lin",), ("friend",)), (("M5a",),), required=False),
+        ExpectedFact((("zhou",), ("colleague",)), (("M5b",),), required=False),
+    )),
+    QualityCase("explicit_ended_relationship", (
+        ("u-ex", "user", "Lin is my ex-partner. We broke up in 2024. Lin moved to Hangzhou afterwards."),
+    ), (
+        ExpectedFact((("lin",), ("ex-partner", "former partner", "broke up")), (("u-ex",),),
+                     ("current partner",)),
+        ExpectedFact((("lin",), ("move",), ("hangzhou",)), (("u-ex",),),
+                     ("user moved",), subject=("lin",)),
+    )),
 )

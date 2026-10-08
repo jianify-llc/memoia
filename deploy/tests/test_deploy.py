@@ -119,7 +119,7 @@ else:
         trace.chmod(0o600)
         evidence = self.state / "schema-business.json"
         evidence.write_text(json.dumps({"image": IMAGE, "source_sha": SHA, "run_id": "200",
-                                       "checks": {name: True for name in ("authentication", "source_replay", "retract", "profile_history", "model", "embedding")},
+                                       "checks": {name: True for name in ("authentication", "source_replay", "retract", "profile_history", "model", "embedding", "flush")},
                                        "evidence_files": [{"path": str(trace), "sha256": hashlib.sha256(trace.read_bytes()).hexdigest()}]}))
         evidence.chmod(0o600)
         return evidence
@@ -192,7 +192,7 @@ else:
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(destination.read_text(), "do-not-change")
 
-    def test_prepare_finalize_only_update_api_and_state(self):
+    def test_prepare_finalize_only_update_application_and_state(self):
         result = self.deploy()
         self.assertEqual(result.returncode, 0, result.stderr)
         result = self.deploy("finalize")
@@ -203,7 +203,7 @@ else:
         self.assertFalse((self.state / "pending-deploy").exists())
         actions = self.actions()
         self.assertEqual(len(actions), 3)
-        self.assertTrue(all(action["args"][-1] == "memoia" for action in actions))
+        self.assertTrue(all(action["args"][-2:] == ["memoia", "maintenance"] for action in actions))
         self.assertIn("--no-deps", actions[-1]["args"])
         self.assertIn("--no-build", actions[-1]["args"])
         self.assertEqual(actions[-1]["image"], IMAGE)
@@ -295,7 +295,7 @@ else:
         result = self.deploy()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.deploy("finalize").returncode, 0)
-        self.assertTrue(all(action["args"][-1] == "memoia" for action in self.actions()))
+        self.assertTrue(all(action["args"][-2:] == ["memoia", "maintenance"] for action in self.actions()))
         self.assert_configs_unchanged()
 
     def test_disconnected_tunnel_blocks_update(self):
@@ -364,7 +364,7 @@ else:
         self.assert_configs_unchanged()
         actions = self.actions()
         migration = next(i for i, action in enumerate(actions) if "alembic" in action["args"])
-        api_start = next(i for i, action in enumerate(actions) if "up" in action["args"] and action["args"][-1] == "memoia")
+        api_start = next(i for i, action in enumerate(actions) if "up" in action["args"] and action["args"][-2:] == ["memoia", "maintenance"])
         self.assertLess(migration, api_start)
         self.assertEqual(sum("run" in action["args"] for action in actions), 2)
 
@@ -375,7 +375,7 @@ else:
         self.env.update(FIXTURE_EMPTY_STACK="1", FIXTURE_MIGRATION_FAIL="1")
         self.assertNotEqual(self.deploy("init").returncode, 0)
         self.assertTrue((self.state / "pending-deploy").exists())
-        self.assertFalse(any("up" in a["args"] and a["args"][-1] == "memoia" for a in self.actions()))
+        self.assertFalse(any("up" in a["args"] and "memoia" in a["args"] for a in self.actions()))
 
     def test_schema_maintenance_requires_verified_restore_before_stop(self):
         evidence = self.schema_evidence()
@@ -425,7 +425,7 @@ else:
         self.assertNotEqual(self.deploy("migrate-schema", evidence=self.disposable_evidence()).returncode, 0)
         self.assertEqual(self.actions(), [])
 
-    def test_schema_maintenance_success_archives_old_schema_and_only_updates_api(self):
+    def test_schema_maintenance_success_archives_old_schema_and_only_updates_application(self):
         preflight = self.schema_evidence()
         (self.state / "previous-accepted").write_text("older-accepted-fixture")
         result = self.deploy("migrate-schema", evidence=preflight)
@@ -442,7 +442,7 @@ else:
         self.assertFalse((self.state / "pending-maintenance").exists())
         actions = self.actions()
         self.assertEqual(sum("run" in a["args"] for a in actions), 2)
-        self.assertTrue(all(a["args"][-1] == "memoia" for a in actions if "stop" in a["args"] or "up" in a["args"]))
+        self.assertTrue(all(a["args"][-2:] == ["memoia", "maintenance"] for a in actions if "stop" in a["args"] or "up" in a["args"]))
         self.assertNotEqual(self.deploy("restore-api", run="100").returncode, 0)
         self.assert_configs_unchanged()
 
@@ -587,6 +587,71 @@ else:
         self.assertTrue((self.state / "pending-deploy").exists())
         self.assertNotEqual(self.deploy("finalize").returncode, 0)
         self.assertTrue((self.state / "deploy-state").read_text().startswith("100 "))
+
+    def test_worker_mismatch_blocks_routine_switch_before_stop(self):
+        self.env["FIXTURE_WORKER_IMAGE"] = IMAGE
+        self.assertNotEqual(self.deploy().returncode, 0)
+        self.assertFalse(any("stop" in action["args"] for action in self.actions()))
+        self.assertFalse((self.state / "pending-deploy").exists())
+
+    def test_worker_force_kill_blocks_candidate_start(self):
+        self.env["FIXTURE_WORKER_FORCE_KILL"] = "1"
+        result = self.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Worker did not exit gracefully", result.stderr)
+        self.assertTrue((self.state / "pending-deploy").exists())
+        self.assertFalse(any("up" in action["args"] for action in self.actions()))
+
+    def test_worker_health_failure_cannot_finalize(self):
+        self.assertEqual(self.deploy().returncode, 0)
+        self.env["FIXTURE_WORKER_UNHEALTHY"] = "1"
+        self.assertNotEqual(self.deploy("finalize").returncode, 0)
+        self.assertTrue((self.state / "deploy-state").read_text().startswith("100 "))
+
+    def test_worker_runtime_config_drift_is_rejected(self):
+        self.env["FIXTURE_WORKER_CONFIG_DRIFT"] = "1"
+        self.assertNotEqual(self.deploy().returncode, 0)
+        self.assertEqual(self.actions(), [])
+
+    def test_worker_live_redis_or_project_drift_blocks_before_stop(self):
+        for field, value in (("FIXTURE_WORKER_REDIS_URL", "redis://:fixture@another-redis/0"),
+                             ("FIXTURE_WORKER_PROJECT_ID", "another-project")):
+            with self.subTest(field=field):
+                self.env[field] = value
+                result = self.deploy()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.state / "pending-deploy").exists())
+                self.assertFalse(any("stop" in action["args"] for action in self.actions()))
+                self.env.pop(field)
+
+    def test_initial_worker_adoption_requires_explicit_schema_path(self):
+        legacy = self.run_command("bash", str(SOURCE / "infra-fingerprint.sh"), str(ROOT), "legacy-api-only")
+        self.assertEqual(legacy.returncode, 0, legacy.stderr)
+        (self.state / "infra-config.sha256").write_text(legacy.stdout)
+        self.env["FIXTURE_WORKER_MISSING"] = "1"
+        self.assertNotEqual(self.deploy().returncode, 0)
+        self.assertEqual(self.actions(), [])
+        result = self.deploy("migrate-schema", evidence=self.disposable_evidence())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.state / "infra-config.sha256").read_text(), legacy.stdout)
+        self.assertTrue((self.state / "pending-worker-infra.sha256").exists())
+        result = self.deploy("finalize-schema", evidence=self.schema_business_evidence())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.state / "pending-worker-infra.sha256").exists())
+        self.assertEqual((self.state / "infra-config.sha256").read_text(),
+                         self.run_command("bash", str(SOURCE / "infra-fingerprint.sh"), str(ROOT)).stdout)
+
+    def test_first_worker_adoption_cannot_hide_existing_infrastructure_change(self):
+        legacy = self.run_command("bash", str(SOURCE / "infra-fingerprint.sh"), str(ROOT), "legacy-api-only")
+        (self.state / "infra-config.sha256").write_text(legacy.stdout)
+        self.env.update(FIXTURE_WORKER_MISSING="1", FIXTURE_POSTGRES_FINGERPRINT="b" * 64)
+        self.assertNotEqual(self.deploy("migrate-schema", evidence=self.disposable_evidence()).returncode, 0)
+        self.assertEqual(self.actions(), [])
+
+    def test_active_maintenance_lease_blocks_schema_cutpoint(self):
+        self.env.update(FIXTURE_MAINTENANCE_TABLE="1", FIXTURE_MAINTENANCE_ACTIVE="1")
+        self.assertNotEqual(self.deploy("migrate-schema", evidence=self.disposable_evidence()).returncode, 0)
+        self.assertFalse(any("stop" in action["args"] for action in self.actions()))
 
 
 if __name__ == "__main__":

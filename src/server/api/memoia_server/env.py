@@ -15,7 +15,8 @@ from typing import Optional, Literal, Union
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo
 from datetime import timezone
-from typeguard import check_type
+from typeguard import check_type, TypeCheckError
+from openai.types.shared import ReasoningEffort
 import structlog
 from .types import UserProfileTopic
 from .struct_logger import ProjectStructLogger, configure_logger
@@ -72,6 +73,15 @@ class TelemetryKeyName:
     has_request = "has_request"
 
 
+def _validate_llm_configuration(model: str | None, effort: ReasoningEffort) -> None:
+    if model is not None and (not isinstance(model, str) or not model.strip()):
+        raise ValueError("llm_model must be a non-empty string")
+    try:
+        check_type(effort, ReasoningEffort)
+    except TypeCheckError:
+        raise ValueError("reasoning_effort must match the OpenAI SDK ReasoningEffort values") from None
+
+
 @dataclass
 class Config:
     # IMPORTANT!
@@ -97,7 +107,8 @@ class Config:
     llm_api_key: str = None
     llm_openai_default_query: dict[str, str] = None
     llm_openai_default_header: dict[str, str] = None
-    best_llm_model: str = "gpt-4o-mini"
+    best_llm_model: str = "gpt-6-luna"
+    llm_reasoning_effort: ReasoningEffort = "high"
     thinking_llm_model: str = "o4-mini"
     summary_llm_model: str = None
 
@@ -196,6 +207,9 @@ class Config:
         return overwrite_config
 
     def __post_init__(self):
+        if self.best_llm_model is None or self.llm_reasoning_effort is None:
+            raise ValueError("The service model and reasoning effort must be configured")
+        _validate_llm_configuration(self.best_llm_model, self.llm_reasoning_effort)
         if self.source_input_retention_seconds <= 0:
             raise ValueError("source_input_retention_seconds must be positive")
         assert self.llm_api_key is not None, "llm_api_key is required"
@@ -235,6 +249,8 @@ class Config:
 @dataclass
 class ProfileConfig:
     language: Literal["en", "zh"] = None
+    llm_model: str | None = None
+    reasoning_effort: ReasoningEffort = None
     profile_strict_mode: bool | None = None
     profile_validate_mode: bool | None = None
     additional_user_profiles: list[dict] = field(default_factory=list)
@@ -244,6 +260,7 @@ class ProfileConfig:
     event_tags: list[dict] = None
 
     def __post_init__(self):
+        _validate_llm_configuration(self.llm_model, self.reasoning_effort)
         if self.language not in ["en", "zh"]:
             self.language = None
         if self.additional_user_profiles:
@@ -252,10 +269,12 @@ class ProfileConfig:
             [UserProfileTopic(**up) for up in self.overwrite_user_profiles]
 
     @classmethod
-    def load_config_string(cls, config_string: str) -> "Config":
+    def load_config_string(cls, config_string: str) -> "ProfileConfig":
         overwrite_config = yaml.safe_load(config_string)
         if overwrite_config is None:
             return cls()
+        if not isinstance(overwrite_config, dict):
+            raise ValueError("Project configuration must be a YAML mapping")
         # Get all field names from the dataclass
         fields = {field.name for field in dataclasses.fields(cls)}
         # Filter out any keys from overwrite_config that aren't in the dataclass

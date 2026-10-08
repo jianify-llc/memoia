@@ -45,7 +45,7 @@ class ComposeContract(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             config = json.loads(result.stdout)
             self.assertEqual(config["name"], "memoia-test")
-            self.assertEqual(set(config["services"]), {"redis", "memoia"})
+            self.assertEqual(set(config["services"]), {"redis", "memoia", "maintenance"})
             self.assertFalse(config["services"]["redis"].get("ports"))
             self.assertEqual(config["services"]["redis"]["volumes"][0]["source"], "/opt/memoia/data/redis")
             self.assertEqual(config["networks"]["data"]["name"], "jianify-data")
@@ -63,6 +63,16 @@ class ComposeContract(unittest.TestCase):
             self.assertIn("ingress", api["networks"])
             self.assertFalse(config["networks"]["ingress"].get("internal", False))
             self.assertEqual(api["environment"]["DATABASE_URL"], values["DATABASE_URL"])
+            worker = config["services"]["maintenance"]
+            self.assertFalse(worker.get("ports"))
+            self.assertEqual(worker["image"], api["image"])
+            self.assertEqual(worker["volumes"], api["volumes"])
+            self.assertEqual(worker["networks"], api["networks"])
+            self.assertEqual(worker["command"], ["/app/.venv/bin/python", "-m", "memoia_server.maintenance_worker"])
+            self.assertEqual(worker["healthcheck"]["test"][-1], "--healthcheck")
+            self.assertEqual(worker["environment"]["MAINTENANCE_CONCURRENCY"], "2")
+            self.assertEqual({key: value for key, value in worker["environment"].items()
+                              if key != "MAINTENANCE_CONCURRENCY"}, api["environment"])
             target = root / "rehearsals/restore-fixture"
             (target / "api").mkdir(parents=True)
             (target / "api/config.yaml").write_text("fixture-only")
@@ -81,6 +91,8 @@ class ComposeContract(unittest.TestCase):
             self.assertFalse(effective["networks"]["ingress"].get("internal", False))
             self.assertEqual(set(effective["services"]["redis"]["networks"]), {"backend"})
             self.assertEqual(set(effective["services"]["postgres"]["networks"]), {"data"})
+            self.assertFalse(effective["services"]["maintenance"].get("ports"))
+            self.assertEqual(effective["services"]["maintenance"]["volumes"], effective["services"]["memoia"]["volumes"])
             self.assertEqual(env.read_text(), "\n".join(lines) + "\n")
 
 

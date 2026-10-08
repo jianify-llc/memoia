@@ -97,6 +97,17 @@ valid = (pg.scheme == "postgresql" and pg.hostname == "jianify-postgres" and (pg
          and unquote(redis.password or "") == c["redis"]["environment"]["REDIS_PASSWORD"])
 if not valid:
     sys.exit("API connections must use the company Memoia database and local Redis")
+api, worker = c["memoia"], c.get("maintenance", {})
+worker_env = dict(worker.get("environment", {}))
+concurrency = worker_env.pop("MAINTENANCE_CONCURRENCY", None)
+if (worker.get("image") != api["image"] or worker.get("ports")
+        or worker.get("command") != ["/app/.venv/bin/python", "-m", "memoia_server.maintenance_worker"]
+        or worker.get("healthcheck", {}).get("test") != ["CMD", "/app/.venv/bin/python", "-m", "memoia_server.maintenance_worker", "--healthcheck"]
+        or worker_env != api["environment"] or concurrency != "2"
+        or worker.get("volumes") != api.get("volumes")
+        or worker.get("networks") != api.get("networks")
+        or worker.get("labels") != api.get("labels")):
+    sys.exit("Maintenance must use the same image and scoped runtime configuration, without host ports")
 ' <<< "$resolved"
 [[ "$(jq -r '.networks.data.name' <<< "$resolved")" == jianify-data && "$(jq -r '.networks.data.external' <<< "$resolved")" == true ]] || {
   echo 'Company PostgreSQL network is not the fixed external jianify-data network' >&2; exit 1;
@@ -122,15 +133,28 @@ postgres_status=$(python3 /opt/postgres/postgresctl.py status)
 }
 postgres_container=$(jq -r '.container_id' <<< "$postgres_status")
 [[ -f "$script_dir/infra-fingerprint.sh" && -f "$script_dir/schema-fingerprint.sh" ]] || exit 2
+worker_introduction=false
+next_infra=$(bash "$script_dir/infra-fingerprint.sh" "$root")
 if [[ "$mode" != init && "$mode" != adopt-external-postgres ]]; then
 [[ -f infra-config.sha256 && -f schema.sha256 ]] || {
   echo 'Infrastructure baseline is missing' >&2
   exit 1
 }
-[[ "$(bash "$script_dir/infra-fingerprint.sh" "$root")" == "$(sed -n '1p' infra-config.sha256)" ]] || {
-  echo 'Infrastructure configuration changed; use separate maintenance' >&2
-  exit 1
-}
+if [[ "$next_infra" != "$(sed -n '1p' infra-config.sha256)" ]]; then
+  # Only the first same-image Worker may be adopted with an explicit schema
+  # upgrade. The existing API, database, Redis and network must remain identical.
+  if [[ "$mode" == migrate-schema &&
+        "$(bash "$script_dir/infra-fingerprint.sh" "$root" legacy-api-only)" == "$(< infra-config.sha256)" &&
+        -z "$("${compose[@]}" ps -aq maintenance)" ]]; then
+    worker_introduction=true
+  elif [[ "$mode" == finalize-schema && -f pending-worker-infra.sha256 &&
+          "$next_infra" == "$(< pending-worker-infra.sha256)" ]]; then
+    :
+  else
+    echo 'Infrastructure configuration changed; use separate maintenance' >&2
+    exit 1
+  fi
+fi
 fi
 
 config_sha=$(sha256sum "$root/.env" "$root/api/config.yaml" | sha256sum | cut -d' ' -f1)
@@ -140,8 +164,22 @@ tunnel_ready() {
     curl -fsS --max-time 5 http://127.0.0.1:20241/metrics |
     awk '/^cloudflared_tunnel_ha_connections(\{[^}]*\})?[[:space:]]/ {found=1; connections+=$NF} END {exit !(found && connections>0)}'
 }
-api_database_matches() {
-  [[ "$(docker inspect "$1" | jq -r '.[0].Config.Env[] | select(startswith("DATABASE_URL=")) | sub("^DATABASE_URL=";"")')" == "$(jq -r '.services.memoia.environment.DATABASE_URL' <<< "$resolved")" ]]
+runtime_connections_match() {
+  local environment field actual expected
+  environment=$(docker inspect "$1" | jq -c '.[0].Config.Env')
+  for field in DATABASE_URL REDIS_URL PROJECT_ID; do
+    actual=$(jq -r --arg field "$field" '.[] | select(startswith($field + "=")) | split("=")[1:] | join("=")' <<< "$environment")
+    expected=$(jq -r --arg field "$field" '.services.memoia.environment[$field]' <<< "$resolved")
+    [[ "$actual" == "$expected" ]] || return 1
+  done
+}
+runtime_healthy() {
+  local service=$1 expected=$2 container
+  container=$("${compose[@]}" ps -q "$service")
+  [[ -n "$container" && "$(docker inspect --format '{{.Config.Image}}' "$container")" == "$expected" &&
+     "$(docker inspect --format '{{.State.Health.Status}}' "$container")" == healthy &&
+     "$(docker inspect --format '{{.State.OOMKilled}} {{.RestartCount}}' "$container")" == 'false 0' ]] &&
+    runtime_connections_match "$container"
 }
 
 if [[ "$mode" == finalize || "$mode" == finalize-schema ]]; then
@@ -171,7 +209,8 @@ if [[ "$mode" == finalize || "$mode" == finalize-schema ]]; then
   [[ "$(docker inspect --format '{{.State.OOMKilled}} {{.RestartCount}}' "$container")" == 'false 0' ]] || {
     echo 'Candidate OOM or automatic restart blocks acceptance' >&2; exit 1;
   }
-  api_database_matches "$container" || { echo 'Candidate database connection differs from the fixed configuration' >&2; exit 1; }
+  runtime_connections_match "$container" || { echo 'Candidate database/Redis/project connection differs from the fixed configuration' >&2; exit 1; }
+  runtime_healthy maintenance "$image" || { echo 'Candidate maintenance Worker differs or is not healthy' >&2; exit 1; }
   [[ "$postgres_container" == "$(sed -n '/^postgres /s/^postgres //p' pending-infra)" ]] || {
     echo 'Company PostgreSQL changed during API deployment' >&2; exit 1;
   }
@@ -197,6 +236,7 @@ if [[ "$mode" == finalize || "$mode" == finalize-schema ]]; then
   mv "$state_tmp" deploy-state
   if [[ "$mode" == finalize-schema ]]; then
     mv pending-schema.sha256 schema.sha256
+    if [[ -f pending-worker-infra.sha256 ]]; then mv pending-worker-infra.sha256 infra-config.sha256; fi
     # 已变更 schema 的旧镜像仅留诊断归档，不再授予普通 API 恢复资格。
     rm -f previous-accepted
     cp "$evidence_file" "schema-archives/$run_id/business-accepted.json"
@@ -243,9 +283,10 @@ if [[ "$mode" == adopt-external-postgres ]]; then
      "$(docker inspect --format '{{.State.OOMKilled}} {{.RestartCount}}' "$api_container")" == 'false 0' ]] || {
     echo 'Accepted API image must be healthy without restart' >&2; exit 1;
   }
-  api_database_matches "$api_container" || {
+  runtime_connections_match "$api_container" || {
     echo 'Running API is not connected with the new database configuration' >&2; exit 1;
   }
+  runtime_healthy maintenance "$image" || { echo 'Accepted maintenance Worker must match the healthy API' >&2; exit 1; }
   [[ "$(docker inspect --format '{{.Config.Image}}' "$redis_container")" == "$(jq -r '.services.redis.image' <<< "$resolved")" &&
      "$(docker inspect --format '{{.State.Health.Status}}' "$redis_container")" == healthy &&
      "$(docker inspect "$redis_container" | jq -r '.[0].Mounts[] | select(.Destination == "/data") | .Source')" == "$root/data/redis" ]] || {
@@ -301,14 +342,14 @@ fi
 
 tunnel_ready || { echo 'Host Tunnel is not connected' >&2; exit 1; }
 # 拉取失败发生在停机之前；源码指纹读取不导入应用、不触碰数据库。
-MEMOIA_IMAGE="$image" "${compose[@]}" pull memoia
+MEMOIA_IMAGE="$image" "${compose[@]}" pull memoia maintenance
 revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")
 [[ "$revision" == "$source_sha" ]] || { echo 'Image revision mismatch' >&2; exit 1; }
 schema_sha=$(bash "$script_dir/schema-fingerprint.sh" "$image")
 [[ "$schema_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
 if [[ "$mode" == init ]]; then
   [[ ! -e deploy-state && ! -e infra-config.sha256 && ! -e schema.sha256 ]] || { echo 'Initialization already recorded' >&2; exit 1; }
-  for service in redis memoia; do
+  for service in redis memoia maintenance; do
     [[ -z "$("${compose[@]}" ps -aq "$service")" ]] || { echo 'Existing stack blocks initialization' >&2; exit 1; }
   done
   directory="$root/data/redis"
@@ -326,14 +367,16 @@ if [[ "$mode" == init ]]; then
   MEMOIA_IMAGE="$image" "${compose[@]}" up -d --no-build redis
   "${compose[@]}" run --rm --no-deps --entrypoint /app/.venv/bin/python memoia -m alembic upgrade head
   "${compose[@]}" run --rm --no-deps --entrypoint /app/.venv/bin/python memoia -c 'from memoia_server.schema import check_schema; check_schema()'
-  MEMOIA_IMAGE="$image" "${compose[@]}" up -d --no-deps --no-build memoia
+  MEMOIA_IMAGE="$image" "${compose[@]}" up -d --no-deps --no-build memoia maintenance
   printf 'postgres %s\nredis %s\n' "$postgres_container" "$("${compose[@]}" ps -q redis)" > pending-infra
   echo 'First stack started; business acceptance is required before finalize. Automatic updates remain disabled.'
   exit 0
 fi
 if [[ "$mode" == migrate-schema ]]; then
   [[ "$schema_sha" != "$(< schema.sha256)" ]] || { echo 'Schema is unchanged; use ordinary prepare' >&2; exit 1; }
-  maintenance_record=$(python3 "$script_dir/schema-maintenance.py" preflight "$root" "$image" "$source_sha" "$run_id" "$evidence_file")
+  worker_flag=()
+  [[ "$worker_introduction" != true ]] || worker_flag=(introduce-worker)
+  maintenance_record=$(python3 "$script_dir/schema-maintenance.py" preflight "$root" "$image" "$source_sha" "$run_id" "$evidence_file" "${worker_flag[@]}")
   python3 "$script_dir/schema-maintenance.py" audit "$root" "$image"
 else
   [[ "$schema_sha" == "$(< schema.sha256)" ]] || { echo 'Schema source changed; migration maintenance is required' >&2; exit 1; }
@@ -348,7 +391,11 @@ accepted_image=$(cut -d' ' -f3 deploy-state)
 [[ "$accepted_image" =~ ^ghcr\.io/(jianify|jianify-llc)/memoia@sha256:[0-9a-f]{64}$ && "$(docker inspect --format '{{.Config.Image}}' "$old_container")" == "$accepted_image" ]] || {
   echo 'Running API differs from the accepted deployment; review manual changes before switching' >&2; exit 1;
 }
-api_database_matches "$old_container" || { echo 'Running API database connection drifted' >&2; exit 1; }
+runtime_connections_match "$old_container" || { echo 'Running API database connection drifted or Redis/project differs' >&2; exit 1; }
+old_worker=$("${compose[@]}" ps -q maintenance)
+if [[ "$worker_introduction" != true ]]; then
+  runtime_healthy maintenance "$accepted_image" || { echo 'Running maintenance Worker differs from the accepted deployment' >&2; exit 1; }
+fi
 redis_container=$("${compose[@]}" ps -q redis)
 [[ -n "$redis_container" ]] || { echo 'Redis is not running' >&2; exit 1; }
 expected_image=$(jq -r '.services.redis.image' <<< "$resolved")
@@ -376,29 +423,36 @@ if [[ "$mode" == migrate-schema ]]; then
   printf '%s\n' "$schema_sha" > pending-schema.sha256
   printf '%s\n' "$maintenance_record" > pending-maintenance
   cp "$evidence_file" "schema-archives/$run_id/preflight.json"
+  if [[ "$worker_introduction" == true ]]; then printf '%s\n' "$next_infra" > pending-worker-infra.sha256; fi
 fi
 
-"${compose[@]}" stop --timeout 90 memoia
+"${compose[@]}" stop --timeout 90 memoia maintenance
 [[ "$(docker inspect --format '{{.State.ExitCode}}' "$old_container")" == 0 ]] || {
   echo 'API did not exit gracefully; pending result preserved, candidate not started' >&2; exit 1;
 }
+if [[ -n "$old_worker" ]]; then
+  [[ "$(docker inspect --format '{{.State.ExitCode}}' "$old_worker")" == 0 ]] || {
+    echo 'Maintenance Worker did not exit gracefully; pending result preserved, candidate not started' >&2; exit 1;
+  }
+fi
 if [[ "$mode" == migrate-schema ]]; then
   python3 "$script_dir/schema-maintenance.py" audit "$root" "$image"
   "${compose[@]}" run --rm --no-deps --entrypoint /app/.venv/bin/python memoia -m alembic upgrade head
   "${compose[@]}" run --rm --no-deps --entrypoint /app/.venv/bin/python memoia -c 'from memoia_server.schema import check_schema; check_schema()'
 fi
-MEMOIA_IMAGE="$image" "${compose[@]}" up -d --no-deps --no-build memoia
-container=$("${compose[@]}" ps -q memoia)
+MEMOIA_IMAGE="$image" "${compose[@]}" up -d --no-deps --no-build memoia maintenance
 for _attempt in $(seq 1 36); do
-  status=$(docker inspect --format '{{.State.Health.Status}}' "$container")
-  if [[ "$status" == healthy ]]; then
-    [[ "$(docker inspect --format '{{.State.OOMKilled}} {{.RestartCount}}' "$container")" == 'false 0' ]] || {
-      echo 'Candidate OOM or automatic restart; pending result preserved' >&2; exit 1;
-    }
+  if runtime_healthy memoia "$image" && runtime_healthy maintenance "$image"; then
     exit 0
   fi
-  [[ "$status" == unhealthy ]] && break
+  for service in memoia maintenance; do
+    container=$("${compose[@]}" ps -q "$service")
+    if [[ -z "$container" || "$(docker inspect --format '{{.State.Health.Status}}' "$container")" == unhealthy ||
+          "$(docker inspect --format '{{.State.OOMKilled}} {{.RestartCount}}' "$container")" != 'false 0' ]]; then
+      echo 'Candidate API or Worker unhealthy, OOM or automatic restart; pending result preserved' >&2; exit 1
+    fi
+  done
   sleep 5
 done
-echo 'Candidate API did not become healthy; pending result preserved' >&2
+echo 'Candidate API and Worker did not become healthy; pending result preserved' >&2
 exit 1

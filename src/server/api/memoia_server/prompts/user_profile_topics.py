@@ -9,6 +9,11 @@ from .profile_init_utils import (
 
 CANDIDATE_PROFILE_TOPICS: list[UserProfileTopic] = [
     UserProfileTopic(
+        "relationships",
+        description="Evidence-backed people around the user; subtopics identify relatives, friends and colleagues without merging uncertain identities.",
+        sub_topics=[],
+    ),
+    UserProfileTopic(
         "basic_info",
         sub_topics=[
             "Name",

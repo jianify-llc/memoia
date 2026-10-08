@@ -183,6 +183,8 @@ class LocalVerificationContract(unittest.TestCase):
                 pytest = next(command for command in commands if "pytest" in command)
                 self.assertIn("offline_tests", pytest)
                 self.assertIn("tests/test_source_quality.py", pytest)
+                self.assertIn("tests/test_maintenance_agent.py", pytest)
+                self.assertIn("tests/test_maintenance_worker.py", pytest)
                 for name in temporal_tests:
                     self.assertIn("tests/test_temporal_evidence.py::" + name, pytest)
                 self.assertNotIn("tests/test_temporal_evidence.py", pytest)

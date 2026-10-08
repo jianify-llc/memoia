@@ -1,109 +1,114 @@
-# 有界来源与可靠写入
+# Fact 写入与串行派生维护
 
-## 不变量与 owner
+## 不变量与归属
 
-Luvel 决定消息范围；服务只处理一个完整有界 Blob，不截断正文。来源分组由调用方必传的 source_id 给出（Luvel 使用 dialogId）；幂等键是批次操作身份，正文摘要仅用于拒绝同键不同请求，不用于业务去重。PostgreSQL 保存操作回执、消息关联、事实及支持组；画像和事件是派生结果。
+Fact 是有证据的记忆；Profile 整理长期属性和人物关系，Event 组织故事。后两者不能修改 Fact 或产生新的事实依据。Luvel 决定消息范围并压缩分段；Memoia 只处理一个完整有界 Blob，不建设第二套分块或通用任务平台。
 
 ```text
-Project → User → Source（外部 source_id）→ Blob（服务端批次 UUID）→ Fact
-                    └→ Message（外部 message_id，无正文）← Fact 支持组
+Project → User → Source（调用方 source_id）
+                    ├→ Message（调用方 message_id，无正文）
+                    └→ Blob（服务端批次 UUID）→ Fact
+                                              ├→ 独立检索索引
+                                              ├→ Profile（Fact 支撑）
+                                              └↔ Event（多对多）
+User → flush Operation（固定 Blob 集合）→ 一个 AgentLoop → Profile + Event 原子提交
 ```
 
-Source 的自然键是 `(project_id, user_id, source_id)`；Message 再加 message_id，属于 Source 而不是 Blob。每个导入幂等键映射唯一 Blob；Blob 保存该批实际消息 ID，重叠消息不会成为第二次独立证据。同一消息 ID 的正文、角色或发生时间变化报 message_conflict。数据库复合外键约束 Source、Blob、操作、事实与历史的用户／项目归属；证据约束同时验证消息属于批次与 Source、且没有被删除。
+Source 的自然键为 (project_id, user_id, source_id)，Message 再加 message_id；消息属于 Source，不属于 Blob。幂等键映射唯一导入 Blob，正文 hash 只验证同键同请求，不将两次真实发生去重。重叠消息不能成为第二份独立证据；同消息 ID 的正文、角色或发生时间冲突明确报错。复合外键约束用户、项目、来源、批次与派生关联，不能只靠代码填对字段。
 
-唯一接口：`POST /users/{uid}/blobs` 接收 source_id、idempotency_key 和带 message_id 的完整消息；`GET /users/{uid}/blobs/{blobId}` 查询批次；`GET /users/{uid}/sources/{sourceId}` 查询分组。`DELETE /users/{uid}/sources/{sourceId}/messages` 接收 message_ids 与稳定幂等键，内部清理证据、重建记忆；对外只称“删除消息”，不另暴露撤回 API。上述路径都在 `/api` 下，project_id 只能来自鉴权。没有 Blob 取消或编辑能力；删除 Event 仍仅删除派生事件，不撤回消息。
+唯一公开协议为无版本的 /api，FastAPI 路由和 Pydantic 是 OpenAPI 真相源；SDK 由冻结 OpenAPI 生成类型及校验器。历史内部 buffer 清理原语不构成旧版本 HTTP 兼容承诺，切换不清空在途数据。
 
-同一用户所有生成、修改、撤回使用 Redis 的 owner lease。续租使用 compare-and-expire，释放使用 compare-and-delete。模型等待不占数据库连接。新 owner 在数据库登记 generation；提交同时比较 generation 和读快照的 version，CAS 失败整个事务回滚，禁止仅重试 INSERT。
+## 写入、回执与原文生命周期
 
-不再提供独立 insert/flush HTTP 流程。来源导入登记 processing/completed/failed 回执，接受与完成不同；调用方只按固定操作身份查询或显式恢复。历史 buffer 数据和内部清理原语仍保留用于既有在途数据维护，不作为兼容 API，切换时不删除未完成任务。
+导入路径：
+1. 登记可查询的 processing 操作，获取 Redis renewable UserLease。
+2. 短 SQL 事务取得 generation/version 和相关 Fact 快照后结束，不持有连接等待模型。
+3. 一次有界抽取，校验证据与显式纠正，生成 Fact 检索向量。
+4. 同事务保存 Fact、直接索引、消息关联、纠正关系、completed 回执及固定 Blob 变更引用，并清除原文。
 
-注册、快照、正式提交与永久遗忘使用同一项目／UUID 的 PostgreSQL `pg_advisory_xact_lock`，稳定 SHA-256 的长度安全 JSON 键归一 UUID；不使用 Python 随机 hash 或 session lock。lease 关联的 SQL Session 在 after_begin 通过已开始事务的 Connection 先取得锁，避免既有行锁与遗忘形成反向锁序。锁只属于短 SQL 事务，commit／rollback／close 结束后释放，不能跨模型 await；非记忆计费事务明确跳过。Redis 负责协调长计算，SQL 锁与 generation/version 负责所有正式数据提交的串行正确性，不再维护第二个长期锁 owner。
+completed **只表示 Fact 操作已提交**。回执中的 memory_version 固定，不因后台维护推进而变化；fact_ids 是该次结果，event_ids/profile_ids 不再是等待条件。响应丢失先查询原回执，不重新导入。空事实和重复消息也完成固定 Blob；只有 noop 的 flush 无需模型。
 
-导入先登记可查询的 processing 操作，随后计算。事实、证据、派生结果、completed 回执与原文清理在同一个事务提交。调用响应丢失可以查询原结果；模型失败且已确认事务未提交可以用同一个键恢复。取消或数据库结果未知时不写 failed。批次和操作唯一约束是最终去重依据。
+长计算由 compare-and-expire 原子续租、compare-and-delete 释放的 Redis lease 协调；所有正式写入仍比较 SQL generation/version。短事务共用用户级 pg_advisory_xact_lock，与永久遗忘线性化，不跨模型 await。失锁、冲突或提交未知不能写入失败假回执，也不能只重试 INSERT。
 
-原文只临时保存在未完成 import 的 memory_operations.request，Source／Blob 均不保存 payload。完成后 request 仅保留来源和幂等键；历史 chat GeneralBlob 同事务清除，即使旧 persistent_blob 配置为 true 也不归档聊天。事实必须是精简结论，不复制整段聊天。
+原文只临时保存在未完成 import 的 memory_operations.request，Source 和 Blob 不保存正文副本。完成结果、回执和清理同事务提交；完成后 request 只保留操作身份。旧 chat GeneralBlob 同事务清除，不受 persistent_blob 影响。旧 summary Blob 是摘要输入，保留原有独立语义，不把它宣称为完整聊天存档。
 
-未完成输入默认保留 7 天（source_input_retention_seconds），普通重试不延长期限；每 60 秒清理过期正文，服务停止期间恢复启动后继续清理。期限不是独立任务平台，也不承诺原文清除后仍能独立重新抽取。到期 retry 返回 input_required；调用方先查原回执，确未完成再用原完整批次、原键显式补交，不能盲目重发或换成幸存消息。旧输入无真实外部消息身份，过期未处理 chat Blob 无独立恢复保证。
+未完成输入默认保留七天（source_input_retention_seconds），重试不延长期限；API 每 60 秒清理，到期后 retry 返回 input_required。调用方先确认原回执，确未完成时以原键、原完整批次显式补交。没有原文和可恢复事实时，不承诺服务端可以独立重新抽取。事实是精简结论，不得变相复制完整聊天。日志、调试和 SQL 参数不保存正文或凭据。
 
-前向迁移 0006 把旧批次迁到 Blob，来源保留为 legacy:<旧 UUID>，不猜测 dialogId；待处理旧输入继续保留，迁移时给予 7 天清理期限。完成操作 request、旧 Source payload 和已完成历史 chat Blob 原文清除；保留旧事实／关联／回执。该清理不可逆，迁移不修改旧版本、不清空未完成任务。备份、WAL、快照中的历史正文不由此迁移安全擦除，也不能拿旧快照覆盖当前已删除状态；它们需要独立的数据保留策略。
+## Fact、时间与纠正
 
-## 证据与删除
+抽取保留事实主体、行为、原因、人物、报告者及 certainty；用户及相关人物的有依据信息都可保存。助手只能辅助理解，新增猜测不能成为独立支持。引用、怀疑、否定、角色扮演和用户确认必须保留原有范围。结构校验不能证明语义正确；漏抽和过度推断仍需固定真实模型样例验收。
 
-一个支持组中的消息共同支持一个事实；多个组是独立的替代支持。撤回任意消息使包含它的整个组失效，其他完整支持组保留。事实抽取只使用来源正文，不把助手建议或旧摘要当成用户的正面证据。汇总对每个候选事实必须给出处理结论，不能部分解析后成功。
+Fact 不强制分类到画像 topic/subtopic；旧分类只作为 legacy 元数据。一个 support_group 内消息共同支持，多个组是独立替代支持：删除必要消息使整个组失效，不将组缩成剩下半句。事实仍有完整组则保留；重叠批次复用消息身份，不增加证据份数。
 
-事实的 occurred_at 是当前有效支持消息的最大发生时间；导入与撤回共用计算规则。撤回较新独立支持时，时间与支持组在同一事务回退，事件时间随剩余来源事实重建，不沿用被撤回证据的时间。
+显式纠正由 Fact 写入路径有界读取同来源及词法相关历史候选；不是每次加载所有用户历史，也不承诺词法候选穷尽跨来源语义。纠正关系保存自身证据组；删除纠正依据后重新评估旧 Fact 是否有效，不能只看纠正 Fact 是否仍有别的支持。普通时间变化不是旧事实错误。active 与旧 included 独立，included=false 不代表事实无效。
 
-画像重整以变更事实所属的完整 topic 为起点，按现有画像的 fact_ids 和画像目标 topic 递归扩展关联主题；该范围包含仍有效但 included=false 的旧事实，允许撤回纠正后恢复旧支持。模型只收到该范围，必须完整返回所有候选结论，不得输出范围外画像；事务只替换受影响主题，无关画像保留 ID、正文、更新时间。全量来源与事实仍在数据库，暂仍全量读取用于确定关联，不宣称 SQL 读取成本已与历史无关。主题分类及已有关系是本轮计算边界，不保证识别此前未关联的任意跨主题语义冲突；真实模型需验证分类稳定性及纠正语义。
+occurred_at 是当前支持消息的最大发生时间；撤回较新独立组后同事务回退。event_time 单独保存事件日期的 inclusive ISO 范围、年/月/日/range/unknown 精度及原消息表达；年月不伪造精确日期。time_zone 是原消息 IANA 时区，处理时刻不是事件日期锚点。删除日期依据立即清除 unsupported event_time 并重建 Fact 向量。
 
-撤回在删除事实/隐藏画像的同一事务把已闭合的 reconcile_topics 写入原操作的内部 request，不修改业务幂等 hash；取消或失败恢复仍以它为起点并扩展当前关联，不因原事实已消失而丢失范围。它由服务端持有，不是新的公开输入字段。单个相关范围仍可能超限，明确返回 reconciliation_too_large、retryable=false，不能截断或自动重放相同输入；input_too_long 继续表示输入/抽取预算拒绝。维护调整预算或相关证据后，可显式调用原 operations/{id}/retry 重新计算历史容量失败，同一回执及 CAS 边界不变；其它不可重试失败仍拒绝恢复。重建失败时已撤回证据和派生隐藏状态不回滚为可读。
+请求最大 2 MiB、每批最多 1,000 完整消息、正文默认 16,384 tokens，另校验提示词、相关历史和输出预留。输入过长与相关历史容量不足分别报错，不能截断成功。容量修复后可显式恢复原操作；参数/鉴权错误不自动重试。embedding 每批默认 64，严格校验索引、条数、维度及有限数值。
 
-撤回先以数据库事务撤销支持并隐藏受影响的派生结果，再从剩余有效事实重建；计算失败时隐藏状态保持，操作可恢复。历史接口保存已提交画像的版本、差异及事实／来源 ID；读取时只返回仍有有效证据的画像，撤回时清理涉及失效证据的历史正文，不提供恢复已撤回内容的入口。操作列表是独立接口，不能把操作日志当作画像历史。所有读取共用正式画像和事件表，不返回已隐藏的派生内容；无来源的旧／手工画像保留，不宣称其可精确撤回。
+## 固定 Blob、flush 与统一 AgentLoop
 
-删除事件只删除事件与索引，并保留 Blob 上不含正文的删除标记，后续重建不得重新创建它。不删除来源消息贡献或画像。编辑事件必须重建 embedding/gist，并在同一事务替换。
+消息导入或删除各有一个固定 Blob；幂等键定位原 Operation/Blob，重试不能扩大消息范围。Fact、索引、回执和 Blob 的 fact_changes（新增、删除、纠正、证据及时间变化引用）同事务提交。Blob 不保存聊天原文。人工 Profile 编辑、Event 删除和 Agent 写入不生产 Blob。
 
-事件标签也是派生结果，保存在事件上，不在来源上另存重复快照。导入使用经过项目定义校验的抽取标签；撤回重建仅把剩余有效来源事实和当前项目标签定义交给严格模型生成标签，不能复用含已撤回事实的旧标签值。标签生成失败时旧事件继续隐藏，按同一持久操作恢复；没有剩余事实或没有配置标签时不额外调用模型。
+主动 POST flush 或 Worker 定时 flush，在短事务按完成顺序选取完整 Blob；可跨 Source，不跨项目/用户。每次扫描最多 100 个，变更引用与当前有效 Fact 的 JSON 总预算为 256 KiB，不能拆开 Blob。剩余、在途及随后完成的 Blob 留给下一次，pending_blob_count 可见；同键重试不扩大集合。单个 Blob 已超限时固定原集合并明确报 maintenance_capacity，不无限调用模型；恢复仍受容量校验。查询不改变计时，自动静默 30 秒、最长等待 120 秒。空 flush 直接 completed，不调用模型。
 
-客户端不能伪造或清除画像的内部事实／来源关联。手工编辑派生画像保留原证据关系；证据撤回后仍会隐藏它。手工编辑不新增来源事实，后续事实汇总可能重新生成该画像。
+Operation(kind=flush) 是唯一调度和恢复身份，source_id/blob_id 为 null；保存固定 Blob 集合、执行租约、generation、尝试次数和下次执行时间，不新增任务 ID 或维护 Task 表。每个项目/用户最多一个有效执行者；短事务领取后释放连接，模型等待不占 Fact 写入锁。失败/退避释放执行权，新批次可继续。首次加三次恢复，间隔 5/15/60 分钟；耗尽保留原失败，显式 retry 原 operation_id 才重开预算，新批次不重置旧次数。
 
-永久遗忘必须显式调用 `DELETE /api/users/{user_id}`，返回严格 `{user_id, forgotten: true}`。同一短事务中先写项目／UUID 墓碑，再级联清理用户、原始来源、事实、操作和派生记忆；墓碑无 User 外键，不能随用户数据消失。重复遗忘（包括从未创建的用户）稳定成功且不改首次遗忘时间。这个纯数据库操作是长计算 lease 的明确例外：不等待 Redis/model，而是用相同 SQL 锁线性化；已开始计算的旧执行者在快照或正式提交遇到墓碑，回滚并返回 HTTP 410 `user_forgotten`，`retryable: false`。取消发生在事务提交前则全部回滚；响应或 COMMIT 确认丢失后可显式再次遗忘相同 UUID，不能凭单次 GET404 推断遗忘成功。
+Operation.status 是终态真相源：待领取、执行及自动退避均为 processing，退避可携带 retryable 的末次错误；不可恢复或四次耗尽才为 failed，提交回执后才为 completed。flush.status 对应 pending/running、failed、completed，不独立猜终态。Worker 每轮独立回收过期租约，第四次崩溃也收敛到 failed；重复恢复 processing 不重置预算。
 
-永久遗忘后，该项目／UUID 的 create、import、retry 均被拒绝；跨项目相同 UUID 不受影响。墓碑不保存正文，只随所属项目删除才级联。没有公开恢复身份或绕过墓碑的参数。
+一个 OpenAI Agents SDK Agent 同时查询并暂存 Profile/Event，模型自行安排处理顺序；不能修改 Fact。只使用 Agent、异步 Runner、函数工具和 Pydantic，不使用 handoff、持久线程、MCP、Shell/文件工具。禁用外部 tracing/正文 debug，transport max_retries=0。项目 llm_model/reasoning_effort 默认继承 gpt-6-luna/high，运行固定配置、最终再次校验；不静默切模型或降低等级。
 
-## 协议、安全与检索
+Fact 用 Standard（service_tier=default）；Loop 先 Flex，临时供应商失败/超时后本轮余下请求用 Standard。只重试未执行工具的模型请求，Flex fallback 同样占一次请求，不重启会话或重置限制。鉴权、输入、拒绝/过滤、失锁和预算错误不能借 fallback 绕过。单次生成最多 32768 tokens，一次 Loop 最多 10 次模型请求/300 秒；无累计 64K 上限，用量仍记录。Responses 适配器 store=false，原生 context_management.compact_threshold=262144；不增加摘要模型调用，数据库读集和暂存修改不压缩。模型/入口真实兼容性单独验收。
 
-协议真相源为 FastAPI 路由和 Pydantic 模型；`export-openapi.py openapi.json` 生成冻结的 OpenAPI，TypeScript SDK 从它生成类型和运行时校验。首次导入或删除消息可在已鉴权项目创建尚未永久遗忘的用户／Source，与回执同事务；删除未知消息也登记无正文墓碑，防止迟到导入重新恢复贡献。查询和 retry 不创建用户。账号永久删除仍显式使用正式遗忘入口。来源和幂等键不可含 `/`；消息正文与时间的 hash 用于冲突校验，不替代外部消息 ID。
+初始仅批次概况。read_changes 返回固定变更及当前有效 Fact（不存在时为 null），代码登记实际返回页的读集和覆盖范围；遗漏任一非 noop 变更不能完成，全部检查后不生成派生修改可合法完成。read_memory 精确/分页读取，search_memory 复用同用户混合搜索；stage_profile/stage_event 批量暂存。读取/修改工具以完整条目分页，单页/批最多 64 KiB、200 条，读取默认 100 条，混合搜索最多 20 条；超限不截断正文。取消全局 100 个暂存目标限制。工具读当前数据并登记版本，不按旧 flush 水位过滤，不接受 project/user，不加载全部历史。覆盖校验不能证明模型语义判断正确，真实样例仍需验收。
 
-`GET operations/by-key/{key}` 用于响应丢失后的确认；`POST operations/{id}/retry` 使用服务端尚未过期的输入。已完成返回原结果；活跃执行者返回 processing；确认无正式提交的失败或失去执行权的 processing 可经新 lease 与数据库 generation 接管恢复。删除消息只依赖事实和消息关联，不需要原文。参数、权限或输入预算错误不重试。模型费用不承诺 exactly-once，正式数据库效果依靠事务和唯一身份去重。
+代码先暂存失去全部有效 Fact 支持的受影响 Profile/Event 删除，模型无需逐条发删除命令；有独立有效支持、无事实关联的人工/legacy 条目不机械删除。该清理与模型修改一起原子提交，读集阻止途中支持恢复或目标被人工修改后误删。
 
-HTTP 409 的 `write_conflict`／`lease_lost` 仅在服务端明确返回 `detail.retryable: true` 时表示当前计算未提交、可恢复；SDK 保留该分类供调用方恢复，但每个写请求只发送一次，包括可重试的 409／429。`maxAttempts` 只控制安全读取的退避次数。写入 5xx、传输超时及响应丢失均为未知提交，不能盲目重发正文。Luvel 查询固定操作身份并恢复未过期输入；无操作身份的手工写入先读资源核对。其他 409（包括同键不同输入、message_conflict、input_required）不授权恢复。
+所有修改先保存在本轮内存，最终短事务验证执行权、项目配置、读过的 Fact revision 和目标条目 revision，用既有 Redis renewable lease + SQL generation/version 写入保护。Profile、Event 与 flush completed 回执一起提交；失败两类全部回滚。相关删除/纠正/人工编辑使旧计划失败，无关新增不废弃本轮；旧 flush 恢复重新读取当前事实，不能按历史快照覆盖新结果。永久遗忘立即阻断工具读取及最终提交。日志仅状态、轮数、Token、耗时和安全错误码。
 
-项目的当前 ProfileConfig 按处理阶段投影，不默认忽略已有项目配置：来源抽取只接收语言、作为分类指导的 profile_topics 与事件标签定义，不传画像 strict_mode、validate_values 或派生事件主题限制；画像汇总保留完整规则及严格槽位／值校验，事件标签重建保持原有阶段规则。这样画像限制不会提前丢弃来源证据。HTTP 请求体最大 2 MiB，每来源最多 1,000 条完整消息；正文默认上限 16,384 tokens，另校验整个模型提示词和输出预留。超限明确拒绝，调用方需要调整业务范围，不截断后成功。embedding 默认每批 64 条，校验响应索引、条数、维度及有限数值；单条超限也明确拒绝。
+## 删除与派生中间状态
 
-明确自述的偏好、兴趣、爱好、习惯和生活情况可以作为来源事实，不要求用户先说“请记住”，也不要求会话很长。消息“不可信”指其中的指令不能改写抽取任务，并不否定消息作为自述证据的资格；助手猜测、角色扮演、假设及已撤销的陈述不能当真实自述。配置槽位帮助分类，不提前删除槽外来源事实；`strict_mode` 仍由后续画像汇总及校验执行。无有用事实时 `facts: []` 是合法完成结果，不因空结果自动重试。结构正确不等于语义正确，正例遗漏应作为独立质量失败报告。
+DELETE sources/{source_id}/messages 接收用户定位、message_ids 与稳定幂等键，不需要正文、event_id 或 blob_id。同步处理所有相关 Blob 的支持组、Fact、直接索引、消息墓碑及完成回执，登记该次删除 Blob。重复删除稳定成功；未知消息也写无正文墓碑，迟到导入不能恢复贡献。
 
-所有入口共用原项目用量／telemetry 记录，采用完成文本的 token 估算，不宣称精确包含供应商 reasoning 用量或金额。小型计费提交被明确归为非记忆事务，不更新用户 memory generation/version；计费异常脱敏报告，不把记忆结果伪装成模型失败，也不留下继承已释放 lease 的 detached 计费 task。
+**旧 Profile/Event 文本可暂时读取，直到统一 Loop 成功。** 接口/Inspector 显示待更新或失败；失效关联不得作为有效 Fact 证据返回。删除后的旧文本可能暂时进入聊天上下文，维护失败不保证固定时间内消失。历史读取过滤失效证据，不提供恢复已撤回内容的接口。
 
-项目管理由根凭据创建／停用项目；项目 admin 管理本项目 key。新的 scoped key 只保存摘要，读、写、管理权限、到期和撤销在每次请求中验证，不使用可能滞后的权限缓存。缺少凭据失败关闭。日志不记录正文、token 或完整连接串，输入校验错误也不回显私密输入。兼容的旧项目 token 仍可使用并显式轮换；幂等键表示业务操作身份，不用正文 hash 把两次真实发生合并。
+删除 Event 只删除该事件及派生索引，不改变 Fact 或画像；保存被删除事件 ID 墓碑，后台不能复活该 ID。人工修改增加 revision、保留证据关联，后台旧版本提交失败，不承诺人工文本永远不被后续正常整理替换。
 
-search 将有界 PostgreSQL FTS／字面匹配和 pgvector 语义召回用等权 RRF 合并，不新增向量数据库或 reranker。检索与 context 共用这一条检索链。纯功能测试证明隔离和召回组合，不代表真实语料上的检索质量、延迟或费用已经验收；这些仍需单独比较。
+Event 保存 title/summary/keywords/time/location/content，未知为空；interpretation 单独表示解释/推测，不能回写 Fact 或支撑 Profile。同人物/关键词不自动合并故事，Fact 与 Event 多对多。原文已清除，Loop 必须从 Fact 获取背景，遗漏细节不能补造。
 
-## 验证阶梯
+Fact 抽取只产生事实，不重复生成 Event 标签或画像分类。新版检索只计算 Fact 向量，EventLoop 不再生成未使用的故事向量；原有 v1/人工 Event 路径独立保留。Fact 删除、纠正或时间证据变化时同步清理相关历史画像；AgentLoop 不能把旧文本或后续未处理 Blob 所涉及的失效文本重新记入历史。当前派生文本允许延迟更新的契约不变。
 
-纯模型测试：支持组撤回、候选完整性、正文预算、embedding 索引和数值。真实 PostgreSQL 测试：迁移/adoption、唯一键、事务失败、generation/version CAS、响应丢失后的复用。真实 Redis 测试：超 TTL heartbeat、取消、失锁后旧执行者不能写入。真实 ASGI 检查无版本契约、只读 POST scope、私密正文不进入 URL、错误不回显、手工写入和永久删除。SDK 回归后才进行真实模型、Test 升级与隔离恢复。
+永久遗忘 DELETE users/{uid} 仍立即阻断读取及后续提交，不采用派生延迟语义。短 SQL 事务写项目/UUID 墓碑并级联清理；不等待长 Redis/model lease。旧执行者提交遇到墓碑返回 410 user_forgotten。重复调用返回同 UUID forgotten=true；墓碑不含正文，不能随 User 清理消失，也没有恢复身份参数。
 
-### 仅计算的抽取质量回归
+## 接口、检索与消费者
 
-`python -m memoia_server.source_quality --list` 列出固定合成案例，不加载服务配置或调用模型。执行时从 stdin 读取 JSON：`api_key`、`base_url`（无嵌入凭据的 HTTPS URL）、`model` 必须显式给出；`trials` 默认 1、最大 5，`deadline_seconds` 默认 1200、最大 7200。不要把密钥放到命令参数、仓库或公开 artifact。示意调用为：
+主要接口（均在 /api 下）：
+- POST users/{uid}/blobs：source_id、idempotency_key、带 message_id/role/content/occurred_at 的消息。
+- GET users/{uid}/blobs/{blob_id}、sources/{source_id}：有界来源/批次及当前证据。
+- POST users/{uid}/flush：稳定 idempotency_key，返回固定集合及 kind=flush 的 Operation。
+- GET users/{uid}/operations/by-key/{key}、operations/{id}、POST operations/{id}/retry：查询/恢复原 Fact 或 flush 操作；恢复 flush 不重发正文。
+- GET users/{uid}/maintenance：未封闭 Blob 数量及最近 flush 状态、错误、尝试次数和固定 Blob ID。
+- DELETE sources/{source_id}/messages：删除消息贡献；DELETE events/{id} 与 DELETE users/{uid} 独立。
+- POST search、POST context：私密查询留在 JSON body，使用 read scope。
 
-```bash
-# 由操作员通过受保护输入提供 JSON；不在命令中写入密钥。
-python -m memoia_server.source_quality --case self_preferences < /protected/quality-settings.json
-```
+POST search 的 `query` 保留在请求正文：并行计算查询向量和文本候选，以 pgvector、PostgreSQL FTS/字面匹配融合排序。先按顺序选择完整 Fact，再读取这些 Fact 关联的 Event/Profile；返回 `facts`、`events`、`profiles` 三个独立字段，不把 Fact 包装成 Event，也不新增查询分类模型。相同关联条目去重；三类完整对象及证据共同计入 `max_token_size`（默认 4,000，上限 10,000），放不下整条就跳过，不截断正文或证据。无 Event 的有效 Fact 立即可搜，删除 Event 不影响 Fact 召回。
 
-工具只调用真实 `extract_source`（完整输入、阶段配置投影、预算、OpenAI adapter、严格 schema 和证据 ID 校验），不调用导入受理、汇总、embedding、lease 或正式提交。独立进程禁用 `.env`／`config.yaml` 自动发现及 telemetry listener；禁用服务计费回调并明确阻断 PostgreSQL／Redis 连接。供应商模型费用仍会发生。固定输入是公开合成夹具，输出只含这些夹具的抽取结果及判据，不输出密钥或供应商错误正文。
+`exclude_fact_ids`、`exclude_event_ids`、`exclude_profile_ids` 各最多 500 个 UUID。三类输出独立按 ID 排除，不改变数据库，也不新增 revision 协议。已注入 Fact 不再独立输出，但仍可导航到未注入的关联 Event/Profile，包括异步维护后来生成、或上次预算未容纳的条目。候选只保留未见 Fact，或仍关联允许返回的未见派生对象的已见 Fact；两类各有有界候选池，已见 Fact 不挤占未见 Fact 的位置。关联内容和完整证据仍计入响应总预算。调用方在整个 Dialog 内保留实际已注入的 ID：同 ID 后续文本更新仍被该会话排除，新会话自行重置。本人的每轮画像读取仍是独立调用，不因检索排除消失。现有 `include_events=false` 可以明确关闭故事扩展，旧 `event_max_tokens` 可进一步限制故事子预算，但不能突破总预算。临时 query embedding 故障保留词法召回，输入/配置拒绝仍失败。不承诺精确时间过滤或穷尽列举。
 
-案例覆盖未要求记住的偏好／兴趣、撤销与纠正、联合指代证据、角色扮演、仅助手、寒暄、提示注入及 strict 槽外证据保留。每次试验只调用一次，不对合法空结果追加重试。若需对照旧提示，通过 stdin 的可选 `extract_system` 提供公开基线文本；输出记录 prompt／schema 的 SHA-256，同一抽取函数、模型和固定夹具保持不变，不在代码中维护第二份旧提示。试验是显式重复采样，不是业务恢复或 SDK 自动重试。
+`exclude_profile_topics` 接收最多 50 个一级 Topic 名称（每个 1–256 字符），只排除这些分类的关联画像，不排除 Fact/Event。调用方按项目定义选择本人分类；服务端不猜人物归属。默认目录的关系人物 Topic 是 `relationships`，其它预设分类用于本人，项目自定义目录不能套用这一默认假设。超出 ID/Topic 上限明确拒绝；调用方可降级当前可选检索，不能截断集合后重搜或清空整个 Dialog 的去重记录。
 
-机械判据仅匹配这些英文夹具的概念、列出的明确否定词及支持组；联合指代夹具显式允许两条核心证据、包含用户确认的三条证据及两组共同返回；纠正夹具显式允许单条纠正、旧陈述加纠正及两组共同返回。不自动接受任意额外消息或缺少关键上下文的组。输出始终标记 `human_review_required: true`，还须人工核对事实含义、漏抽和误抽及未覆盖的否定表达，不能将关键词匹配当通用语义证明。工具不验证画像 strict、跨来源汇总、检索、实际 Luvel 调度或业务写入；假 transport 单测也不构成真实模型验收。真实对照须经本任务审查后单独执行。
+原 context 的有序完整 entries 和 entries.join("\\n\\n") 契约保留；结构化检索及 ID 排除使用 search，避免在两个入口复制不同格式的检索协议。query=null 使用近期记录列表，语义检索不按记录年龄排除旧事。无来源的旧手工事件保留明确的 fallback，不伪装成新 Fact 支撑。画像直接读 PostgreSQL，没有 Memoia 或 Luvel 画像缓存。
 
-数据库 schema 从 Alembic 维护；应用 import 不执行 DDL，启动前显式检查 revision、向量维度并初始化根项目。迁移前旧运行环境须停写并按[部署维护流程](../../../deploy/README.md#schema-维护与来源模型升级)取得配套备份和隔离恢复证据，不能手填 schema 指纹绕过普通发布门禁。数据库池每进程默认 8 + 4，模型等待不占连接；多 worker 的总预算须与 PostgreSQL max_connections 配套核对。
+Luvel 用固定 Fact 回执确认批次/删除，不等待 Event ID；派生失败不得重新导入。压缩、任务调度、Mem0 分支和删除补偿仍由 Luvel 负责。Inspector 保留原页面/可选 Playground，展示状态、原 flush 操作恢复与故事字段；同源写入保护和失败不得报成功不变。
 
-## Event time evidence (0.4)
+所有写请求只发送一次；HTTP5xx/超时/响应丢失为未知提交，先查回执。retryable=true 的 write_conflict/lease_lost 表示明确未提交，不授权 SDK 盲目重放。安全读可有限退避，幂等键由调用方持有。项目/key scope、到期/撤销逐请求校验，缺少凭据失败关闭，不能跨项目。
 
-`SourceMessage.occurred_at` is the original message recording instant. Optional `time_zone` supplies its original IANA zone. Extraction receives a server-derived local recording date only when that zone is known; processing time is never the anchor. `memory_facts.event_time` is separate JSONB: inclusive ISO date bounds, year/month/day/range/unknown precision, and verbatim expressions citing jointly supported original message IDs. A calendar month or year does not assert a day or duration. Unknown event time is null or an unknown range with retained evidence. Occurrence dates belong in event_time, not surviving fact text.
+## 迁移、发布与验证
 
-Source evidence and search expose event_time plus source message recording times/zones. context renders the same evidence and provenance, and counts it in the existing token budget. New imports and ordinary withdrawal rebuilds derive retrieval text from fact content plus supported event_time: ISO year/month/day at the recorded precision, or both endpoints with a range label; null/unknown time leaves the fact text alone. Each gist stores this projection in search_text and embeds it once. New events have no whole-event vector; event_tip retains the combined projection for display. Original facts and gist content retain their independent plain content; recording times and source IDs are not embedded as event dates.
+Alembic 0008 建立：维护任务、Fact revision/纠正关系、直接索引、派生多对多及版本约束。旧 Fact active=true，不从 included=false 猜失效；机械迁移已有同归属索引/关联，缺失主体/报告者保持 legacy。0009_blob_flush 前向迁移将旧任务进度/变更/失败转为 Blob 引用和可恢复 flush Operation，随后移除旧维护表；旧在途 owner 不延续，原身份及次数保留，重新读当前 Fact，不重新抽取原文。旧删除操作补固定 Blob，未知消息补无正文墓碑。0006 已清除的聊天不能恢复，不用模型猜补；历史备份/WAL 中正文需独立保留策略。
 
-Search and context share bounded lexical/vector rank fusion at fact granularity (each branch contributes 1 / (60 + rank)). Search groups the selected facts by event for association; context retains global fact order so unrelated facts cannot inherit an event's relevance. Temporary query embedding failure retains lexical candidates; input/configuration rejection remains an error. Stored events without gists use their existing event text/vector as a read fallback, without restoring an old API or rebuilding history. Neither endpoint parses query dates or adds a temporal score, and semantic search does not filter old events by recording age. Query negations, corrections, ordering and intervals remain natural-language meaning for the caller and evidence-aware response model. This supports everyday recall, not exact temporal filtering or exhaustive listing. Recent non-search listings keep their recording-time window. Unknown event dates remain valid candidates.
+应用 import 不做 DDL，启动检查 head/向量维度。数据库池默认每进程 8+4，多 Worker 必须核对总连接预算。同镜像运行独立 maintenance_worker，Compose/健康/发布/备份均覆盖 API 与 Worker；新 schema 不允许普通 prepare 或旧 API 镜像回退。迁移、提交、共享库和 Test 部署需另行确认，不操作 Online 或云配置。
 
-The shared document projection uses existing complete-text embedding limits and batches, without truncation, another model call, schema changes or a reindex job. Withdrawal removes unsupported time from both derived text and regenerated vectors; failure keeps old derived events hidden until the existing operation resumes. Existing indexes are not bulk rebuilt, and completed idempotent replays do not generate vectors again.
+验证分层报告：纯函数/MockTransport → 隔离真实 PostgreSQL/Redis（迁移、归属反例、事务、接管、新变更、原 flush 恢复、永久遗忘）→ 当前模型真实工具调用/固定语义样例 → Test API → Inspector UI。静态代码、MockTransport 和本地容器不等同真实模型或远端发布验收。
 
-Withdrawal clears event_time when its anchor no longer belongs to a surviving support group. A fact with independent untimed support may remain. Optional timezone enrichment preserves the existing message hash; conflicting known zones are rejected. Missing timezone is omitted from operation fingerprints for old request replay compatibility. Existing facts are not reinterpreted or backfilled from record timestamps. Migration 0007 is forward-only; SDK 0.7.0 adds the required context entries contract without another database migration.
-
-## 唯一协议与上下文读取
-
-FastAPI 只挂 `/api`，旧版本路径返回失败，不挂 alias。JSON 成功响应是业务对象，错误使用真实 HTTP 状态及受控 `detail`，不再叠加 errno envelope。唯一 SDK `@jianify/memoia` 由 `openapi.json` 生成类型和校验器；软件版本仍按 SemVer 发布。
-
-`POST /users/{uid}/search` 接收 query/limit；`POST /users/{uid}/context` 接收 query/max_token_size，返回有序完整事实 `entries` 及 `context = entries.join("\n\n")`。两者是 read scope，查询不进入 URL。context 按事实排名逐条计算正文与证据预算，跳过放不下的条目；没有证据的历史事件仍可读。Luvel 请求 1500-token 返回目标，再以转义及包装后的 2048-token 提供方预算逐条裁决，不能从拼接字符串猜边界。query=null 才使用按记录时间的近期列表，语义检索不按记录年龄排除旧事。画像独立由 GET profiles 读取。
-
-用户创建/列表/读取、手工画像、事件列表/删除、项目配置和用量复用既有 controller 与同一 lease/fence；只有永久遗忘保留既有短 SQL 事务例外。时间、来源、回执、墓碑及历史存储无需为接口重命名而迁移。
+source_quality --list 不加载业务配置/模型；执行显式从受保护 stdin 收模型 JSON，禁用 .env/config 自动发现、计费及数据库连接，只计算公开合成夹具。每次一次抽取，合法空结果不追加抽到通过；固定输出标记 human_review_required=true。M3 过去关系仅保留原文含义，不凭过去时猜分手；新增人物主体、助手推测、两次徒步原因/月份和明确结束关系样例。机械概念/支持组检查不是通用语义证明，模型失败原样保留。真实配置或凭据使用必须单独授权。

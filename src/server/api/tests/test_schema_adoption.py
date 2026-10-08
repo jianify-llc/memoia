@@ -75,6 +75,7 @@ def test_maintenance_quiet_check_uses_real_old_and_new_schema(legacy_schema, mon
         recovery.check_quiet(["docker", "compose"], config, "fixture-postgres")
 
     quiet()
+
     uid, batch = uuid4(), uuid4()
     with engine.begin() as connection:
         connection.execute(text("INSERT INTO projects(id,project_id,project_secret,status) VALUES(:id,'backup','fixture','active')"), {"id": uuid4()})
@@ -104,6 +105,19 @@ def test_maintenance_quiet_check_uses_real_old_and_new_schema(legacy_schema, mon
         assert connection.execute(text("SELECT status FROM memory_operations")).scalar_one() == "processing"
         connection.execute(text("DELETE FROM memory_operations"))
     quiet()
+
+    if target == "head":
+        flush_id = uuid4()
+        with engine.begin() as connection:
+            connection.execute(text("""INSERT INTO memory_operations(id,user_id,project_id,idempotency_key,
+              kind,request_hash,request,status,available_at) VALUES(:id,:uid,'backup','pending-flush',
+              'flush',repeat('a',64),'{"blob_ids":[]}','processing',now())"""), {"id": flush_id, "uid": uid})
+        quiet()
+        with engine.begin() as connection:
+            connection.execute(text("UPDATE memory_operations SET lease_owner=:owner,lease_until=now()+interval '60 seconds' WHERE id=:id"),
+              {"owner": uuid4(), "id": flush_id})
+        with pytest.raises(RuntimeError, match="Active derived-memory"):
+            quiet()
 
 
 @pytest.mark.parametrize("drift", ["missing_status", "mixed_layout"])

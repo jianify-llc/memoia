@@ -23,6 +23,10 @@ from .connectors import get_redis_client, PROJECT_ID
 LIST_INT_REGEX = re.compile(r"\[\s*(?:\d+(?:\s*,\s*\d+)*\s*)?\]")
 
 
+def json_size(value) -> int:
+    return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
+
+
 def event_str_repr(event: UserEventData) -> str:
     event_data = event.event_data
     if event_data.event_tip is None:
@@ -172,3 +176,5 @@ def is_valid_profile_config(profile_config: str | None) -> Promise[None]:
         return Promise.reject(CODE.BAD_REQUEST, f"Invalid profile config: {e}")
     except ValidationError as e:
         return Promise.reject(CODE.BAD_REQUEST, f"Invalid profile config: {e}")
+    except ValueError:
+        return Promise.reject(CODE.BAD_REQUEST, "Invalid project model configuration")

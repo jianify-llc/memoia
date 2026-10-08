@@ -17,6 +17,9 @@ from memoia_server.models.response import UserData
 from memoia_server.models.source import ImportSource, DeleteMessages, memory_blobs, memory_operations, memory_facts, user_memory_states
 from memoia_server.env import CONFIG
 from memoia_server.models.utils import Promise
+from memoia_server.controllers import maintenance
+from tests.maintenance_support import maintain, derive, status
+from tests.test_maintenance import ready
 
 
 def request(key="import-1", external="log-1", messages=None):
@@ -43,18 +46,12 @@ async def source_user(db_env):
 def models(monkeypatch):
     async def extract(body, **kwargs):
         return source.ExtractedSource([{"id": uuid4(), "content": m.content, "topic": "basic", "sub_topic": m.message_id,
-                 "support_groups": [[m.message_id]], "occurred_at": m.occurred_at} for m in body.messages if m.role == "user"], [])
-    async def reconcile(candidates, **kwargs):
-        return source.Reconciliation(
-            decisions=[source.FactDecision(fact_id=f["id"], include=True) for f in candidates],
-            profiles=[source.DerivedProfile(content=f["content"], topic=f["topic"], sub_topic=f["sub_topic"], fact_ids=[f["id"]]) for f in candidates],
-        )
+                 "support_groups": [[m.message_id]], "occurred_at": m.occurred_at} for m in body.messages if m.role == "user"])
     async def embeddings(_, texts, **kwargs):
         return Promise.resolve(np.ones((len(texts), CONFIG.embedding_dim)))
     monkeypatch.setattr(source, "extract_source", AsyncMock(side_effect=extract))
-    monkeypatch.setattr(source, "reconcile_facts", AsyncMock(side_effect=reconcile))
     monkeypatch.setattr(source, "get_embedding", AsyncMock(side_effect=embeddings))
-    monkeypatch.setattr(source, "_structured", AsyncMock(return_value=source.EventTagging(event_tags=[])))
+    monkeypatch.setattr("memoia_server.llms.embeddings.get_embedding", AsyncMock(side_effect=embeddings))
     return source.extract_source
 
 
@@ -67,7 +64,12 @@ async def test_completed_replay_returns_same_ids_and_effect_once(source_user, mo
     assert models.await_count == 1
     with Session() as session:
         assert session.scalar(select(func.count()).select_from(memory_blobs).where(memory_blobs.c.user_id == source_user)) == 1
-        assert session.scalar(select(func.count()).select_from(UserEvent).where(UserEvent.user_id == source_user)) == 1
+        assert session.scalar(select(func.count()).select_from(UserEvent).where(UserEvent.user_id == source_user)) == 0
+        assert session.scalar(select(func.count()).select_from(memory_facts).where(memory_facts.c.user_id == source_user)) == 2
+    assert first.result.memory_version > 0
+    assert maintenance.get_status(source_user, "__root__")["pending_blob_count"] == 1
+    assert await maintain(source_user)
+    assert await source.import_source(source_user, "__root__", body) == first
 
 
 @pytest.mark.asyncio
@@ -150,12 +152,10 @@ async def test_same_key_changed_body_is_conflict(source_user, models):
 
 
 @pytest.mark.asyncio
-async def test_profile_failure_rolls_back_source_events_and_completion(source_user, models, monkeypatch):
+async def test_fact_index_failure_rolls_back_facts_and_completion(source_user, models, monkeypatch):
     body = request()
-    original = source._replace_profiles
-    def fail(*args):
-        raise source.SourceError("confirmed_failure", "test", 503, True)
-    monkeypatch.setattr(source, "_replace_profiles", fail)
+    original = source.get_embedding
+    monkeypatch.setattr(source, "get_embedding", AsyncMock(return_value=Promise.reject(503, "test")))
     with pytest.raises(source.SourceError):
         await source.import_source(source_user, "__root__", body)
     receipt = source.get_operation(source_user, "__root__", key=body.idempotency_key)
@@ -165,7 +165,7 @@ async def test_profile_failure_rolls_back_source_events_and_completion(source_us
         assert source.get_blob(source_user, "__root__", receipt.blob_id).status == "failed"
         assert session.scalar(select(func.count()).select_from(memory_facts).where(memory_facts.c.user_id == source_user)) == 0
         assert session.scalar(select(func.count()).select_from(UserEvent).where(UserEvent.user_id == source_user)) == 0
-    monkeypatch.setattr(source, "_replace_profiles", original)
+    monkeypatch.setattr(source, "get_embedding", original)
     recovered = await source.retry_operation(source_user, "__root__", receipt.operation_id)
     assert recovered.status == "completed"
 
@@ -175,36 +175,45 @@ async def test_retract_joint_support_preserves_independent_support(source_user, 
     now = datetime.now(timezone.utc)
     async def joint(body, **kwargs):
         return source.ExtractedSource([{"id": uuid4(), "content": "Tokyo", "topic": "basic", "sub_topic": "city",
-                 "support_groups": [["1", "2"], ["3"]], "occurred_at": now}], [])
+                 "support_groups": [["1", "2"], ["3"]], "occurred_at": now}])
     monkeypatch.setattr(source, "extract_source", joint)
     body = request(messages=[{"message_id": mid, "role": "user", "content": "Tokyo", "occurred_at": now} for mid in ["1", "2", "3"]])
     inserted = await source.import_source(source_user, "__root__", body)
+    assert await maintain(source_user)
     await source.delete_messages(source_user, "__root__", inserted.source_id, DeleteMessages(idempotency_key="remove1", message_ids=["1"]))
     detail = source.get_source(source_user, "__root__", source_id=inserted.source_id)
     assert detail.evidence[0].support_groups == [["3"]]
+    assert await maintain(source_user)
     assert (await profile.get_user_profiles(source_user, "__root__")).data().profiles[0].content == "Tokyo"
     await source.delete_messages(source_user, "__root__", inserted.source_id, DeleteMessages(idempotency_key="remove3", message_ids=["3"]))
+    # Fact/valid evidence disappear first; old derived text is deliberately pending.
+    stale = (await profile.get_user_profiles(source_user, "__root__")).data().profiles
+    assert stale and not stale[0].attributes["fact_ids"]
+    assert await maintain(source_user)
     assert not (await profile.get_user_profiles(source_user, "__root__")).data().profiles
     assert all("Tokyo" not in p.content for h in source.get_history(source_user, "__root__") for p in h.profiles)
     assert not (await event.get_user_events(source_user, "__root__")).data().events
 
 
 @pytest.mark.asyncio
-async def test_failed_rebuild_is_hidden_and_recoverable(source_user, models, monkeypatch):
+async def test_failed_maintenance_retains_old_text_without_evidence_and_recovers_original_task(source_user, models):
     inserted = await source.import_source(source_user, "__root__", request())
-    original = source.reconcile_facts
-    monkeypatch.setattr(source, "reconcile_facts", AsyncMock(side_effect=source.SourceError("model_failure", "test", 503, True)))
-    with pytest.raises(source.SourceError):
-        await source.delete_messages(source_user, "__root__", inserted.source_id, DeleteMessages(idempotency_key="remove1", message_ids=["1"]))
-    assert not (await event.get_user_events(source_user, "__root__")).data().events
-    # Both facts belong to the same reconciliation topic; stale derived profiles
-    # remain hidden until the whole affected scope is successfully rebuilt.
-    assert not (await profile.get_user_profiles(source_user, "__root__")).data().profiles
+    assert await maintain(source_user)
+    deleted = await source.delete_messages(source_user, "__root__", inserted.source_id,
+        DeleteMessages(idempotency_key="remove1", message_ids=["1"]))
+    assert deleted.status == "completed"
+    async def fail(context):
+        raise source.SourceError("model_failure", "test", 503, True)
+    assert not await maintain(source_user, runner=fail)
+    stale = (await profile.get_user_profiles(source_user, "__root__")).data().profiles
+    assert any("Tokyo" in row.content and not row.attributes["fact_ids"] for row in stale)
     assert all("Tokyo" not in p.content for h in source.get_history(source_user, "__root__") for p in h.profiles)
-    receipt = source.get_operation(source_user, "__root__", key="remove1")
-    monkeypatch.setattr(source, "reconcile_facts", original)
-    resumed = await source.retry_operation(source_user, "__root__", receipt.operation_id)
-    assert resumed.status == "completed"
+    state = status(source_user, "__root__")
+    assert state["error"]["code"] == "model_failure"
+    assert await source.retry_operation(source_user, "__root__", deleted.operation_id) == deleted
+    maintenance.retry_flush(source_user, "__root__", state["operation_id"])
+    ready(source_user)
+    assert await maintain(source_user)
     assert [p.content for p in (await profile.get_user_profiles(source_user, "__root__")).data().profiles] == ["I enjoy chess"]
 
 
@@ -212,6 +221,7 @@ async def test_failed_rebuild_is_hidden_and_recoverable(source_user, models, mon
 @pytest.mark.parametrize("fail_first", [False, True])
 async def test_event_tags_rebuild_uses_only_configured_remaining_evidence(source_user, models, monkeypatch, fail_first):
     import json
+    from memoia_server.maintenance_agent import EventMutation, EventTag, LoopUsage
     with Session.begin() as session:
         project = session.query(Project).filter_by(project_id="__root__").one()
         previous_config = project.profile_config
@@ -226,44 +236,54 @@ async def test_event_tags_rebuild_uses_only_configured_remaining_evidence(source
     async def extract_with_tags(body, **kwargs):
         assert {item["name"] for item in kwargs["rules"]["event_tag_definitions"]} == {"city", "hobby"}
         extracted = await original_extract(body, **kwargs)
-        return source.ExtractedSource(extracted.facts, tags)
+        return extracted
     calls = []
-    async def regenerate(model, prompt, system, **kwargs):
-        assert model is source.EventTagging
-        data = json.loads(prompt)
-        assert {item["name"] for item in data["configuration"]["event_tag_definitions"]} == {"city", "hobby"}
-        assert [fact["content"] for fact in data["facts"]] == ["I enjoy chess"]
-        assert "Tokyo" not in prompt
-        calls.append(data)
-        if fail_first and len(calls) == 1:
+    async def regenerate(context):
+        await derive(kinds=("profile",))(context)
+        assert {item["name"] for item in context.event_tag_definitions} == {"city", "hobby"}
+        existing = (await context.read("events"))["items"]
+        facts = {f["id"]: f for f in (await context.read("facts"))["items"]}
+        for entry in existing:
+            facts.update({f["id"]: f for f in (await context.read("facts", ids=entry["fact_ids"]))["items"]})
+        calls.append(list(facts.values()))
+        if fail_first and len(calls) == 2:
             raise source.SourceError("tag_model_failed", "Tag generation failed", 503, True)
-        return source.EventTagging(event_tags=[source.SourceEventTag(tag="hobby", value="chess")])
+        if facts:
+            values = [EventTag(tag="city", value="Tokyo") if "Tokyo" in f["content"] else
+                      EventTag(tag="hobby", value="chess") for f in facts.values()]
+            await context.stage_event(EventMutation(action="upsert", id=existing[0]["id"] if existing else None,
+                content="\n".join(f["content"] for f in facts.values()), fact_ids=list(facts), event_tags=values))
+        else:
+            for entry in existing:
+                await context.stage_event(EventMutation(action="remove", id=entry["id"]))
+        return context.get_plan(LoopUsage())
     monkeypatch.setattr(source, "extract_source", extract_with_tags)
-    monkeypatch.setattr(source, "_structured", regenerate)
     try:
         imported = await source.import_source(source_user, "__root__", request())
+        assert await maintain(source_user, runner=regenerate)
         with Session() as session:
-            assert session.get(UserEvent, (imported.result.event_ids[0], "__root__")).event_data["event_tags"] == tags
+            eid = source.get_blob(source_user, "__root__", imported.blob_id).event_ids[0]
+            assert sorted(session.get(UserEvent, (eid, "__root__")).event_data["event_tags"], key=lambda tag: tag["tag"]) == tags
         withdrawal = DeleteMessages(idempotency_key="withdraw-city-tag", message_ids=["1"])
+        completed = await source.delete_messages(source_user, "__root__", imported.source_id, withdrawal)
         if fail_first:
-            with pytest.raises(source.SourceError, match="Tag generation failed"):
-                await source.delete_messages(source_user, "__root__", imported.source_id, withdrawal)
-            receipt = source.get_operation(source_user, "__root__", key=withdrawal.idempotency_key)
-            assert receipt.status == "failed" and receipt.error.retryable
-            assert source.get_blob(source_user, "__root__", imported.blob_id).status == "rebuilding"
-            assert not (await event.get_user_events(source_user, "__root__")).data().events
-            completed = await source.retry_operation(source_user, "__root__", receipt.operation_id)
-            assert completed.operation_id == receipt.operation_id
-        else:
-            completed = await source.delete_messages(source_user, "__root__", imported.source_id, withdrawal)
+            assert not await maintain(source_user, runner=regenerate)
+            assert source.get_operation(source_user, "__root__", key=withdrawal.idempotency_key) == completed
+            state = status(source_user, "__root__")
+            assert state["error"]["code"] == "tag_model_failed"
+            maintenance.retry_flush(source_user, "__root__", state["operation_id"])
+            ready(source_user)
+        assert await maintain(source_user, runner=regenerate)
         assert completed.status == "completed"
         with Session() as session:
-            rebuilt = session.get(UserEvent, (completed.result.event_ids[0], "__root__"))
+            rebuilt = session.get(UserEvent, (eid, "__root__"))
             assert rebuilt.event_data["event_tags"] == [{"tag": "hobby", "value": "chess"}]
             assert "Tokyo" not in json.dumps(rebuilt.event_data)
         await source.delete_messages(source_user, "__root__", imported.source_id,
                                       DeleteMessages(idempotency_key="withdraw-hobby-tag", message_ids=["2"]))
-        assert len(calls) == (2 if fail_first else 1)
+        assert [f["content"] for f in calls[-1]] == ["I enjoy chess"]
+        assert await maintain(source_user, runner=regenerate)
+        assert len(calls) == (4 if fail_first else 3)
         assert not (await event.get_user_events(source_user, "__root__")).data().events
     finally:
         with Session.begin() as session:
@@ -292,7 +312,8 @@ async def test_new_generation_fences_stale_model_result(source_user, models, mon
     assert new.status == "completed"
     with Session() as session:
         assert session.scalar(select(func.count()).select_from(memory_blobs).where(memory_blobs.c.user_id == source_user)) == 2
-        assert session.scalar(select(func.count()).select_from(UserEvent).where(UserEvent.user_id == source_user)) == 1
+        assert session.scalar(select(func.count()).select_from(UserEvent).where(UserEvent.user_id == source_user)) == 0
+        assert session.scalar(select(func.count()).select_from(memory_facts).where(memory_facts.c.user_id == source_user)) == 2
 
 
 @pytest.mark.asyncio
@@ -342,7 +363,9 @@ async def test_cancelled_model_keeps_processing_receipt_and_can_resume(source_us
 @pytest.mark.asyncio
 async def test_event_delete_keeps_source_and_profiles_and_never_resurrects(source_user, models):
     inserted = await source.import_source(source_user, "__root__", request())
-    eid = inserted.result.event_ids[0]
+    assert await maintain(source_user)
+    eid = next(row.id for row in (await event.get_user_events(source_user, "__root__")).data().events
+               if "Tokyo" in row.event_data.event_tip)
     async with UserLease(source_user, "__root__") as lease:
         with Session.begin() as session:
             source._fence_snapshot(session, source_user, "__root__", lease)
@@ -352,7 +375,8 @@ async def test_event_delete_keeps_source_and_profiles_and_never_resurrects(sourc
     retracted = await source.delete_messages(source_user, "__root__", inserted.source_id,
         DeleteMessages(idempotency_key="withdraw-one", message_ids=["1"]))
     assert retracted.result.event_ids == []
-    assert not (await event.get_user_events(source_user, "__root__")).data().events
+    assert await maintain(source_user)
+    assert all(row.id != eid for row in (await event.get_user_events(source_user, "__root__")).data().events)
     with Session() as session:
         assert session.scalar(select(func.count()).select_from(UserEventGist).where(UserEventGist.user_id == source_user)) == 0
 
@@ -360,7 +384,8 @@ async def test_event_delete_keeps_source_and_profiles_and_never_resurrects(sourc
 @pytest.mark.asyncio
 async def test_event_edit_replaces_vector_and_gists_atomically(source_user, models, monkeypatch):
     inserted = await source.import_source(source_user, "__root__", request())
-    eid = inserted.result.event_ids[0]
+    assert await maintain(source_user)
+    eid = source.get_blob(source_user, "__root__", inserted.blob_id).event_ids[0]
     vector = np.full(CONFIG.embedding_dim, .25)
     monkeypatch.setattr(event, "get_embedding", AsyncMock(return_value=Promise.resolve(np.array([vector, vector, vector]))))
     async with UserLease(source_user, "__root__") as lease:
@@ -379,7 +404,9 @@ async def test_event_edit_replaces_vector_and_gists_atomically(source_user, mode
 @pytest.mark.asyncio
 async def test_profile_edit_cannot_strip_provenance_then_escape_withdrawal(source_user, models):
     inserted = await source.import_source(source_user, "__root__", request())
-    pid = inserted.result.profile_ids[0]
+    assert await maintain(source_user)
+    pid = next(row.id for row in (await profile.get_user_profiles(source_user, "__root__")).data().profiles
+               if "Tokyo" in row.content)
     async with UserLease(source_user, "__root__") as lease:
         with Session.begin() as session:
             source._fence_snapshot(session, source_user, "__root__", lease)
@@ -390,6 +417,8 @@ async def test_profile_edit_cannot_strip_provenance_then_escape_withdrawal(sourc
         assert attributes["memoia_v2"] and attributes["fact_ids"]
     await source.delete_messages(source_user, "__root__", inserted.source_id,
         DeleteMessages(idempotency_key="withdraw-first", message_ids=["1"]))
+    assert any("Tokyo" in row.content for row in (await profile.get_user_profiles(source_user, "__root__")).data().profiles)
+    assert await maintain(source_user)
     assert all("Tokyo" not in row.content for row in (await profile.get_user_profiles(source_user, "__root__")).data().profiles)
 
 
@@ -412,29 +441,24 @@ event_tags: []
         seen.append(data)
         assert data["configuration"]["language"] == "zh"
         if model is source.Extraction:
-            assert set(data["configuration"]) == {"language", "profile_topics", "event_tag_definitions"}
-            return source.Extraction(facts=[source.ExtractedFact(content="Tokyo", topic="custom", sub_topic="city", support_groups=[["1"]], event_time=None)], event_tags=[])
-        assert data["configuration"]["strict_mode"] is True
-        fid = data["facts"][0]["fact_id"]
-        return source.Reconciliation(decisions=[source.FactDecision(fact_id=fid, include=True)],
-            profiles=[source.DerivedProfile(content="Tokyo", topic="custom", sub_topic="city", fact_ids=[fid])])
+            assert set(data["configuration"]) == {"language"}
+            return source.Extraction(facts=[source.ExtractedFact(content="Tokyo", subject="user", reporter="user",
+                certainty="asserted", corrects=[], support_groups=[["1"]], event_time=None)])
+        raise AssertionError("Fact import must not call a derived model")
     monkeypatch.setattr(source, "_structured", structured)
     monkeypatch.setattr(CONFIG, "enable_event_embedding", False)
     try:
         inserted = await source.import_source(source_user, "__root__", request())
-        assert inserted.status == "completed" and len(seen) == 2
-        with pytest.raises(source.SourceError, match="strict slots"):
-            source._validate_profile_slots(source.Reconciliation(decisions=[], profiles=[source.DerivedProfile(
-                content="Bad", topic="unconfigured", sub_topic="city", fact_ids=[uuid4()])]), seen[1]["configuration"])
+        assert inserted.status == "completed" and len(seen) == 1
+        assert await maintain(source_user)
+        rows = (await profile.get_user_profiles(source_user, "__root__")).data().profiles
+        assert rows and all(row.attributes["topic"] == "custom" for row in rows)
     finally:
         with Session.begin() as session:
             session.query(Project).filter_by(project_id="__root__").update({"profile_config": old})
 
 
-def test_missing_decision_and_invalid_support_are_errors():
-    fid = uuid4()
-    with pytest.raises(source.SourceError, match="Every fact"):
-        source.validate_reconciliation(source.Reconciliation(decisions=[], profiles=[]), [{"id": fid}])
+def test_joint_support_is_removed_as_a_whole():
     assert source.retained_groups([["a", "b"], ["c"]], ["a"]) == [["c"]]
 
 
@@ -444,23 +468,6 @@ def test_input_never_truncates_and_rejects_oversized(monkeypatch):
         source.validate_budget("x", "s", source_text="many distinct words that exceed the budget")
 
 
-def test_event_tag_values_must_match_project_definitions():
-    rules = {"event_tag_definitions": [{"name": "hobby", "description": "Personal hobby"}]}
-    assert source._validated_event_tags([source.SourceEventTag(tag="hobby", value="chess")], rules) == [
-        {"tag": "hobby", "value": "chess"}]
-    with pytest.raises(source.SourceError, match="configured definitions"):
-        source._validated_event_tags([source.SourceEventTag(tag="city", value="Tokyo")], rules)
-
-
-@pytest.mark.asyncio
-async def test_event_tag_rebuild_skips_model_without_evidence_or_definitions(monkeypatch):
-    structured = AsyncMock()
-    monkeypatch.setattr(source, "_structured", structured)
-    assert await source.rebuild_event_tags([], rules={"event_tag_definitions": [{"name": "hobby"}]},
-                                           project_id="__root__") == []
-    assert await source.rebuild_event_tags([{"content": "chess"}], rules={"event_tag_definitions": []},
-                                           project_id="__root__") == []
-    structured.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -483,13 +490,17 @@ async def test_external_identity_reuses_effect_and_never_resurrects(source_user,
 @pytest.mark.asyncio
 async def test_profile_history_is_atomic_diff_and_redacts_retracted_evidence(source_user, models):
     first = await source.import_source(source_user, "__root__", request())
+    assert source.get_history(source_user, "__root__") == []
+    assert await maintain(source_user)
     history = source.get_history(source_user, "__root__")
     assert len(history) == 1 and len(history[0].profiles) == 2 and len(history[0].added) == 2
     await source.delete_messages(source_user, "__root__", first.source_id,
                                   DeleteMessages(idempotency_key="forget", message_ids=["1"]))
     history = source.get_history(source_user, "__root__")
-    assert len(history) == 2
+    assert len(history) == 1
     assert all("Tokyo" not in p.content for h in history for field in (h.profiles, h.added, h.removed) for p in field)
+    assert await maintain(source_user)
+    assert len(source.get_history(source_user, "__root__")) == 2
     with Session() as session:
         accepted = session.execute(select(memory_operations.c.request).where(memory_operations.c.id == first.operation_id)).scalar_one()
         assert "messages" not in accepted
@@ -500,5 +511,5 @@ async def test_retract_completed_replay_does_not_recompute(source_user, models, 
     first = await source.import_source(source_user, "__root__", request())
     body = DeleteMessages(idempotency_key="forget", message_ids=["1"])
     done = await source.delete_messages(source_user, "__root__", first.source_id, body)
-    monkeypatch.setattr(source, "reconcile_facts", AsyncMock(side_effect=AssertionError("must not recompute")))
+    monkeypatch.setattr(source, "_fact_vectors", AsyncMock(side_effect=AssertionError("must not recompute")))
     assert await source.delete_messages(source_user, "__root__", first.source_id, body) == done

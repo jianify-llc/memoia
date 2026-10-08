@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Memoia API",
-    "version": "0.7.0"
+    "version": "0.9.0"
   },
   "paths": {
     "/api/users/{user_id}": {
@@ -405,6 +405,102 @@
             }
           }
         ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/{user_id}/maintenance": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Get Maintenance",
+        "operationId": "getMaintenance",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceStatus"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/users/{user_id}/flush": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Flush User",
+        "operationId": "flushUser",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FlushInput"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -1731,6 +1827,25 @@
             "type": "string",
             "format": "date-time",
             "title": "Created At"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "import",
+              "retract"
+            ],
+            "title": "Kind",
+            "default": "import"
+          },
+          "flush": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FlushProgress"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -1863,6 +1978,83 @@
       },
       "EventData": {
         "properties": {
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "keywords": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keywords"
+          },
+          "time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          },
+          "interpretation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interpretation"
+          },
           "source_id": {
             "anyOf": [
               {
@@ -2085,12 +2277,64 @@
             "title": "Content"
           },
           "topic": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Topic"
           },
           "sub_topic": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Sub Topic"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "reporter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reporter"
+          },
+          "certainty": {
+            "type": "string",
+            "enum": [
+              "asserted",
+              "reported",
+              "uncertain",
+              "legacy"
+            ],
+            "title": "Certainty",
+            "default": "legacy"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision",
+            "default": 1
           },
           "support_groups": {
             "items": {
@@ -2126,11 +2370,142 @@
           "fact_id",
           "blob_id",
           "content",
-          "topic",
-          "sub_topic",
           "support_groups"
         ],
         "title": "Evidence"
+      },
+      "FlushInput": {
+        "properties": {
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "pattern": "^[^/]+$",
+            "title": "Idempotency Key"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "idempotency_key"
+        ],
+        "title": "FlushInput"
+      },
+      "FlushProgress": {
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Operation Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed"
+            ],
+            "title": "Status"
+          },
+          "blob_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Blob Ids"
+          },
+          "attempts": {
+            "type": "integer",
+            "title": "Attempts"
+          },
+          "available_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Available At"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OperationError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retryable": {
+            "type": "boolean",
+            "title": "Retryable"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "operation_id",
+          "status",
+          "blob_ids",
+          "attempts",
+          "available_at",
+          "error",
+          "retryable"
+        ],
+        "title": "FlushProgress"
+      },
+      "FlushResult": {
+        "properties": {
+          "blob_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Blob Ids"
+          },
+          "profile_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Profile Ids"
+          },
+          "event_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Event Ids"
+          },
+          "memory_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Version"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "blob_ids",
+          "profile_ids",
+          "event_ids"
+        ],
+        "title": "FlushResult"
       },
       "ForgottenUser": {
         "properties": {
@@ -2250,13 +2625,38 @@
             "title": "Revision Id"
           },
           "operation_id": {
-            "type": "string",
-            "format": "uuid",
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Operation Id"
           },
           "source_id": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Source Id"
+          },
+          "maintenance_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maintenance Version"
           },
           "created_at": {
             "type": "string",
@@ -2505,6 +2905,28 @@
         ],
         "title": "LegacyToken"
       },
+      "MaintenanceStatus": {
+        "properties": {
+          "pending_blob_count": {
+            "type": "integer",
+            "title": "Pending Blob Count"
+          },
+          "flushes": {
+            "items": {
+              "$ref": "#/components/schemas/FlushProgress"
+            },
+            "type": "array",
+            "title": "Flushes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "pending_blob_count",
+          "flushes"
+        ],
+        "title": "MaintenanceStatus"
+      },
       "ManagedKey": {
         "properties": {
           "key_id": {
@@ -2602,6 +3024,17 @@
             "format": "uuid",
             "title": "Operation Id"
           },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "import",
+              "retract",
+              "legacy_import",
+              "flush"
+            ],
+            "title": "Kind",
+            "default": "import"
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -2612,7 +3045,14 @@
             "title": "Status"
           },
           "source_id": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Source Id"
           },
           "blob_id": {
@@ -2633,14 +3073,28 @@
                 "$ref": "#/components/schemas/SourceResult"
               },
               {
+                "$ref": "#/components/schemas/FlushResult"
+              },
+              {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Result"
           },
           "error": {
             "anyOf": [
               {
                 "$ref": "#/components/schemas/OperationError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "flush": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FlushProgress"
               },
               {
                 "type": "null"
@@ -2991,6 +3445,80 @@
             },
             "type": "array",
             "title": "Evidence"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "interpretation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interpretation"
+          },
+          "keywords": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keywords"
+          },
+          "time": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "fact_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Fact Ids"
           }
         },
         "additionalProperties": false,
@@ -3004,6 +3532,52 @@
           "occurred_at"
         ],
         "title": "SearchEvent"
+      },
+      "SearchFact": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "source_id": {
+            "type": "string",
+            "title": "Source Id"
+          },
+          "blob_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Blob Id"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Occurred At"
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/Evidence"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "content",
+          "source_id",
+          "blob_id",
+          "score",
+          "occurred_at",
+          "evidence"
+        ],
+        "title": "SearchFact"
       },
       "SearchInput": {
         "properties": {
@@ -3019,6 +3593,68 @@
             "minimum": 1.0,
             "title": "Limit",
             "default": 10
+          },
+          "max_token_size": {
+            "type": "integer",
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Max Token Size",
+            "default": 4000
+          },
+          "exclude_fact_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Exclude Fact Ids"
+          },
+          "exclude_event_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Exclude Event Ids"
+          },
+          "exclude_profile_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 500,
+            "title": "Exclude Profile Ids"
+          },
+          "exclude_profile_topics": {
+            "items": {
+              "type": "string",
+              "maxLength": 256,
+              "minLength": 1
+            },
+            "type": "array",
+            "maxItems": 50,
+            "title": "Exclude Profile Topics"
+          },
+          "include_events": {
+            "type": "boolean",
+            "title": "Include Events",
+            "default": true
+          },
+          "event_max_tokens": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 8000.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Max Tokens"
           }
         },
         "additionalProperties": false,
@@ -3028,6 +3664,70 @@
         ],
         "title": "SearchInput"
       },
+      "SearchProfile": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "content": {
+            "type": "string",
+            "title": "Content"
+          },
+          "topic": {
+            "type": "string",
+            "title": "Topic"
+          },
+          "sub_topic": {
+            "type": "string",
+            "title": "Sub Topic"
+          },
+          "fact_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Fact Ids"
+          },
+          "source_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Source Ids"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "content",
+          "topic",
+          "sub_topic",
+          "fact_ids",
+          "source_ids",
+          "score",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SearchProfile"
+      },
       "SearchResult": {
         "properties": {
           "events": {
@@ -3036,12 +3736,28 @@
             },
             "type": "array",
             "title": "Events"
+          },
+          "facts": {
+            "items": {
+              "$ref": "#/components/schemas/SearchFact"
+            },
+            "type": "array",
+            "title": "Facts"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/SearchProfile"
+            },
+            "type": "array",
+            "title": "Profiles"
           }
         },
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "events"
+          "events",
+          "facts",
+          "profiles"
         ],
         "title": "SearchResult"
       },
@@ -3238,6 +3954,25 @@
             },
             "type": "array",
             "title": "Profile Ids"
+          },
+          "memory_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memory Version"
+          },
+          "fact_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "title": "Fact Ids"
           }
         },
         "additionalProperties": false,

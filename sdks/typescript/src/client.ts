@@ -5,6 +5,9 @@ type JsonBody<T> = T extends { content: { "application/json": infer R } } ? R : 
 type ResponseBody<T> = T extends { responses: infer R } ? JsonBody<R[Extract<keyof R, 200 | 201>]> : never;
 type RequestBody<T> = T extends { requestBody: { content: { "application/json": infer R } } } ? R : never;
 export type Operation = ResponseBody<paths["/api/users/{user_id}/blobs"]["post"]>;
+export type Maintenance = ResponseBody<paths["/api/users/{user_id}/maintenance"]["get"]>;
+export type MaintenanceStatus = Maintenance;
+export type FlushInput = RequestBody<paths["/api/users/{user_id}/flush"]["post"]>;
 export type ForgottenUser = ResponseBody<paths["/api/users/{user_id}"]["delete"]>;
 export type Operations = ResponseBody<paths["/api/users/{user_id}/operations"]["get"]>;
 export type SourceQuery = NonNullable<paths["/api/users/{user_id}/sources/{source_id}"]["get"]["parameters"]["query"]>;
@@ -19,6 +22,8 @@ export type Sources = ResponseBody<paths["/api/users/{user_id}/sources"]["get"]>
 export type Source = ResponseBody<paths["/api/users/{user_id}/sources/{source_id}"]["get"]>;
 export type History = ResponseBody<paths["/api/users/{user_id}/history"]["get"]>;
 export type Search = ResponseBody<paths["/api/users/{user_id}/search"]["post"]>;
+export type SearchInput = RequestBody<paths["/api/users/{user_id}/search"]["post"]>;
+export type SearchOptions = RequestOptions & Partial<Omit<SearchInput, "query" | "limit">>;
 export type ContextInput = RequestBody<paths["/api/users/{user_id}/context"]["post"]>;
 export type Context = ResponseBody<paths["/api/users/{user_id}/context"]["post"]>;
 export type UserInput = RequestBody<paths["/api/users"]["post"]>;
@@ -51,9 +56,19 @@ const validators = generated as unknown as Record<string, Validator>;
 const operationValidator: Validator = (value) => {
   if (!validators.validateOperation(value)) return false;
   const operation = value as Operation;
-  if (operation.status === "completed") return operation.result !== null && operation.source_id !== null && operation.error === null;
+  if (operation.kind === "flush") {
+    if (operation.source_id !== null || operation.blob_id !== null || !operation.flush ||
+        operation.flush.operation_id !== operation.operation_id) return false;
+    if (operation.result && !("blob_ids" in operation.result)) return false;
+    const progress = operation.flush.status;
+    if (operation.status === "completed" && progress !== "completed") return false;
+    if (operation.status === "failed" && progress !== "failed") return false;
+    if (operation.status === "processing" && progress !== "pending" && progress !== "running") return false;
+  } else if (operation.source_id === null || (operation.result && "blob_ids" in operation.result)) return false;
+  if (operation.status === "completed") return operation.result !== null && operation.error === null;
   if (operation.status === "failed") return operation.result === null && operation.error !== null;
-  return operation.status === "processing" && operation.result === null && operation.error === null;
+  return operation.status === "processing" && operation.result === null &&
+    (operation.error === null || (operation.kind === "flush" && operation.error.retryable));
 };
 const operationsValidator: Validator = (value) => validators.validateOperations(value) && (value as Operations).operations.every(operationValidator);
 
@@ -124,7 +139,8 @@ export class MemoiaClient {
   }
 
   getOperation(userId: string, operationId: string, options?: RequestOptions): Promise<Operation> {
-    return this.request("GET", `${this.userPath(userId)}/operations/${segment(operationId)}`, operationValidator, options);
+    return this.request("GET", `${this.userPath(userId)}/operations/${segment(operationId)}`,
+      (value) => operationValidator(value) && (value as Operation).operation_id === operationId, options);
   }
 
   getOperationByKey(userId: string, key: string, options?: RequestOptions): Promise<Operation> {
@@ -133,7 +149,19 @@ export class MemoiaClient {
 
   /** Resume only the server's durable accepted request, never reconstruct it. */
   retryOperation(userId: string, operationId: string, options?: RequestOptions): Promise<Operation> {
-    return this.request("POST", `${this.userPath(userId)}/operations/${segment(operationId)}/retry`, operationValidator, options);
+    return this.request("POST", `${this.userPath(userId)}/operations/${segment(operationId)}/retry`,
+      (value) => operationValidator(value) && (value as Operation).operation_id === operationId, options);
+  }
+
+  getMaintenance(userId: string, options?: RequestOptions): Promise<Maintenance> {
+    return this.request("GET", `${this.userPath(userId)}/maintenance`, validators.validateMaintenance, options);
+  }
+
+  /** Seal completed, unassigned Blobs; recovery uses the original Operation. */
+  flushUser(userId: string, input: FlushInput, options?: RequestOptions): Promise<Operation> {
+    if (!validators.validateFlushInput(input)) throw new MemoiaError("INVALID_INPUT", null, false);
+    return this.request("POST", `${this.userPath(userId)}/flush`,
+      (value) => operationValidator(value) && (value as Operation).kind === "flush", options, input);
   }
 
   listOperations(userId: string, options?: RequestOptions & OperationsQuery): Promise<Operations> {
@@ -179,8 +207,10 @@ export class MemoiaClient {
     return this.request("GET", this.page(`${this.userPath(userId)}/history`, options, validators.validateHistoryQuery), validators.validateHistory, options);
   }
 
-  search(userId: string, query: string, limit = 10, options?: RequestOptions): Promise<Search> {
-    const input = { query, limit };
+  search(userId: string, query: string, limit = 10, options?: SearchOptions): Promise<Search> {
+    // Transport controls stay local; the remaining body is checked against the generated input contract.
+    const { deadline: _deadline, signal: _signal, ...parameters } = options ?? {};
+    const input = { ...parameters, query, limit };
     if (!validators.validateSearchInput(input)) throw new MemoiaError("INVALID_INPUT", null, false);
     // 查询是私密正文；只读 POST 沿用读取超时和重试分类，不进入 URL。
     return this.request("POST", `${this.userPath(userId)}/search`, validators.validateSearch, options, input, undefined, true);

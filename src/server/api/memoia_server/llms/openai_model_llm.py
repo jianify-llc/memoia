@@ -1,6 +1,6 @@
 # Modified for Memoia: relocated package and GPT-6 Luna request compatibility.
 from .utils import exclude_special_kwargs, get_openai_async_client_instance
-from ..env import LOG
+from ..env import CONFIG, LOG
 
 
 async def openai_complete(
@@ -18,7 +18,7 @@ async def openai_complete(
 
     if model == "gpt-6-luna":
         # 正式调用默认使用完整推理预算；启动探针可显式指定独立 completion 上限。
-        kwargs["reasoning_effort"] = "medium"
+        kwargs.setdefault("reasoning_effort", CONFIG.llm_reasoning_effort)
         kwargs.pop("max_tokens", None)
         kwargs.setdefault("max_completion_tokens", 32768)
         for name in ("temperature", "top_p", "top_logprobs", "logprobs"):

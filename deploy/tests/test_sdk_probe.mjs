@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { runProbe } from "../sdk-probe.mjs";
 
 // These deterministic adapters test the acceptance tool, not Memoia or a model.
-async function fixture(mode = "complete", version = "0.7.0") {
+async function fixture(mode = "complete", version = "0.9.0") {
   const directory = await mkdtemp(join(tmpdir(), "memoia-probe-"));
   const symbol = `memoia-probe-${randomUUID()}`;
   let sourceId = randomUUID();
@@ -18,8 +18,9 @@ async function fixture(mode = "complete", version = "0.7.0") {
   const extraId = randomUUID();
   const lateSourceId = randomUUID(), lateOperationId = randomUUID(), lateEventId = randomUUID(), lateProfileId = randomUUID();
   const counters = { imports: 0, retracts: 0, deletes: 0, keyReads: 0, calls: 0, completedReplays: 0,
-    forgets: 0, lateImports: 0, sourceReads: 0 };
+    forgets: 0, lateImports: 0, sourceReads: 0, maintenanceReads: 0 };
   let phase = 0, created = false, lastKey, userId, acceptedBody, completed = false;
+  let currentFlush, flushReads = 0;
   class MemoiaError extends Error {
     constructor(code, status, retryable, outcome = "rejected") {
       super("must never escape");
@@ -27,13 +28,13 @@ async function fixture(mode = "complete", version = "0.7.0") {
     }
   }
   const operation = (status = "completed") => ({ operation_id: operationId, status,
-    source_id: sourceId, blob_id: blobId, result: status === "completed" ? { event_ids: [eventId], profile_ids: [] } : null,
+    source_id: sourceId, blob_id: blobId, result: status === "completed" ? { event_ids: [], profile_ids: [], memory_version: Math.max(1, phase) } : null,
     error: null });
   const imported = operation();
   const profile = (id, content) => ({ id, content, topic: "basic_info", sub_topic: "name",
     source_ids: [mode === "replay-profile-association-changed" && counters.completedReplays ? extraId : sourceId],
     updated_at: new Date().toISOString() });
-  const history = () => ({ entries: [{ operation_id: operationId,
+  const history = () => ({ entries: [{ operation_id: currentFlush?.operation_id,
     profiles: phase === 1 ? [{ fact_ids: [nameId] }, { fact_ids: [foodId] }] : phase === 2 ?
       [{ fact_ids: [mode === "invalid-history" ? nameId : foodId] }] :
       mode === "final-history-leak" ? [{ fact_ids: [foodId] }] : [], added: [], removed: [] }] });
@@ -93,12 +94,41 @@ async function fixture(mode = "complete", version = "0.7.0") {
       return imported;
     }
     async getOperationByKey(uid, key) {
-      counters.keyReads++; assert.equal(uid, userId); assert.equal(key, lastKey);
+      counters.keyReads++; assert.equal(uid, userId);
+      if (key === currentFlush?.key) {
+        flushReads++;
+        if (mode === "maintenance-pending") return currentFlush;
+        currentFlush = { ...currentFlush, status: "completed", result: {
+          blob_ids: currentFlush.flush.blob_ids, profile_ids: [], event_ids: [] },
+          flush: { ...currentFlush.flush, status: "completed" } };
+        return currentFlush;
+      }
+      assert.equal(key, lastKey);
       if (mode === "never-completes") return operation("processing");
       completed = true;
       return imported;
     }
     async getOperation() { return imported; }
+    async flushUser(uid, input) {
+      assert.equal(uid, userId);
+      const pending = mode === "maintenance-pending" || (mode === "maintenance-lag" && flushReads === 0);
+      const failed = mode === "maintenance-failed" || (mode === "partial-maintenance-failed" && phase === 2);
+      const status = failed ? "failed" : pending ? "processing" : "completed";
+      const blob_ids = mode === "maintenance-false-completed" ? [] : [blobId];
+      const error = failed ? { code: "model_unavailable", retryable: true } : null;
+      const id = randomUUID();
+      currentFlush = { operation_id: id, key: input.idempotency_key, kind: "flush", source_id: null,
+        blob_id: null, status, result: status === "completed" ? { blob_ids, profile_ids: [], event_ids: [] } : null,
+        error, flush: { operation_id: id, status: failed ? "failed" : pending ? "pending" : "completed",
+          blob_ids, attempts: 1, error } };
+      return currentFlush;
+    }
+    async getMaintenance() {
+      counters.maintenanceReads++;
+      return { pending_blob_count: 0, flushes: mode === "maintenance-missing-request" ? [] :
+        [{ ...currentFlush.flush, status: "completed", error: mode === "maintenance-retrying-error" ?
+          { code: "model_unavailable", retryable: true } : null }] };
+    }
     async getBlob() { return blob(); }
     async getEvents() { return { events: [{ id: eventId }, ...(mode === "replay-events-grow" && counters.completedReplays ? [{ id: extraId }] : [])] }; }
     async getSource() {
@@ -113,7 +143,8 @@ async function fixture(mode = "complete", version = "0.7.0") {
         ...(mode === "replay-sources-grow" && counters.completedReplays ? [{ ...summary, source_id: extraId }] : [])] };
     }
     async getHistory() { return history(); }
-    async search() { return { events: phase === 3 && mode !== "final-search-leak" ? [] : [{ source_id: sourceId }] }; }
+    async search() { const rows = phase === 3 && mode !== "final-search-leak" ? [] : [{ source_id: sourceId }];
+      return { facts: rows, events: rows, profiles: [] }; }
     async deleteMessages(uid, sid, input) {
       assert.equal(uid, userId); assert.equal(sid, sourceId);
       counters.retracts++; phase++; lastKey = input.idempotency_key;
@@ -164,7 +195,7 @@ async function probe(mode, version, checkpoint) {
   const f = await fixture(mode, version);
   try {
     const result = await runProbe({ origin: "https://fixture.invalid", token: "protected-fixture-token",
-      deadline_ms: mode === "never-completes" ? 1000 : 5000 }, f.entry,
+      deadline_ms: ["never-completes", "maintenance-pending"].includes(mode) ? 1000 : 5000 }, f.entry,
     { transport: f.transport, pollIntervalMs: 0, ...(checkpoint ? { checkpoint } : {}) });
     assert.doesNotMatch(JSON.stringify(result), /protected-fixture-token|Renata|risotto|must never escape/);
     return { result, counters: { ...f.counters }, lateIds: f.lateIds };
@@ -200,6 +231,45 @@ test("fixed SDK completes original checks before permanent forget, repeat receip
   assert.equal(result.counts.profiles_before, result.counts.profiles_after_replay);
   assert.equal(result.counts.events_before_replay, result.counts.events_after_replay);
   assert.equal(counters.sourceReads, 4, "Replay verifies detail rather than treating SourceSummary as Source");
+});
+
+test("Fact completion seals and waits for its fixed flush before validating derived memory", async () => {
+  const { result, counters } = await probe("maintenance-lag");
+  assert.equal(result.success, true);
+  assert.equal(counters.maintenanceReads, 3);
+  assert.equal(result.checks.fact_search, true);
+  assert.equal(result.checks.flush, true);
+  assert.equal(result.checks.partial_maintenance, true);
+  assert.equal(result.checks.delete_maintenance, true);
+  assert.equal(result.counts.import_memory_version, 1);
+  assert.equal(result.counts.partial_memory_version, 2);
+  assert.equal(result.counts.delete_memory_version, 3);
+});
+
+for (const mode of ["maintenance-pending", "maintenance-failed", "maintenance-retrying-error",
+  "maintenance-false-completed", "maintenance-missing-request"]) {
+  test(`${mode} stops derived acceptance without replaying or explicitly recovering the Fact operation`, async () => {
+    const { result, counters } = await probe(mode);
+    assert.equal(result.success, false);
+    assert.equal(result.checks.first_import, true);
+    assert.equal(result.checks.flush, false);
+    assert.equal(result.checks.operation_replay, false);
+    assert.equal(result.outcome_unknown, false, "A known Fact commit is not an unknown provider write");
+    assert.equal(counters.imports, 1);
+    assert.equal(counters.retracts, 0);
+    assert.ok(result.ids.import_flush_key && result.ids.operation_ids.length >= 2);
+  });
+}
+
+test("partial deletion checks synchronous Fact removal but does not accept stale derived memory", async () => {
+  const { result, counters } = await probe("partial-maintenance-failed");
+  assert.equal(result.success, false);
+  assert.equal(result.checks.operation_replay, true);
+  assert.equal(result.checks.partial_maintenance, false);
+  assert.equal(result.checks.partial_retract, false);
+  assert.equal(result.maintenance.partial.status, "failed");
+  assert.equal(result.outcome_unknown, false);
+  assert.equal(counters.retracts, 1);
 });
 
 for (const mode of ["processing", "lost-ack"]) {
@@ -369,6 +439,9 @@ test("checkpoint precedes every mutation and persists cumulative receipts before
           "operation_replay.before": [1, 0, 0], "operation_replay.receipt": [2, 0, 0],
           "partial_retract.before": [2, 0, 0], "partial_retract.receipt": [2, 1, 0],
           "retract.before": [2, 1, 0], "retract.receipt": [2, 2, 0],
+          "import_flush.before": [1, 0, 0], "import_flush.receipt": [1, 0, 0],
+          "partial_flush.before": [2, 1, 0], "partial_flush.receipt": [2, 1, 0],
+          "delete_flush.before": [2, 2, 0], "delete_flush.receipt": [2, 2, 0],
           "forget_user.before": [2, 2, 0], "forget_user.receipt": [2, 2, 1],
           "forget_repeat.before": [2, 2, 1], "forget_repeat.receipt": [2, 2, 2],
           "late_import.before": [2, 2, 2], "late_import.rejected": [3, 2, 2], "cleanup.confirmed": [3, 2, 2] };
@@ -378,7 +451,7 @@ test("checkpoint precedes every mutation and persists cumulative receipts before
         records.push(record);
       } });
     assert.equal(result.success, true);
-    assert.equal(records.length, 15);
+    assert.equal(records.length, 21);
     const first = records.find((r) => r.stage === "first_import.before");
     assert.ok(first.ids.user_id && first.ids.import_key && first.ids.late_import_key && first.ids.late_input_source_id);
     assert.equal(first.outcome_unknown, true);
@@ -388,8 +461,9 @@ test("checkpoint precedes every mutation and persists cumulative receipts before
     assert.equal(imported.outcome_unknown, false);
     assert.ok(imported.ids.operation_ids.includes(result.ids.import_operation_id));
     assert.ok(imported.ids.source_ids.includes(result.ids.source_id));
-    assert.deepEqual(imported.ids.event_ids, result.ids.event_ids);
-    assert.deepEqual(replay.ids.operation_ids, imported.ids.operation_ids);
+    assert.deepEqual(imported.ids.event_ids, [], "Fact receipt does not pretend asynchronous Event ids already exist");
+    assert.deepEqual(replay.ids.event_ids, result.ids.event_ids, "Derived ids are checkpointed before the next mutation");
+    assert.deepEqual(replay.ids.operation_ids, [...imported.ids.operation_ids, result.ids.import_flush_operation_id]);
     const confirmed = records.find((r) => r.stage === "forget_user.receipt");
     const repeat = records.find((r) => r.stage === "forget_repeat.before");
     assert.equal(confirmed.ids.forget_user_id, result.ids.user_id);
@@ -492,7 +566,7 @@ test("CLI regular-file boundary survives process exit inside the first mutation"
   try {
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     await mkdir(join(directory, "dist"));
-    await writeFile(join(directory, "package.json"), JSON.stringify({ name: "@jianify/memoia", version: "0.7.0", type: "module" }));
+    await writeFile(join(directory, "package.json"), JSON.stringify({ name: "@jianify/memoia", version: "0.9.0", type: "module" }));
     await writeFile(join(directory, "dist/index.js"), `export class MemoiaError extends Error {}
       export class MemoiaClient {
         async getProfiles() { return { profiles: [] }; }

@@ -2,7 +2,7 @@
 import os
 from datetime import datetime, timezone
 from uuid import uuid4
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from fastapi.testclient import TestClient
 from memoia_server.models.source import SearchResult
@@ -23,6 +23,26 @@ def test_only_one_contract_is_mounted(client):
         assert client.post(prefix + "/users", json={}).status_code == 404
     schema = client.get("/openapi.json").json()
     assert not any(path.startswith(("/api/v1", "/api/v2")) for path in schema["paths"])
+
+
+def test_empty_flush_uses_original_operation_contract_and_write_scope(client):
+    uid = client.post("/api/users", json={}).json()["id"]
+    try:
+        payload = {"idempotency_key": "empty-flush"}
+        receipt = client.post(f"/api/users/{uid}/flush", json=payload)
+        assert receipt.status_code == 200
+        data = receipt.json()
+        assert data["kind"] == "flush" and data["status"] == "completed"
+        assert data["source_id"] is data["blob_id"] is None
+        assert data["result"]["blob_ids"] == []
+        assert client.post(f"/api/users/{uid}/flush", json=payload).json() == data
+        assert client.get(f"/api/users/{uid}/operations/by-key/empty-flush").json() == data
+        assert client.post(f"/api/users/{uid}/operations/{data['operation_id']}/retry").json() == data
+        assert client.post(f"/api/users/{uid}/flush", json={**payload, "source_id": "spoof"}).status_code == 422
+        assert client.post(f"/api/users/{uid}/maintenance/retry", json={"task_id": data["operation_id"]}).status_code == 404
+        assert client.post(f"/api/users/{uuid4()}/flush", json=payload).status_code == 404
+    finally:
+        client.delete(f"/api/users/{uid}")
 
 
 def test_user_and_manual_profile_management_use_one_contract(client):
@@ -47,11 +67,11 @@ def test_user_and_manual_profile_management_use_one_contract(client):
 
 def test_private_query_is_post_body_and_errors_never_echo_it(client, monkeypatch):
     secret = "PRIVATE_QUERY_MUST_NOT_LEAK"
-    search = AsyncMock(return_value=Promise.resolve(SearchResult(events=[])))
+    search = AsyncMock(return_value=Promise.resolve(SearchResult(events=[], facts=[], profiles=[])))
     monkeypatch.setattr(event, "hybrid_search_user_events", search)
     uid = str(uuid4())
     result = client.post(f"/api/users/{uid}/search", json={"query": secret})
-    assert result.json() == {"events": []}
+    assert result.json() == {"facts": [], "events": [], "profiles": []}
     assert secret not in str(result.request.url)
     assert search.await_args.args[2] == secret
     assert client.get(f"/api/users/{uid}/search", params={"query": secret}).status_code == 405
@@ -70,12 +90,13 @@ def test_read_only_posts_obey_read_scope(client, monkeypatch):
     token = client.post(f"/api/projects/{project}/keys", json={"name": "reader", "scopes": ["read"]}).json()["token"]
     reader = TestClient(__import__("api").app, headers={"Authorization": "Bearer " + token})
     try:
-        monkeypatch.setattr(event, "hybrid_search_user_events", AsyncMock(return_value=Promise.resolve(SearchResult(events=[]))))
+        monkeypatch.setattr(event, "hybrid_search_user_events", AsyncMock(return_value=Promise.resolve(SearchResult(events=[], facts=[], profiles=[]))))
         monkeypatch.setattr(event, "retrieve_user_facts", AsyncMock(return_value=Promise.resolve([])))
         uid = str(uuid4())
         assert reader.post(f"/api/users/{uid}/search", json={"query": "Kyoto"}).status_code == 200
         assert reader.post(f"/api/users/{uid}/context", json={"query": "Kyoto"}).json() == {"context": "", "entries": []}
         assert reader.post("/api/users", json={}).status_code == 403
+        assert reader.post(f"/api/users/{uid}/flush", json={"idempotency_key": "read-only"}).status_code == 403
         assert reader.patch("/api/project/config", json={"profile_config": ""}).status_code == 403
     finally:
         reader.close()
@@ -112,13 +133,21 @@ def test_context_counts_complete_fact_evidence_and_preserves_rank(client, monkey
 
 
 def test_context_recent_records_keep_evidence_and_query_none_avoids_embedding(client, monkeypatch):
-    from memoia_server.models.response import UserEventsData
+    from memoia_server.models.response import EventGistData
+    from memoia_server.temporal import render_gist
     search = AsyncMock()
-    recent = AsyncMock(return_value=Promise.resolve(UserEventsData(events=[{
-        "id": uuid4(), "event_data": {"event_tip": "Legacy undated event"},
-        "created_at": "2026-10-06T00:00:00Z", "updated_at": "2026-10-06T00:00:00Z"}])))
+    embedding = AsyncMock()
+    gist = EventGistData(content="Sakura fact", fact_id=uuid4(), blob_id=uuid4(), source_id="dialog",
+        source_messages=[{"message_id": "1", "recorded_at": "2026-10-06T00:00:00Z", "time_zone": "Asia/Shanghai"}])
+    recent = Mock(return_value=[gist])
     monkeypatch.setattr(event, "retrieve_user_facts", search)
-    monkeypatch.setattr(event, "get_user_events", recent)
-    response = client.post(f"/api/users/{uuid4()}/context", json={"query": None})
-    assert response.json() == {"context": "Legacy undated event", "entries": ["Legacy undated event"]}
+    monkeypatch.setattr(event, "recent_user_facts", recent)
+    monkeypatch.setattr(event, "get_embedding", embedding)
+    uid = str(uuid4())
+    response = client.post(f"/api/users/{uid}/context", json={"query": None})
+    rendered = render_gist(gist)
+    assert response.json() == {"context": rendered, "entries": [rendered]}
+    assert "recorded_at" in rendered and "Asia/Shanghai" in rendered
+    recent.assert_called_once_with(uid, "__root__")
     search.assert_not_called()
+    embedding.assert_not_called()

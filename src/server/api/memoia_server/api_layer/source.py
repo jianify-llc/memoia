@@ -7,6 +7,7 @@ from ..models.source import (
     ImportSource, DeleteMessages, Operation, Operations, Source, Sources, Profiles, Profile, Blob,
     SearchResult, SearchEvent, History, HistoryEntry,
     ForgottenUser,
+    MaintenanceStatus, FlushInput,
 )
 
 router = APIRouter(prefix="/api", tags=["sources"])
@@ -95,6 +96,29 @@ async def retry_operation(user_id: UUID, operation_id: UUID, request: Request, r
     return result
 
 
+@router.get("/users/{user_id}/maintenance", response_model=MaintenanceStatus, operation_id="getMaintenance")
+async def get_maintenance(user_id: UUID, request: Request):
+    from ..controllers.maintenance import get_status
+    from ..controllers.source import SourceError
+    try:
+        return get_status(user_id, project_id(request))
+    except SourceError as error:
+        translate(error)
+
+
+@router.post("/users/{user_id}/flush", response_model=Operation, operation_id="flushUser")
+async def flush_user(user_id: UUID, body: FlushInput, request: Request, response: Response):
+    from ..controllers.maintenance import flush
+    from ..controllers.source import SourceError
+    try:
+        result = flush(user_id, project_id(request), body.idempotency_key)
+        if result.status == "processing":
+            response.status_code = 202
+        return result
+    except SourceError as error:
+        translate(error)
+
+
 @router.get("/users/{user_id}/blobs/{blob_id}", response_model=Blob, operation_id="getBlob")
 async def get_blob(user_id: UUID, blob_id: UUID, request: Request):
     from ..controllers import source
@@ -144,9 +168,16 @@ async def get_profiles(user_id: UUID, request: Request):
 @router.post("/users/{user_id}/search", response_model=SearchResult, operation_id="search", tags=["events"])
 async def search(user_id: UUID, body: SearchInput, request: Request):
     from ..controllers.event import hybrid_search_user_events
-    result = await hybrid_search_user_events(str(user_id), project_id(request), body.query, body.limit)
+    result = await hybrid_search_user_events(str(user_id), project_id(request), body.query, body.limit,
+        max_token_size=body.max_token_size, exclude_fact_ids=body.exclude_fact_ids,
+        exclude_event_ids=body.exclude_event_ids, exclude_profile_ids=body.exclude_profile_ids,
+        exclude_profile_topics=body.exclude_profile_topics,
+        include_events=body.include_events, event_max_tokens=body.event_max_tokens)
     if not result.ok():
-        raise HTTPException(503, detail={"code": "search_unavailable", "message": "Search unavailable", "retryable": True})
+        status = result.code()
+        retryable = status in {429, 500, 502, 503, 504}
+        raise HTTPException(status, detail={"code": "search_unavailable" if retryable else "search_rejected",
+            "message": "Search unavailable" if retryable else "Search request rejected", "retryable": retryable})
     return result.data()
 
 

@@ -44,6 +44,8 @@ const targets = {
   validateSourcesQuery: ["get", `${route}/sources`, "query"],
   validateHistoryQuery: ["get", `${route}/history`, "query"],
   validateOperationsQuery: ["get", `${route}/operations`, "query"],
+  validateMaintenance: ["get", `${route}/maintenance`, "response"],
+  validateFlushInput: ["post", `${route}/flush`, "request"],
   validateProjects: ["get", "/api/projects", "response"],
   validateProject: ["post", "/api/projects", "response"],
   validateProjectCreate: ["post", "/api/projects", "request"],

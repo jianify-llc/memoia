@@ -138,7 +138,7 @@ Key configuration options in `config.yaml`:
 ### GPT-6 Luna compatibility
 
 The OpenAI Chat Completions adapter recognizes the exact model ID `gpt-6-luna`.
-It sends `reasoning_effort=medium` and defaults to `max_completion_tokens=32768`
+It defaults to `reasoning_effort=high` and `max_completion_tokens=32768`
 for business calls through the configured best/thinking model. An explicit native
 `max_completion_tokens` overrides that default for the current request only.
 Startup uses a separate 4096-token completion budget and asks for exactly `OK`;
@@ -146,6 +146,13 @@ empty, unexpected or incomplete probe results prevent startup. This shared reque
 boundary ignores historical `max_tokens` limits such as 16/1024; it removes `max_tokens`,
 `temperature`, `top_p`, `logprobs` and `top_logprobs`. Keeping the old tiny limit
 with reasoning enabled can truncate the completion before usable text is produced.
+
+Projects can independently override `llm_model` and `reasoning_effort` in their
+configuration YAML; omitted fields inherit service defaults `gpt-6-luna / high`.
+This applies to Fact extraction and both serial maintenance stages. The maintenance
+tool loop uses Responses with `store=false`, since Luna Chat Completions only supports
+tool calling at `none`; it never silently lowers a project's reasoning setting.
+The optional Inspector Playground has its own runtime model configuration.
 
 32768 is a generation **ceiling**, covering reasoning and visible output together,
 not a per-call reservation or guaranteed visible output length. Actual usage and

@@ -13,6 +13,18 @@ memoia_server.schema.check_schema() 校验 revision 和 embedding 维度、初�
   0005_user_tombstones  永久遗忘的项目／用户身份，仅保存 UUID 与遗忘时间。
   0006_source_blob_messages 外部 Source 分组、Blob 批次、无正文消息身份与证据归属约束。
   0007_event_time_evidence 可空事件时间证据 JSONB 与原消息 IANA 时区，不回填旧事件日期。
+  0008_serial_maintenance 用户串行合并任务、Fact 版本/纠正证据/直接检索、派生关联与条目版本。
+  0009_blob_flush        固定 Blob 变更、flush Operation 租约/恢复；转移历史维护记录后移除任务表。
+
+当前 0009 与 SDK 0.9 配套：completed 只表示 Fact 原子提交；画像与 Event 由同镜像独立
+Worker 运行一个用户级 AgentLoop，Profile/Event 与 flush 回执原子提交。0008 旧任务的
+完成区间、变更引用、原身份和失败次数保留为 flush；运行中的旧租约不延续，恢复读取当前
+有效 Fact，不恢复已清除原文。未封闭的新 Blob 留到下一次，未关联 Blob 的旧变更引用
+保留在 Operation 中。旧删除操作补固定 Blob 和必要的无正文消息标记。旧 Fact 的 included=false 不表示无效，机械迁移均保留 active=true；
+已有同归属 gist 向量/检索文本和 Event 关联机械迁移，缺失主体/报告者/确定性保持 legacy。
+不加载模型，不恢复已清除正文。更新 API、Worker、SDK 与消费者须协调；旧 schema 的
+API-only 配套备份只允许经过严格核对的首次 Worker-only Compose adoption，不能放宽其他
+网络、端口、连接身份或配置漂移。迁移/共享 Test 部署仍需另行授权。
 
 0006 不猜测旧 dialog 归属，旧批次保持 legacy:<UUID> 来源。完成输入原文被清理，事实和
 回执保留；未完成输入迁移后临时保留 7 天。Source/Blob 不再保存 payload。该清理不可逆，
@@ -25,9 +37,9 @@ memoia_server.schema.check_schema() 校验 revision 和 embedding 维度、初�
 核对基线并单独交付前向修复，不能重跑或 stamp 绕过。
 
 0005 是前向迁移，不改写既有记忆；墓碑仅外键关联 projects，不关联 users，用户数据
-级联删除不能解除遗忘。`DELETE /api/v2/users/{user_id}` 原子写墓碑并清理用户数据，重复
-执行保持成功；旧 v1 DELETE 不写墓碑，普通删除后按同 UUID 重建仍可用。明确永久遗忘后，
-v1 create 和 v2 import/retry 均拒绝复建。墓碑不能靠降级、恢复旧 API 或删除用户行清除。
+级联删除不能解除遗忘。当前唯一 `DELETE /api/users/{user_id}` 原子写墓碑并清理用户数据，
+重复执行保持成功；历史 v1 普通删除的数据语义不追溯改变，也不再提供旧 HTTP alias。
+明确永久遗忘后 create/import/retry 均拒绝复建。墓碑不能靠降级、恢复旧 API 或删除用户行清除。
 
 0001 不重建、清空或改写既有表。仅当 v1 表集合完整，字段/类型/非空/now() 默认值、
 主键、外键及关联 schema/级联行为和必需索引均符合冻结契约时接纳；部分表、漂移列、
@@ -53,7 +65,7 @@ v1 create 和 v2 import/retry 均拒绝复建。墓碑不能靠降级、恢复�
 
 连续升级保留整链事务；Alembic 的 on_version_apply 在每版结束时执行延迟约束检查，
 再恢复 deferred 模式，避免旧数据检查留下 pending trigger 阻挡下一版 DDL。任何版本或
-约束失败均整体回滚。验收必须覆盖有旧事实数据的 0005→head，不只分别运行 0006／0007。
+约束失败均整体回滚。验收必须覆盖有旧事实数据的 0005→head，不只分别运行 0006／0007／0008／0009。
 
 模型声明用于下一版本的 review/autogenerate 辅助，不把自动生成 diff 直接当安全迁移；
 手工检查表达式索引、冻结 baseline、约束及数据兼容性后再运行真实 PostgreSQL 测试。

@@ -21,8 +21,9 @@ from memoia_server.env import BufferStatus
 from memoia_server.models.blob import BlobType, BlobData
 from memoia_server.models.database import BufferZone, User, UserEvent
 from memoia_server.models.response import UserData
-from memoia_server.models.source import ImportSource, SourceMessage, memory_blobs, memory_operations, user_memory_states
+from memoia_server.models.source import ImportSource, SourceMessage, memory_blobs, memory_facts, memory_operations, user_memory_states
 from memoia_server.models.utils import Promise
+from tests.maintenance_support import maintain
 
 
 @pytest_asyncio.fixture
@@ -115,10 +116,18 @@ async def test_legacy_async_flush_hands_off_to_new_owner_and_commits_once(idle_b
     with Session() as session:
         assert session.scalar(select(BufferZone.status).where(BufferZone.id == bid)) is None
         assert session.scalar(select(func.count()).select_from(memory_blobs).where(memory_blobs.c.user_id == uid)) == 1
-        assert session.scalar(select(func.count()).select_from(UserEvent).where(UserEvent.user_id == uid)) == 1
+        assert session.scalar(select(func.count()).select_from(memory_facts).where(memory_facts.c.user_id == uid)) == 1
+        assert session.scalar(select(memory_operations.c.status).where(memory_operations.c.user_id == uid)) == "completed"
+        assert session.scalar(select(func.count()).select_from(UserEvent).where(UserEvent.user_id == uid)) == 0
     assert extracted and extracted[0] != owners[0]
     async with background.get_redis_client() as redis:
         assert await redis.get(background.get_user_lock_key(uid, "__root__", "memory")) is None
+    assert (await user.get_user_all_blobs(uid, "__root__", BlobType.chat)).data().ids == []
+    assert await maintain(uid)
+    with Session() as session:
+        assert session.scalar(select(func.count()).select_from(UserEvent).where(UserEvent.user_id == uid)) == 1
+        assert session.scalar(select(func.count()).select_from(memory_blobs).where(memory_blobs.c.user_id == uid)) == 1
+    assert len(extracted) == 1
 
 
 @pytest.mark.asyncio
@@ -188,9 +197,12 @@ async def test_background_and_source_share_real_owner_and_register_one_generatio
     original_extract = bounded_source_model.side_effect
     original_init = UserLease.__init__
     owners = []
+    lease_ttl = 1.0
 
     def short_real_lease(lease, user_id, project_id, ttl=30):
-        original_init(lease, user_id, project_id, ttl=0.3)
+        # Real Redis/SQL I/O needs scheduler margin; a 100 ms heartbeat deadline
+        # tests host jitter rather than renewal. Still wait beyond two full TTLs.
+        original_init(lease, user_id, project_id, ttl=lease_ttl)
 
     async def blocked_extract(body, **kwargs):
         if not entered.is_set():
@@ -202,12 +214,12 @@ async def test_background_and_source_share_real_owner_and_register_one_generatio
     bounded_source_model.side_effect = blocked_extract
     monkeypatch.setattr(UserLease, "__init__", short_real_lease)
     worker = asyncio.create_task(background.flush_buffer_by_ids_in_background(
-        uid, "__root__", BlobType.chat, [str(bid)], max_processing_time_s=2,
+        uid, "__root__", BlobType.chat, [str(bid)], max_processing_time_s=6,
     ))
     try:
-        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(entered.wait(), 3)
         # 真实核心的模型等待超过两个 TTL，只有 UserLease 自身的一份 heartbeat。
-        await asyncio.sleep(0.7)
+        await asyncio.sleep(lease_ttl * 2.2)
         assert not owners[0].lost.is_set() and not owners[0]._heartbeat.done()
         async with background.get_redis_client() as redis:
             assert await redis.get(owners[0].key) == owners[0].owner
@@ -222,7 +234,7 @@ async def test_background_and_source_share_real_owner_and_register_one_generatio
         with Session() as session:
             assert session.scalar(select(user_memory_states.c.generation).where(user_memory_states.c.user_id == uid)) == 1
         release.set()
-        await asyncio.wait_for(asyncio.shield(worker), 2)
+        await asyncio.wait_for(asyncio.shield(worker), 3)
         completed = await source.retry_operation(uid, "__root__", competitor.operation_id)
         assert completed.status == "completed"
         with Session() as session:

@@ -86,7 +86,7 @@ async def get_user_profiles(user_id: str, project_id: str) -> Promise[UserProfil
     from ..models.source import memory_facts
     with Session() as session:
         valid_facts = {str(fid) for fid in session.scalars(select(memory_facts.c.id).where(
-            memory_facts.c.user_id == user_id, memory_facts.c.project_id == project_id))}
+            memory_facts.c.user_id == user_id, memory_facts.c.project_id == project_id, memory_facts.c.active))}
         user_profiles = (
             session.query(UserProfile)
             .filter_by(user_id=user_id, project_id=project_id)
@@ -95,15 +95,16 @@ async def get_user_profiles(user_id: str, project_id: str) -> Promise[UserProfil
         )
         results = []
         for up in user_profiles:
-            if (up.attributes or {}).get("memoia_v2"):
-                support = set(up.attributes.get("fact_ids", []))
-                if not support or not support.issubset(valid_facts):
-                    continue
+            attributes = dict(up.attributes or {})
+            if attributes.get("memoia_v2"):
+                # Pending derived text remains visible by contract; invalid Fact
+                # references are not returned as evidence for that old text.
+                attributes["fact_ids"] = [fid for fid in attributes.get("fact_ids", []) if fid in valid_facts]
             results.append(
                 {
                     "id": up.id,
                     "content": up.content,
-                    "attributes": up.attributes,
+                    "attributes": attributes,
                     "created_at": up.created_at,
                     "updated_at": up.updated_at,
                 }
@@ -169,6 +170,7 @@ async def update_user_profiles(
                 )
                 continue
             db_profile.content = content
+            db_profile.revision += 1
             if attribute is not None:
                 # Client edits cannot strip the evidence needed by a later withdrawal.
                 db_profile.attributes = _profile_attributes(attribute, db_profile.attributes)
