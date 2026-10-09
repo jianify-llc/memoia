@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
+import pytest_asyncio
+import httpx
 from sqlalchemy import delete, insert, update
 
 from memoia_server.connectors import Session
@@ -19,8 +20,8 @@ from memoia_server.models.utils import Promise
 from memoia_server.utils import get_encoded_tokens
 
 
-@pytest.fixture
-def search_users(db_env, monkeypatch):
+@pytest_asyncio.fixture
+async def search_users(db_env, monkeypatch):
     monkeypatch.setattr(CONFIG, "enable_event_embedding", False)
     uid, other, pid = uuid4(), uuid4(), "bundle-" + uuid4().hex
     with Session.begin() as session:
@@ -28,11 +29,11 @@ def search_users(db_env, monkeypatch):
             project_secret=uuid4().hex))
         session.execute(User.__table__.insert(), [dict(id=who, project_id=project, additional_fields={})
             for who, project in [(uid, "__root__"), (other, "__root__"), (uid, pid)]])
-    client = TestClient(__import__("api").app, headers={"Authorization": "Bearer " + os.environ["ACCESS_TOKEN"]})
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=__import__("api").app), base_url="http://test", headers={"Authorization": "Bearer " + os.environ["ACCESS_TOKEN"]})
     try:
         yield uid, other, pid, client
     finally:
-        client.close()
+        (await client.aclose())
         with Session.begin() as session:
             session.execute(delete(User).where(User.id.in_([uid, other]), User.project_id == "__root__"))
             session.execute(delete(Project).where(Project.project_id == pid))
@@ -110,9 +111,10 @@ async def test_fact_first_budget_counts_the_entire_three_field_json_without_trun
     assert not tiny.ok() and tiny.code() == 400
 
 
-def test_too_small_budget_remains_a_controlled_api_input_error(search_users):
+@pytest.mark.asyncio
+async def test_too_small_budget_remains_a_controlled_api_input_error(search_users):
     uid, _, _, client = search_users
-    response = client.post(f"/api/users/{uid}/search", json={"query": "Sakura", "max_token_size": 1})
+    response = (await client.post(f"/api/users/{uid}/search", json={"query": "Sakura", "max_token_size": 1}))
     assert response.status_code == 400
 
 
@@ -166,15 +168,16 @@ async def test_strict_id_exclusion_survives_content_updates_and_does_not_break_s
     assert len(excluded.data().facts) == 2 and excluded.data().events == excluded.data().profiles == []
 
 
-def test_later_derived_memory_remains_reachable_after_fact_was_injected(search_users):
+@pytest.mark.asyncio
+async def test_later_derived_memory_remains_reachable_after_fact_was_injected(search_users):
     uid, _, _, client = search_users
     ids = seed_facts(uid, ["Sakura hotel visit"])
     path = f"/api/users/{uid}/search"
-    first = client.post(path, json={"query": "Sakura"})
+    first = (await client.post(path, json={"query": "Sakura"}))
     assert first.status_code == 200
     assert first.json()["events"] == first.json()["profiles"] == []
     eid, pid = seed_derived(uid, ids)
-    later = client.post(path, json={"query": "Sakura", "exclude_fact_ids": [str(ident) for ident in ids]})
+    later = (await client.post(path, json={"query": "Sakura", "exclude_fact_ids": [str(ident) for ident in ids]}))
     assert later.status_code == 200
     bundle = later.json()
     assert bundle["facts"] == []
@@ -296,7 +299,7 @@ async def test_event_delete_keeps_independent_fact_searchable(search_users):
     uid, _, _, client = search_users
     ids = seed_facts(uid, ["Sakura fact"])
     eid, profile = seed_derived(uid, ids)
-    assert client.delete(f"/api/users/{uid}/events/{eid}").status_code == 204
+    assert (await client.delete(f"/api/users/{uid}/events/{eid}")).status_code == 204
     bundle = (await event.hybrid_search_user_events(uid, "__root__", "Sakura")).data()
     assert [fact.id for fact in bundle.facts] == ids and bundle.events == []
     assert [item.id for item in bundle.profiles] == [profile]
@@ -387,7 +390,7 @@ async def test_profile_topic_exclusion_precedes_topk_and_does_not_remove_fact_or
             project_id="__root__", content="Earlier excluded profile", attributes={"topic": "basic_info",
             "sub_topic": "name", "fact_ids": [str(ids[0])]}) for index in range(60)])
     request = dict(query="Sakura", limit=1, exclude_profile_topics=["basic_info"])
-    response = client.post(f"/api/users/{uid}/search", json=request)
+    response = (await client.post(f"/api/users/{uid}/search", json=request))
     assert response.status_code == 200
     bundle = SearchResult.model_validate(response.json())
     assert [fact.id for fact in bundle.facts] == ids and [story.id for story in bundle.events] == [eid]

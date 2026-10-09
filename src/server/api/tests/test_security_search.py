@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
+import pytest_asyncio
+import httpx
 from sqlalchemy import delete, select, update
 
 from api import app
@@ -18,82 +19,86 @@ from memoia_server.controllers import event
 from memoia_server.env import CONFIG
 
 
-@pytest.fixture
-def managed_project(db_env):
+@pytest_asyncio.fixture
+async def managed_project(db_env):
     project = "scope-test-" + uuid4().hex
-    client = TestClient(app, headers={"Authorization": f"Bearer {os.environ['ACCESS_TOKEN']}"})
-    created = client.post("/api/projects", json={"project_id": project})
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", headers={"Authorization": f"Bearer {os.environ['ACCESS_TOKEN']}"})
+    created = (await client.post("/api/projects", json={"project_id": project}))
     assert created.status_code == 201, created.text
     try:
         yield project, client
     finally:
         with Session.begin() as session:
             session.execute(delete(Project.__table__).where(Project.project_id == project))
-        client.close()
+        (await client.aclose())
 
 
-def issue(project, client, scopes, **extra):
-    response = client.post(f"/api/projects/{project}/keys", json={"name": "integration test", "scopes": scopes, **extra})
+async def issue(project, client, scopes, **extra):
+    response = (await client.post(f"/api/projects/{project}/keys", json={"name": "integration test", "scopes": scopes, **extra}))
     assert response.status_code == 201, response.text
     return response.json()
 
 
-def test_scoped_key_read_write_and_admin_are_distinct(managed_project):
+@pytest.mark.asyncio
+async def test_scoped_key_read_write_and_admin_are_distinct(managed_project):
     project, root = managed_project
-    write_key = issue(project, root, ["read", "write"])
-    writer = TestClient(app, headers={"Authorization": "Bearer " + write_key["token"]})
-    created = writer.post("/api/users", json={})
+    write_key = await issue(project, root, ["read", "write"])
+    writer = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", headers={"Authorization": "Bearer " + write_key["token"]})
+    created = (await writer.post("/api/users", json={}))
     assert created.status_code == 201
     uid = created.json()["id"]
-    read_key = issue(project, root, ["read"])
-    reader = TestClient(app, headers={"Authorization": "Bearer " + read_key["token"]})
-    assert reader.get(f"/api/users/{uid}/profiles").status_code == 200
-    assert reader.delete(f"/api/users/{uid}").status_code == 403
-    assert writer.get(f"/api/projects/{project}/keys").status_code == 403
-    assert writer.patch("/api/project/config", json={"profile_config": "language: zh"}).status_code == 403
-    assert writer.post("/api/projects", json={"project_id": "forbidden"}).status_code == 403
+    read_key = await issue(project, root, ["read"])
+    reader = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", headers={"Authorization": "Bearer " + read_key["token"]})
+    assert (await reader.get(f"/api/users/{uid}/profiles")).status_code == 200
+    assert (await reader.delete(f"/api/users/{uid}")).status_code == 403
+    assert (await writer.get(f"/api/projects/{project}/keys")).status_code == 403
+    assert (await writer.patch("/api/project/config", json={"profile_config": "language: zh"})).status_code == 403
+    assert (await writer.post("/api/projects", json={"project_id": "forbidden"})).status_code == 403
     with Session() as session:
         stored = session.execute(select(project_api_keys.c.token_hash).where(project_api_keys.c.id == write_key["key_id"])).scalar_one()
         assert write_key["token"] not in stored
-    reader.close()
-    writer.close()
+    (await reader.aclose())
+    (await writer.aclose())
 
 
-def test_revocation_expiry_and_project_suspension_take_effect_next_request(managed_project):
+@pytest.mark.asyncio
+async def test_revocation_expiry_and_project_suspension_take_effect_next_request(managed_project):
     project, root = managed_project
-    key = issue(project, root, ["admin"])
+    key = await issue(project, root, ["admin"])
     headers = {"Authorization": "Bearer " + key["token"]}
-    assert root.get("/api/projects", headers=headers).status_code == 200
-    assert root.delete(f"/api/projects/{project}/keys/{key['key_id']}").status_code == 204
-    assert root.get("/api/projects", headers=headers).status_code == 401
-    expiring = issue(project, root, ["admin"], expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat())
+    assert (await root.get("/api/projects", headers=headers)).status_code == 200
+    assert (await root.delete(f"/api/projects/{project}/keys/{key['key_id']}")).status_code == 204
+    assert (await root.get("/api/projects", headers=headers)).status_code == 401
+    expiring = await issue(project, root, ["admin"], expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat())
     with Session.begin() as session:
         session.execute(update(project_api_keys).where(project_api_keys.c.id == expiring["key_id"])
                         .values(expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)))
-    assert root.get("/api/projects", headers={"Authorization": "Bearer " + expiring["token"]}).status_code == 401
-    active = issue(project, root, ["admin"])
-    assert root.patch(f"/api/projects/{project}", json={"status": "suspended"}).status_code == 200
-    assert root.get("/api/projects", headers={"Authorization": "Bearer " + active["token"]}).status_code == 401
+    assert (await root.get("/api/projects", headers={"Authorization": "Bearer " + expiring["token"]})).status_code == 401
+    active = await issue(project, root, ["admin"])
+    assert (await root.patch(f"/api/projects/{project}", json={"status": "suspended"})).status_code == 200
+    assert (await root.get("/api/projects", headers={"Authorization": "Bearer " + active["token"]})).status_code == 401
 
 
-def test_project_admin_cannot_enumerate_or_modify_other_project(managed_project):
+@pytest.mark.asyncio
+async def test_project_admin_cannot_enumerate_or_modify_other_project(managed_project):
     project, root = managed_project
-    key = issue(project, root, ["admin"])
+    key = await issue(project, root, ["admin"])
     headers = {"Authorization": "Bearer " + key["token"]}
-    listed = root.get("/api/projects", headers=headers).json()["projects"]
+    listed = (await root.get("/api/projects", headers=headers)).json()["projects"]
     assert [p["project_id"] for p in listed] == [project]
-    assert root.get("/api/projects/__root__/keys", headers=headers).status_code == 403
-    assert root.post("/api/projects/__root__/legacy-token/rotate", headers=headers).status_code == 403
+    assert (await root.get("/api/projects/__root__/keys", headers=headers)).status_code == 403
+    assert (await root.post("/api/projects/__root__/legacy-token/rotate", headers=headers)).status_code == 403
 
 
-def test_legacy_rotation_immediately_rejects_old_token(managed_project):
+@pytest.mark.asyncio
+async def test_legacy_rotation_immediately_rejects_old_token(managed_project):
     project, root = managed_project
-    old = root.post(f"/api/projects/{project}/legacy-token/rotate").json()["token"]
-    assert root.get("/api/projects", headers={"Authorization": "Bearer " + old}).status_code == 200
-    new = root.post(f"/api/projects/{project}/legacy-token/rotate").json()["token"]
+    old = (await root.post(f"/api/projects/{project}/legacy-token/rotate")).json()["token"]
+    assert (await root.get("/api/projects", headers={"Authorization": "Bearer " + old})).status_code == 200
+    new = (await root.post(f"/api/projects/{project}/legacy-token/rotate")).json()["token"]
     assert new != old
-    assert root.get("/api/projects", headers={"Authorization": "Bearer " + old}).status_code == 401
-    assert root.get("/api/projects", headers={"Authorization": "Bearer " + new}).status_code == 200
+    assert (await root.get("/api/projects", headers={"Authorization": "Bearer " + old})).status_code == 401
+    assert (await root.get("/api/projects", headers={"Authorization": "Bearer " + new})).status_code == 200
 
 
 def test_missing_root_credential_never_authorizes(monkeypatch):
@@ -108,11 +113,12 @@ def test_missing_root_credential_never_authorizes(monkeypatch):
         assert not middleware.is_valid_root("arbitrary")
 
 
-def test_rejected_input_is_not_echoed_in_validation_response(managed_project):
+@pytest.mark.asyncio
+async def test_rejected_input_is_not_echoed_in_validation_response(managed_project):
     _, client = managed_project
     secret_text = "private-body-not-for-error-output"
-    response = client.post(f"/api/users/{uuid4()}/blobs", json={"idempotency_key": "invalid",
-        "source_id": "invalid", "messages": [{"message_id": "1", "role": "wrong-role", "content": secret_text}]})
+    response = (await client.post(f"/api/users/{uuid4()}/blobs", json={"idempotency_key": "invalid",
+        "source_id": "invalid", "messages": [{"message_id": "1", "role": "wrong-role", "content": secret_text}]}))
     assert response.status_code == 422
     assert secret_text not in response.text
     assert all("input" not in item for item in response.json()["detail"])

@@ -54,9 +54,8 @@ class UserLease:
             return current
         try:
             async with asyncio.timeout(LEASE_IO_TIMEOUT_SECONDS):
-                async with get_redis_client() as client:
-                    if not await client.set(self.key, self.owner, nx=True, px=self.ttl_ms):
-                        raise LeaseUnavailable()
+                if not await get_redis_client().set(self.key, self.owner, nx=True, px=self.ttl_ms):
+                    raise LeaseUnavailable()
         except (RedisError, TimeoutError) as error:
             # Lost SET acknowledgements are unknown ownership, not permission to write.
             LOG.warning("User lease acquisition failed (%s)", type(error).__name__)
@@ -75,8 +74,7 @@ class UserLease:
             while True:
                 await asyncio.sleep(interval)
                 async with asyncio.timeout(min(interval, LEASE_IO_TIMEOUT_SECONDS)):
-                    async with get_redis_client() as client:
-                        result = await client.eval(CHECK_EXPIRE, 1, self.key, self.owner, self.ttl_ms)
+                    result = await get_redis_client().eval(CHECK_EXPIRE, 1, self.key, self.owner, self.ttl_ms)
                 if result != 1:
                     self.lost.set()
                     LOG.warning("User lease ownership lost")
@@ -95,8 +93,7 @@ class UserLease:
         CURRENT_LEASE.reset(self._token)
         try:
             async with asyncio.timeout(LEASE_IO_TIMEOUT_SECONDS):
-                async with get_redis_client() as client:
-                    await client.eval(CHECK_DELETE, 1, self.key, self.owner)
+                await get_redis_client().eval(CHECK_DELETE, 1, self.key, self.owner)
         except Exception as error:
             # TTL handles uncertain release; never delete a replacement owner blindly.
             LOG.warning("User lease release failed (%s)", type(error).__name__)

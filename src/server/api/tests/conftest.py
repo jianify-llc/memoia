@@ -3,7 +3,7 @@ import pytest
 import pytest_asyncio
 from api import app
 from memoia_server.env import CONFIG
-from fastapi.testclient import TestClient
+from memoia_server import connectors
 
 PREFIX = "/api"
 CONFIG.profile_strict_mode = False
@@ -15,25 +15,23 @@ CONFIG.event_tags = [
 CONFIG.enable_event_embedding = True
 CONFIG.persistent_chat_blobs = True
 CONFIG.llm_api_key = None
-# @pytest.fixture(scope="session")
-# def event_loop():
-#     try:
-#         loop = asyncio.get_running_loop()
-#     except RuntimeError:
-#         loop = asyncio.new_event_loop()
-#     yield loop
-#     loop.close()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def redis_runtime():
+    # Every test owns its event loop; never carry pooled sockets into the next one.
+    connectors.init_redis_client()
+    try:
+        yield
+    finally:
+        await connectors.close_connection()
 
 
 @pytest_asyncio.fixture(scope="function")
-async def db_env():
-    client = TestClient(app)
-    response = client.get(f"{PREFIX}/healthcheck")
-    d = response.json()
-    if response.status_code == 200 and d["status"] == "ok":
-        yield
-    else:
+async def db_env(redis_runtime):
+    if not connectors.db_health_check() or not await connectors.redis_health_check():
         pytest.fail("Database not available: integration tests must not silently skip")
+    yield
 
 
 @pytest.fixture

@@ -216,6 +216,8 @@ curl -X GET http://localhost:8019/api/users/{user_id}/profiles
 - User lease: `controllers/user_lease.py`
 - PostgreSQL Operations/Blobs own flush scheduling, receipts and recovery; legacy Buffer cleanup remains in `controllers/buffer.py`.
 - Each API/Worker process defaults to 32 Redis connections, 1-second connect and 2-second command timeouts; no implicit command replay. Lease acquisition/release has a 3-second deadline; renewal is bounded by one-third TTL or 3 seconds, whichever is smaller.
-- Usage updates use one transaction pipeline for input/output, day/month and TTL. Statistics failure is best-effort, never model replay; reads reject unavailable statistics rather than fabricate zero.
+- Each API/Worker owns one shared async Redis client and its pool, initialized at startup and closed at shutdown (including failed startup). `get_redis_client()` borrows it: do not use a per-call client context manager or close it. Tests and standalone scripts explicitly own the same lifecycle within one event loop.
+- API shutdown waits for the current input-erasure sweep, preserves cancellation even if that sweep fails, and releases connections in `finally`.
+- Usage updates use one non-transactional pipeline for input/output, day/month and TTL, reducing network round trips without atomicity. Partial writes and missing TTL after interrupted execution are possible; statistics are best-effort, never replayed. Reads reject unavailable statistics rather than fabricate zero.
 - Token counters include only actual provider usage. Missing usage is logged and counted by `llm_usage_unknown_total`, not estimated or billed. Existing project billing remains independent of user-memory fences; counters are not a financial ledger.
 - Profiles always read PostgreSQL. No Redis profile cache or invalidation layer.

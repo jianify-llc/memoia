@@ -8,7 +8,7 @@ import time
 from types import SimpleNamespace
 from uuid import uuid4
 
-from fastapi.testclient import TestClient
+import httpx
 from pydantic import ValidationError
 import pytest
 from sqlalchemy import create_engine, delete, event, func, select, text
@@ -83,32 +83,32 @@ async def test_forget_cascades_and_permanently_blocks_both_protocols(identity, b
     operation = await source.import_source(uid, "__root__", body)
     assert operation.status == "completed"
     monkeypatch.setenv("ACCESS_TOKEN", "permanent-delete-test-only")
-    client = TestClient(app, headers={"Authorization": "Bearer permanent-delete-test-only"})
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", headers={"Authorization": "Bearer permanent-delete-test-only"})
     try:
-        first = client.delete(f"/api/users/{uid}")
+        first = (await client.delete(f"/api/users/{uid}"))
         assert first.status_code == 200
         assert first.json() == {"user_id": str(uid), "forgotten": True}
         stamp = forgotten_row(uid)["forgotten_at"]
         assert_user_data_absent(uid)
-        assert client.delete(f"/api/users/{uid}").json() == first.json()
+        assert (await client.delete(f"/api/users/{uid}")).json() == first.json()
         assert forgotten_row(uid)["forgotten_at"] == stamp
-        assert client.delete(f"/api/users/{uid}").json()["forgotten"] is True
+        assert (await client.delete(f"/api/users/{uid}")).json()["forgotten"] is True
         assert forgotten_row(uid)["forgotten_at"] == stamp
-        legacy = client.post("/api/users", json={"id": str(uid)})
+        legacy = (await client.post("/api/users", json={"id": str(uid)}))
         assert legacy.status_code == 403
-        imported = client.post(f"/api/users/{uid}/blobs", json=body.model_dump(mode="json"))
+        imported = (await client.post(f"/api/users/{uid}/blobs", json=body.model_dump(mode="json")))
         assert imported.status_code == 410
         assert imported.json()["detail"]["code"] == "user_forgotten"
         assert imported.json()["detail"]["retryable"] is False
-        recovered = client.post(f"/api/users/{uid}/operations/{operation.operation_id}/retry")
+        recovered = (await client.post(f"/api/users/{uid}/operations/{operation.operation_id}/retry"))
         assert recovered.status_code == 410
-        assert client.get(f"/api/users/{uid}/sources").json() == {"sources": []}
-        assert client.get(f"/api/users/{uid}/profiles").json() == {"profiles": []}
-        assert client.get(f"/api/users/{uid}/history").json() == {"entries": []}
-        assert client.get(f"/api/users/{uid}/events").json()["events"] == []
+        assert (await client.get(f"/api/users/{uid}/sources")).json() == {"sources": []}
+        assert (await client.get(f"/api/users/{uid}/profiles")).json() == {"profiles": []}
+        assert (await client.get(f"/api/users/{uid}/history")).json() == {"entries": []}
+        assert (await client.get(f"/api/users/{uid}/events")).json()["events"] == []
         assert_user_data_absent(uid)
     finally:
-        client.close()
+        (await client.aclose())
 
 
 @pytest.mark.asyncio
@@ -132,20 +132,21 @@ async def test_v1_create_materializes_default_uuid_before_identity_guard(db_env)
         await user.delete_user(uid, "__root__")
 
 
-def test_forget_missing_identity_is_repeatable_but_wrong_token_is_not(identity, monkeypatch):
+@pytest.mark.asyncio
+async def test_forget_missing_identity_is_repeatable_but_wrong_token_is_not(identity, monkeypatch):
     monkeypatch.setenv("ACCESS_TOKEN", "permanent-delete-test-only")
-    client = TestClient(app)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
     try:
-        invalid = client.delete(f"/api/users/{identity}", headers={"Authorization": "Bearer invalid"})
+        invalid = (await client.delete(f"/api/users/{identity}", headers={"Authorization": "Bearer invalid"}))
         assert invalid.status_code == 401
         assert forgotten_row(identity) is None
         for _ in range(2):
-            response = client.delete(f"/api/users/{identity}", headers={"Authorization": "Bearer permanent-delete-test-only"})
+            response = (await client.delete(f"/api/users/{identity}", headers={"Authorization": "Bearer permanent-delete-test-only"}))
             assert response.status_code == 200
             assert response.json() == {"user_id": str(identity), "forgotten": True}
         assert_user_data_absent(identity)
     finally:
-        client.close()
+        (await client.aclose())
 
 
 @pytest.mark.asyncio

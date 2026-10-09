@@ -55,6 +55,8 @@ Usage 的 `usage_complete=false` 表示已记录的模型调用存在未知用�
 
 Redis 只用于用户写入租约与轻量统计，Blob/Operation/flush 排队由 PostgreSQL 负责。API 和 Worker 各自默认最多 32 个连接、连接超时 1 秒、命令超时 2 秒（环境变量见 `.env.example`）；不自动重放 Redis 命令。统计故障不能触发模型重试，Usage 故障明确不可用，缺失供应商用量单独标为未知；计数不是财务账本。
 
+每个应用进程在启动时创建一个共享 redis-py 异步客户端，由它拥有连接池，退出或启动失败时统一关闭；请求只借用，不关闭。统计使用非事务 pipeline 合并网络往返，不使用 MULTI/EXEC；执行中断可能造成部分计数和未设置 TTL，不承诺全组原子更新或故障时的严格到期。
+
 Compose 明确使用 `noeviction`，保留 AOF 和配套恢复；不批量清理历史 Redis key。内存上限必须按实际峰值及余量单独确定，本轮未臆测容量。Redis 启动命令变化影响基础设施指纹，不能通过普通镜像发布偷换服务器配置；需另行授权维护与验收。本地模板不代表 Test 已应用。
 
 ## GitHub Organization 与镜像归属

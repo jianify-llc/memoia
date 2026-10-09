@@ -20,6 +20,9 @@ QUICK_TESTS = (
     "test_llm_logging.py", "test_embedding_validation.py", "test_source_quality.py",
     "test_maintenance_agent.py", "test_maintenance_worker.py", "test_project_model_config.py",
     *["test_redis_boundaries.py::" + name for name in (
+        "test_shared_client_lifecycle_and_explicit_initialization",
+        "test_api_startup_failure_or_cancellation_closes_shared_client",
+        "test_api_shutdown_waits_for_sweep_and_closes_even_if_it_fails",
         "test_pool_bounds_override_url_options_and_disable_replay",
         "test_removed_provider_fails_in_yaml_and_environment",
         "test_acquisition_failure_never_installs_write_authority",
@@ -29,6 +32,7 @@ QUICK_TESTS = (
         "test_statistics_failure_is_not_reported_as_zero",
         "test_statistics_failure_does_not_skip_existing_billing",
         "test_ambiguous_pipeline_write_is_not_replayed",
+        "test_partial_statistics_pipeline_failure_does_not_replay_successful_counter",
     )],
     *["test_temporal_evidence.py::" + name for name in (
         "test_calendar_precision_and_unknown_are_not_invented_dates",

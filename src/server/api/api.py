@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from memoia_server.connectors import (
     close_connection,
-    init_redis_pool,
+    init_redis_client,
 )
 from memoia_server.api_layer import middleware
 from memoia_server.env import LOG
@@ -26,10 +26,6 @@ async def lifespan(app: FastAPI):
     from memoia_server.controllers.source import purge_expired_inputs
     from memoia_server.schema import check_schema
     check_schema()
-    init_redis_pool()
-    await check_embedding_sanity()
-    await llm_sanity_check()
-    LOG.info(f"Start Memoia Server {memoia_server.__version__} 🖼️")
     async def erase_expired():
         while True:
             try:
@@ -39,21 +35,32 @@ async def lifespan(app: FastAPI):
                 except asyncio.CancelledError:
                     # Cancelling a thread await does not stop its SQL transaction.
                     # Finish this sweep before closing shared connections.
-                    await sweep
+                    try:
+                        await sweep
+                    except Exception:
+                        LOG.error("Temporary input erasure failed during shutdown")
                     raise
             except Exception:
                 LOG.error("Temporary input erasure failed; inspect database connectivity")
             await asyncio.sleep(60)
-    eraser = asyncio.create_task(erase_expired())
+    init_redis_client()
+    eraser = None
     try:
+        await check_embedding_sanity()
+        await llm_sanity_check()
+        LOG.info(f"Start Memoia Server {memoia_server.__version__} 🖼️")
+        eraser = asyncio.create_task(erase_expired())
         yield
     finally:
-        eraser.cancel()
         try:
-            await eraser
-        except asyncio.CancelledError:
-            pass
-        await close_connection()
+            if eraser is not None:
+                eraser.cancel()
+                try:
+                    await eraser
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            await close_connection()
 
 
 app = FastAPI(

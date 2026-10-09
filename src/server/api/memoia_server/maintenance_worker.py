@@ -33,7 +33,7 @@ def healthy(path=HEARTBEAT_PATH):
 
 
 async def serve(*, concurrency=None, stop=None):
-    from .connectors import close_connection, init_redis_pool
+    from .connectors import close_connection, init_redis_client
     from .controllers.maintenance import claim_next, execute_claim, seal_due, reap_expired
     from .env import LOG
     from .schema import check_schema
@@ -48,7 +48,7 @@ async def serve(*, concurrency=None, stop=None):
         except (NotImplementedError, RuntimeError):
             pass
     check_schema()
-    init_redis_pool()
+    init_redis_client()
     active = set()
     try:
         while not stop.is_set():

@@ -305,8 +305,7 @@ async def test_new_generation_fences_stale_model_result(source_user, models, mon
     old = asyncio.create_task(source.import_source(source_user, "__root__", request()))
     await entered.wait()
     key = UserLease(source_user, "__root__").key
-    async with get_redis_client() as redis:
-        await redis.delete(key)
+    await get_redis_client().delete(key)
     monkeypatch.setattr(source, "extract_source", original)
     new = await source.import_source(source_user, "__root__", request("new", "new-source"))
     release.set()
@@ -333,8 +332,7 @@ async def test_user_lease_renews_over_multiple_ttls(source_user):
                 CURRENT_LEASE.reset(token)
         await independent()
         lease.assert_owned()
-    async with get_redis_client() as redis:
-        assert await redis.get(lease.key) is None
+    assert await get_redis_client().get(lease.key) is None
 
 
 @pytest.mark.asyncio
@@ -356,8 +354,7 @@ async def test_cancelled_model_keeps_processing_receipt_and_can_resume(source_us
     with Session() as session:
         assert session.scalar(select(func.count()).select_from(memory_blobs).where(memory_blobs.c.user_id == source_user)) == 1
         assert session.scalar(select(func.count()).select_from(memory_facts).where(memory_facts.c.user_id == source_user)) == 0
-    async with get_redis_client() as redis:
-        assert await redis.get(UserLease(source_user, "__root__").key) is None
+    assert await get_redis_client().get(UserLease(source_user, "__root__").key) is None
     monkeypatch.setattr(source, "extract_source", original)
     resumed = await source.retry_operation(source_user, "__root__", receipt.operation_id)
     assert resumed.status == "completed" and resumed.operation_id == receipt.operation_id

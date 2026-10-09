@@ -4,102 +4,108 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from unittest.mock import AsyncMock, Mock, patch
 import pytest
-from fastapi.testclient import TestClient
+import pytest_asyncio
+import httpx
 from memoia_server.models.source import SearchResult
 from memoia_server.models.utils import Promise
 from memoia_server.controllers import event
 
-@pytest.fixture
-def client(db_env):
-    client = TestClient(__import__("api").app, headers={"Authorization": "Bearer " + os.environ["ACCESS_TOKEN"]})
+@pytest_asyncio.fixture
+async def client(db_env):
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=__import__("api").app), base_url="http://test", headers={"Authorization": "Bearer " + os.environ["ACCESS_TOKEN"]})
     yield client
-    client.close()
+    (await client.aclose())
 
 
-def test_only_one_contract_is_mounted(client):
-    assert client.get("/api/healthcheck").json() == {"status": "ok"}
+@pytest.mark.asyncio
+async def test_only_one_contract_is_mounted(client):
+    assert (await client.get("/api/healthcheck")).json() == {"status": "ok"}
     for prefix in ("/api/v1", "/api/v2"):
-        assert client.get(prefix + "/healthcheck").status_code == 404
-        assert client.post(prefix + "/users", json={}).status_code == 404
-    schema = client.get("/openapi.json").json()
+        assert (await client.get(prefix + "/healthcheck")).status_code == 404
+        assert (await client.post(prefix + "/users", json={})).status_code == 404
+    schema = (await client.get("/openapi.json")).json()
     assert not any(path.startswith(("/api/v1", "/api/v2")) for path in schema["paths"])
 
 
-def test_empty_flush_uses_original_operation_contract_and_write_scope(client):
-    uid = client.post("/api/users", json={}).json()["id"]
+@pytest.mark.asyncio
+async def test_empty_flush_uses_original_operation_contract_and_write_scope(client):
+    uid = (await client.post("/api/users", json={})).json()["id"]
     try:
         payload = {"idempotency_key": "empty-flush"}
-        receipt = client.post(f"/api/users/{uid}/flush", json=payload)
+        receipt = (await client.post(f"/api/users/{uid}/flush", json=payload))
         assert receipt.status_code == 200
         data = receipt.json()
         assert data["kind"] == "flush" and data["status"] == "completed"
         assert data["source_id"] is data["blob_id"] is None
         assert data["result"]["blob_ids"] == []
-        assert client.post(f"/api/users/{uid}/flush", json=payload).json() == data
-        assert client.get(f"/api/users/{uid}/operations/by-key/empty-flush").json() == data
-        assert client.post(f"/api/users/{uid}/operations/{data['operation_id']}/retry").json() == data
-        assert client.post(f"/api/users/{uid}/flush", json={**payload, "source_id": "spoof"}).status_code == 422
-        assert client.post(f"/api/users/{uid}/maintenance/retry", json={"task_id": data["operation_id"]}).status_code == 404
-        assert client.post(f"/api/users/{uuid4()}/flush", json=payload).status_code == 404
+        assert (await client.post(f"/api/users/{uid}/flush", json=payload)).json() == data
+        assert (await client.get(f"/api/users/{uid}/operations/by-key/empty-flush")).json() == data
+        assert (await client.post(f"/api/users/{uid}/operations/{data['operation_id']}/retry")).json() == data
+        assert (await client.post(f"/api/users/{uid}/flush", json={**payload, "source_id": "spoof"})).status_code == 422
+        assert (await client.post(f"/api/users/{uid}/maintenance/retry", json={"task_id": data["operation_id"]})).status_code == 404
+        assert (await client.post(f"/api/users/{uuid4()}/flush", json=payload)).status_code == 404
     finally:
-        client.delete(f"/api/users/{uid}")
+        (await client.delete(f"/api/users/{uid}"))
 
 
-def test_user_and_manual_profile_management_use_one_contract(client):
-    uid = client.post("/api/users", json={"data": {"label": "fixture"}}).json()["id"]
+@pytest.mark.asyncio
+async def test_user_and_manual_profile_management_use_one_contract(client):
+    uid = (await client.post("/api/users", json={"data": {"label": "fixture"}})).json()["id"]
     try:
-        assert client.get(f"/api/users/{uid}").json()["data"] == {"label": "fixture"}
-        assert client.get("/api/users", params={"search": uid}).json()["count"] == 1
+        assert (await client.get(f"/api/users/{uid}")).json()["data"] == {"label": "fixture"}
+        assert (await client.get("/api/users", params={"search": uid})).json()["count"] == 1
         body = {"content": "Sakura Hotel", "topic": "travel", "sub_topic": "hotel"}
-        result = client.post(f"/api/users/{uid}/profiles", json=body)
+        result = (await client.post(f"/api/users/{uid}/profiles", json=body))
         assert result.status_code == 201
         pid = result.json()["id"]
-        assert client.get(f"/api/users/{uid}/profiles").json()["profiles"][0]["content"] == body["content"]
-        assert client.patch(f"/api/users/{uid}/profiles/{pid}", json={**body, "content": "Corrected hotel"}).status_code == 204
-        assert client.get(f"/api/users/{uid}/profiles").json()["profiles"][0]["content"] == "Corrected hotel"
-        assert client.delete(f"/api/users/{uuid4()}/profiles/{pid}").status_code == 404
-        assert client.delete(f"/api/users/{uid}/profiles/{pid}").status_code == 204
+        assert (await client.get(f"/api/users/{uid}/profiles")).json()["profiles"][0]["content"] == body["content"]
+        assert (await client.patch(f"/api/users/{uid}/profiles/{pid}", json={**body, "content": "Corrected hotel"})).status_code == 204
+        assert (await client.get(f"/api/users/{uid}/profiles")).json()["profiles"][0]["content"] == "Corrected hotel"
+        assert (await client.delete(f"/api/users/{uuid4()}/profiles/{pid}")).status_code == 404
+        assert (await client.delete(f"/api/users/{uid}/profiles/{pid}")).status_code == 204
     finally:
-        result = client.delete(f"/api/users/{uid}")
+        result = (await client.delete(f"/api/users/{uid}"))
         assert result.json() == {"user_id": uid, "forgotten": True}
-        assert client.post("/api/users", json={"id": uid}).status_code == 403
+        assert (await client.post("/api/users", json={"id": uid})).status_code == 403
 
 
-def test_private_query_is_post_body_and_errors_never_echo_it(client, monkeypatch):
+@pytest.mark.asyncio
+async def test_private_query_is_post_body_and_errors_never_echo_it(client, monkeypatch):
     secret = "PRIVATE_QUERY_MUST_NOT_LEAK"
     search = AsyncMock(return_value=Promise.resolve(SearchResult(events=[], facts=[], profiles=[])))
     monkeypatch.setattr(event, "hybrid_search_user_events", search)
     uid = str(uuid4())
-    result = client.post(f"/api/users/{uid}/search", json={"query": secret})
+    result = (await client.post(f"/api/users/{uid}/search", json={"query": secret}))
     assert result.json() == {"facts": [], "events": [], "profiles": []}
     assert secret not in str(result.request.url)
     assert search.await_args.args[2] == secret
-    assert client.get(f"/api/users/{uid}/search", params={"query": secret}).status_code == 405
-    malformed = client.post(f"/api/users/{uid}/search", json={"query": secret, "limit": secret})
+    assert (await client.get(f"/api/users/{uid}/search", params={"query": secret})).status_code == 405
+    malformed = (await client.post(f"/api/users/{uid}/search", json={"query": secret, "limit": secret}))
     assert malformed.status_code == 422 and secret not in malformed.text
     monkeypatch.setattr(event, "retrieve_user_facts", AsyncMock(side_effect=RuntimeError(secret)))
     with patch("memoia_server.api_layer.middleware.LOG.error") as log:
-        failed = client.post(f"/api/users/{uid}/context", json={"query": secret})
+        failed = (await client.post(f"/api/users/{uid}/context", json={"query": secret}))
         assert failed.status_code == 500
         assert secret not in failed.text and secret not in str(log.call_args_list)
 
 
-def test_read_only_posts_obey_read_scope(client, monkeypatch):
+@pytest.mark.asyncio
+async def test_read_only_posts_obey_read_scope(client, monkeypatch):
     project = "single-api-" + uuid4().hex
-    assert client.post("/api/projects", json={"project_id": project}).status_code == 201
-    token = client.post(f"/api/projects/{project}/keys", json={"name": "reader", "scopes": ["read"]}).json()["token"]
-    reader = TestClient(__import__("api").app, headers={"Authorization": "Bearer " + token})
+    assert (await client.post("/api/projects", json={"project_id": project})).status_code == 201
+    token = (await client.post(f"/api/projects/{project}/keys", json={"name": "reader", "scopes": ["read"]})).json()["token"]
+    reader = httpx.AsyncClient(transport=httpx.ASGITransport(app=__import__("api").app), base_url="http://test", headers={"Authorization": "Bearer " + token})
     try:
         monkeypatch.setattr(event, "hybrid_search_user_events", AsyncMock(return_value=Promise.resolve(SearchResult(events=[], facts=[], profiles=[]))))
         monkeypatch.setattr(event, "retrieve_user_facts", AsyncMock(return_value=Promise.resolve([])))
         uid = str(uuid4())
-        assert reader.post(f"/api/users/{uid}/search", json={"query": "Kyoto"}).status_code == 200
-        assert reader.post(f"/api/users/{uid}/context", json={"query": "Kyoto"}).json() == {"context": "", "entries": []}
-        assert reader.post("/api/users", json={}).status_code == 403
-        assert reader.post(f"/api/users/{uid}/flush", json={"idempotency_key": "read-only"}).status_code == 403
-        assert reader.patch("/api/project/config", json={"profile_config": ""}).status_code == 403
+        assert (await reader.post(f"/api/users/{uid}/search", json={"query": "Kyoto"})).status_code == 200
+        assert (await reader.post(f"/api/users/{uid}/context", json={"query": "Kyoto"})).json() == {"context": "", "entries": []}
+        assert (await reader.post("/api/users", json={})).status_code == 403
+        assert (await reader.post(f"/api/users/{uid}/flush", json={"idempotency_key": "read-only"})).status_code == 403
+        assert (await reader.patch("/api/project/config", json={"profile_config": ""})).status_code == 403
     finally:
-        reader.close()
+        (await reader.aclose())
         from memoia_server.connectors import Session
         from memoia_server.models.database import Project
         with Session.begin() as session:
@@ -107,7 +113,8 @@ def test_read_only_posts_obey_read_scope(client, monkeypatch):
             session.execute(delete(Project).where(Project.project_id == project))
 
 
-def test_context_counts_complete_fact_evidence_and_preserves_rank(client, monkeypatch):
+@pytest.mark.asyncio
+async def test_context_counts_complete_fact_evidence_and_preserves_rank(client, monkeypatch):
     from memoia_server.models.source import SearchEvent, Evidence, EventTime
     from memoia_server.models.response import EventGistData
     from memoia_server.temporal import render_gist
@@ -125,14 +132,15 @@ def test_context_counts_complete_fact_evidence_and_preserves_rank(client, monkey
         event.RetrievedFact(uuid4(), datetime(2026, 10, 6, tzinfo=timezone.utc), .08, EventGistData(content="legacy hotel"))]
     search = AsyncMock(return_value=Promise.resolve(result))
     monkeypatch.setattr(event, "retrieve_user_facts", search)
-    response = client.post(f"/api/users/{uid}/context", json={"query": "Kyoto April 2026", "max_token_size": budget})
+    response = (await client.post(f"/api/users/{uid}/context", json={"query": "Kyoto April 2026", "max_token_size": budget}))
     assert response.json() == {"context": rendered, "entries": [rendered]}
     assert "April 2026" in rendered and '"precision":"month"' in rendered
     assert len(get_encoded_tokens(response.json()["context"])) <= budget
     assert search.await_count == 1
 
 
-def test_context_recent_records_keep_evidence_and_query_none_avoids_embedding(client, monkeypatch):
+@pytest.mark.asyncio
+async def test_context_recent_records_keep_evidence_and_query_none_avoids_embedding(client, monkeypatch):
     from memoia_server.models.response import EventGistData
     from memoia_server.temporal import render_gist
     search = AsyncMock()
@@ -144,7 +152,7 @@ def test_context_recent_records_keep_evidence_and_query_none_avoids_embedding(cl
     monkeypatch.setattr(event, "recent_user_facts", recent)
     monkeypatch.setattr(event, "get_embedding", embedding)
     uid = str(uuid4())
-    response = client.post(f"/api/users/{uid}/context", json={"query": None})
+    response = (await client.post(f"/api/users/{uid}/context", json={"query": None}))
     rendered = render_gist(gist)
     assert response.json() == {"context": rendered, "entries": [rendered]}
     assert "recorded_at" in rendered and "Asia/Shanghai" in rendered

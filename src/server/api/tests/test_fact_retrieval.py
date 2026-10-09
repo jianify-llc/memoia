@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
+import pytest_asyncio
+import httpx
 from sqlalchemy import delete, insert, select, update
 
 from memoia_server.connectors import Session
@@ -17,10 +18,10 @@ from memoia_server.models.source import memory_sources, memory_messages, memory_
 from memoia_server.models.utils import Promise
 
 
-@pytest.fixture
-def fact_user(db_env):
+@pytest_asyncio.fixture
+async def fact_user(db_env):
     uid = uuid4()
-    client = TestClient(__import__("api").app, headers={"Authorization": "Bearer " + os.environ["ACCESS_TOKEN"]})
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=__import__("api").app), base_url="http://test", headers={"Authorization": "Bearer " + os.environ["ACCESS_TOKEN"]})
     with Session.begin() as session:
         user = User(project_id="__root__")
         user.id = uid
@@ -28,7 +29,7 @@ def fact_user(db_env):
     try:
         yield uid, client
     finally:
-        client.close()
+        (await client.aclose())
         with Session.begin() as session:
             session.execute(delete(User).where(User.id == uid, User.project_id == "__root__"))
 
@@ -57,73 +58,79 @@ def store_facts(uid, contents, *, with_event=True, recorded_at=None, time_zone="
         return row.id, fact_ids
 
 
-def test_matching_fact_survives_budget_in_large_event(fact_user, monkeypatch):
+@pytest.mark.asyncio
+async def test_matching_fact_survives_budget_in_large_event(fact_user, monkeypatch):
     uid, client = fact_user
     monkeypatch.setattr(CONFIG, "enable_event_embedding", False)
     eid, fact_ids = store_facts(uid, [f"Alice enjoys guitar and gardening, unrelated note {i}." for i in range(12)]
         + ["Alice stayed at Sakura Hotel in Kyoto."])
-    result = client.post(f"/api/users/{uid}/context", json={"query": "Sakura", "max_token_size": 500})
+    result = (await client.post(f"/api/users/{uid}/context", json={"query": "Sakura", "max_token_size": 500}))
     assert result.status_code == 200
     data = result.json()
     assert "Sakura" in data["context"] and "guitar" not in data["context"]
     assert data["context"] == "\n\n".join(data["entries"])
     assert "recorded_at" in data["entries"][0] and "Asia/Shanghai" in data["entries"][0]
-    search = client.post(f"/api/users/{uid}/search", json={"query": "Sakura", "include_events": False}).json()
+    search = (await client.post(f"/api/users/{uid}/search", json={"query": "Sakura", "include_events": False})).json()
     assert search["events"] == []
     assert [fact["id"] for fact in search["facts"]] == [str(fact_ids[-1])]
     assert search["facts"][0]["evidence"]["content"] == "Alice stayed at Sakura Hotel in Kyoto."
-    expanded = client.post(f"/api/users/{uid}/search", json={"query": "Sakura", "include_events": True,
-        "event_max_tokens": 8000, "max_token_size": 10000}).json()
+    expanded = (await client.post(f"/api/users/{uid}/search", json={"query": "Sakura", "include_events": True,
+        "event_max_tokens": 8000, "max_token_size": 10000})).json()
     assert expanded["events"][0]["id"] == str(eid)
-    bounded = client.post(f"/api/users/{uid}/search", json={"query": "Sakura", "include_events": True,
-        "event_max_tokens": 1}).json()
+    bounded = (await client.post(f"/api/users/{uid}/search", json={"query": "Sakura", "include_events": True,
+        "event_max_tokens": 1})).json()
     assert bounded["events"] == [] and len(bounded["facts"]) == 1
     with Session() as session:
         assert session.scalar(select(memory_facts.c.content).where(memory_facts.c.id == fact_ids[-1])) == "Alice stayed at Sakura Hotel in Kyoto."
 
 
-def test_embedding_outage_keeps_available_lexical_evidence(fact_user, monkeypatch):
+@pytest.mark.asyncio
+async def test_embedding_outage_keeps_available_lexical_evidence(fact_user, monkeypatch):
     uid, client = fact_user
     store_facts(uid, ["Alice stayed at Sakura Hotel in Kyoto."])
     monkeypatch.setattr(CONFIG, "enable_event_embedding", True)
     monkeypatch.setattr(event, "get_embedding", AsyncMock(return_value=Promise.reject(503, "Controlled outage")))
-    result = client.post(f"/api/users/{uid}/context", json={"query": "Sakura"})
+    result = (await client.post(f"/api/users/{uid}/context", json={"query": "Sakura"}))
     assert result.status_code == 200 and "Sakura" in result.json()["context"]
 
 
 @pytest.mark.parametrize("status", [400, 422])
-def test_embedding_input_or_configuration_rejection_is_not_silently_degraded(fact_user, monkeypatch, status):
+@pytest.mark.asyncio
+async def test_embedding_input_or_configuration_rejection_is_not_silently_degraded(fact_user, monkeypatch, status):
     uid, client = fact_user
     store_facts(uid, ["Sakura Hotel"])
     monkeypatch.setattr(CONFIG, "enable_event_embedding", True)
     monkeypatch.setattr(event, "get_embedding", AsyncMock(return_value=Promise.reject(status, "Controlled rejection")))
-    assert client.post(f"/api/users/{uid}/context", json={"query": "Sakura"}).status_code != 200
+    assert (await client.post(f"/api/users/{uid}/context", json={"query": "Sakura"})).status_code != 200
 
 
-def test_deleting_event_preserves_fact_index_and_message_delete_removes_it(fact_user, monkeypatch):
+@pytest.mark.asyncio
+async def test_deleting_event_preserves_fact_index_and_message_delete_removes_it(fact_user, monkeypatch):
     uid, client = fact_user
     monkeypatch.setattr(CONFIG, "enable_event_embedding", False)
     eid, fact_ids = store_facts(uid, ["Sakura Hotel"])
-    assert client.delete(f"/api/users/{uid}/events/{eid}").status_code == 204
-    result = client.post(f"/api/users/{uid}/search", json={"query": "Sakura", "include_events": True}).json()
+    assert (await client.delete(f"/api/users/{uid}/events/{eid}")).status_code == 204
+    result = (await client.post(f"/api/users/{uid}/search", json={"query": "Sakura", "include_events": True})).json()
     assert [fact["id"] for fact in result["facts"]] == [str(fact_ids[0])]
     assert result["events"] == []
-    deleted = client.request("DELETE", f"/api/users/{uid}/sources/dialog/messages",
+    deleted = await client.request("DELETE", f"/api/users/{uid}/sources/dialog/messages",
         json={"idempotency_key": "delete-message-1", "message_ids": ["1"]})
     assert deleted.status_code == 200 and deleted.json()["status"] == "completed"
-    assert client.post(f"/api/users/{uid}/context", json={"query": "Sakura"}).json() == {"context": "", "entries": []}
+    assert (await client.post(f"/api/users/{uid}/context", json={"query": "Sakura"})).json() == {"context": "", "entries": []}
 
 
-def test_unindexed_old_event_remains_searchable_without_new_dates(fact_user, monkeypatch):
+@pytest.mark.asyncio
+async def test_unindexed_old_event_remains_searchable_without_new_dates(fact_user, monkeypatch):
     uid, client = fact_user
     monkeypatch.setattr(CONFIG, "enable_event_embedding", False)
     with Session.begin() as session:
         session.add(UserEvent(user_id=uid, project_id="__root__", event_data={"event_tip": "Sakura legacy hotel"}))
-    result = client.post(f"/api/users/{uid}/context", json={"query": "Sakura"}).json()
+    result = (await client.post(f"/api/users/{uid}/context", json={"query": "Sakura"})).json()
     assert result == {"context": "Sakura legacy hotel", "entries": ["Sakura legacy hotel"]}
 
 
-def test_non_source_legacy_gist_remains_searchable(fact_user, monkeypatch):
+@pytest.mark.asyncio
+async def test_non_source_legacy_gist_remains_searchable(fact_user, monkeypatch):
     uid, client = fact_user
     monkeypatch.setattr(CONFIG, "enable_event_embedding", False)
     with Session.begin() as session:
@@ -133,22 +140,23 @@ def test_non_source_legacy_gist_remains_searchable(fact_user, monkeypatch):
         session.add(UserEventGist(user_id=uid, project_id="__root__", event_id=legacy.id,
             gist_data={"content": "Sakura legacy hotel"}))
         eid = legacy.id
-    result = client.post(f"/api/users/{uid}/search", json={"query": "Sakura"}).json()
+    result = (await client.post(f"/api/users/{uid}/search", json={"query": "Sakura"})).json()
     assert result["facts"] == []
     assert [row["id"] for row in result["events"]] == [str(eid)]
     assert result["events"][0]["content"] == "Sakura legacy hotel"
     assert result["events"][0]["evidence"] == []
-    assert client.post(f"/api/users/{uid}/context", json={"query": "Sakura"}).json() == {
+    assert (await client.post(f"/api/users/{uid}/context", json={"query": "Sakura"})).json() == {
         "context": "Sakura legacy hotel", "entries": ["Sakura legacy hotel"]}
 
 
-def test_recent_context_combines_independent_fact_and_real_legacy_event(fact_user, monkeypatch):
+@pytest.mark.asyncio
+async def test_recent_context_combines_independent_fact_and_real_legacy_event(fact_user, monkeypatch):
     uid, client = fact_user
     monkeypatch.setattr(event, "get_embedding", AsyncMock(side_effect=AssertionError("Recent reads need no model")))
     _, fact_ids = store_facts(uid, ["Sakura current fact"], with_event=False)
     with Session.begin() as session:
         session.add(UserEvent(user_id=uid, project_id="__root__", event_data={"event_tip": "Legacy undated event"}))
-    result = client.post(f"/api/users/{uid}/context", json={"query": None}).json()
+    result = (await client.post(f"/api/users/{uid}/context", json={"query": None})).json()
     assert len(result["entries"]) == 2
     assert result["entries"][0] == "Legacy undated event"
     assert "Sakura current fact" in result["entries"][1] and str(fact_ids[0]) in result["entries"][1]
@@ -218,7 +226,8 @@ def test_bulk_evidence_keeps_same_message_id_isolated_across_users(fact_user):
             session.execute(delete(User).where(User.id == other, User.project_id == "__root__"))
 
 
-def test_fact_vectors_drive_fusion_and_cross_user_facts_are_excluded(fact_user, monkeypatch):
+@pytest.mark.asyncio
+async def test_fact_vectors_drive_fusion_and_cross_user_facts_are_excluded(fact_user, monkeypatch):
     uid, client = fact_user
     other = uuid4()
     with Session.begin() as session:
@@ -242,12 +251,12 @@ def test_fact_vectors_drive_fusion_and_cross_user_facts_are_excluded(fact_user, 
                 session.execute(update(memory_facts).where(memory_facts.c.id == row["id"]).values(embedding=vector))
         monkeypatch.setattr(CONFIG, "enable_event_embedding", True)
         monkeypatch.setattr(event, "get_embedding", AsyncMock(return_value=Promise.resolve(np.array([query_vector]))))
-        result = client.post(f"/api/users/{uid}/search", json={"query": "hotel", "include_events": False}).json()
+        result = (await client.post(f"/api/users/{uid}/search", json={"query": "hotel", "include_events": False})).json()
         assert result["events"] == []
         assert [fact["id"] for fact in result["facts"]] == [str(ident) for ident in fact_ids[:2]]
         assert result["facts"][0]["score"] > .03
         assert [fact["content"] for fact in result["facts"]] == ["Sakura hotel", "hotel advice"]
-        context = client.post(f"/api/users/{uid}/context", json={"query": "hotel"}).json()
+        context = (await client.post(f"/api/users/{uid}/context", json={"query": "hotel"})).json()
         assert context["entries"][0].startswith("Sakura hotel")
         assert "private foreign" not in context["context"] and "guitar" not in context["context"]
     finally:
@@ -255,7 +264,8 @@ def test_fact_vectors_drive_fusion_and_cross_user_facts_are_excluded(fact_user, 
             session.execute(delete(User).where(User.id == other, User.project_id == "__root__"))
 
 
-def test_lexical_finishes_while_query_embedding_waits_and_timeout_cancels_vector(fact_user, monkeypatch):
+@pytest.mark.asyncio
+async def test_lexical_finishes_while_query_embedding_waits_and_timeout_cancels_vector(fact_user, monkeypatch):
     import asyncio
     import threading
     from sqlalchemy import event as sql_event
@@ -283,7 +293,7 @@ def test_lexical_finishes_while_query_embedding_waits_and_timeout_cancels_vector
     sql_event.listen(DB_ENGINE, "after_cursor_execute", observed)
     monkeypatch.setattr(event, "get_embedding", blocked_vector)
     try:
-        result = client.post(f"/api/users/{uid}/context", json={"query": "Sakura"})
+        result = (await client.post(f"/api/users/{uid}/context", json={"query": "Sakura"}))
         assert result.status_code == 200 and "Sakura" in result.json()["context"]
         assert vector_saw_lexical.is_set() and vector_cancelled.is_set()
     finally:

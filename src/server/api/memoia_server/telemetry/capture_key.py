@@ -36,16 +36,16 @@ async def capture_int_keys(values: dict[str, int], expire_days: int = 14,
     now = datetime.now()
     prefix = head_key(project_id)
     try:
-        async with get_redis_client() as client:
-            async with client.pipeline(transaction=True) as pipeline:
-                for name, value in values.items():
-                    key = f"{prefix}::{name}::{now:%Y-%m-%d}"
-                    month = f"{prefix}::{name}::{now:%Y-%m}"
-                    pipeline.incrby(key, value)
-                    pipeline.incrby(month, value)
-                    pipeline.expire(key, expire_days * 86400)
-                    pipeline.expire(month, 30 * expire_days * 86400)
-                await pipeline.execute()
+        # Batch network IO only; approximate counters do not require MULTI/EXEC.
+        async with get_redis_client().pipeline(transaction=False) as pipeline:
+            for name, value in values.items():
+                key = f"{prefix}::{name}::{now:%Y-%m-%d}"
+                month = f"{prefix}::{name}::{now:%Y-%m}"
+                pipeline.incrby(key, value)
+                pipeline.incrby(month, value)
+                pipeline.expire(key, expire_days * 86400)
+                pipeline.expire(month, 30 * expire_days * 86400)
+            await pipeline.execute()
         return True
     except (RedisError, TimeoutError) as error:
         # These are display counters, not a ledger. Never replay an ambiguous write.
@@ -54,8 +54,7 @@ async def capture_int_keys(values: dict[str, int], expire_days: int = 14,
 
 
 async def get_int_keys(keys: list[str]) -> list[int]:
-    async with get_redis_client() as client:
-        values = await client.mget(keys)
+    values = await get_redis_client().mget(keys)
     return [int(value) if value is not None else 0 for value in values]
 
 
@@ -75,5 +74,13 @@ async def get_int_key(
 
 if __name__ == "__main__":
     import asyncio
+    from ..connectors import init_redis_client, close_connection
 
-    print(asyncio.run(capture_int_key("test_key")))
+    async def main():
+        init_redis_client()
+        try:
+            print(await capture_int_key("test_key"))
+        finally:
+            await close_connection()
+
+    asyncio.run(main())

@@ -55,7 +55,7 @@ async def test_worker_bounds_concurrency_and_closes_runtime(monkeypatch):
     monkeypatch.setattr(maintenance, "claim_next", lambda: pending.pop(0) if pending else None)
     monkeypatch.setattr(maintenance, "execute_claim", execute)
     monkeypatch.setattr(schema, "check_schema", lambda: None)
-    monkeypatch.setattr(connectors, "init_redis_pool", lambda: None)
+    monkeypatch.setattr(connectors, "init_redis_client", lambda: None)
     close = AsyncMock()
     monkeypatch.setattr(connectors, "close_connection", close)
     monkeypatch.setattr(worker, "record_heartbeat", lambda: None)

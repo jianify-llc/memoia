@@ -38,7 +38,7 @@ DB_ENGINE = create_engine(
     echo_pool=False,  # Set to True for debugging pool issues
     hide_parameters=True,
 )
-REDIS_POOL = None
+REDIS_CLIENT: redis.Redis | None = None
 
 Session = sessionmaker(bind=DB_ENGINE)
 
@@ -121,8 +121,7 @@ def db_health_check() -> bool:
 
 async def redis_health_check() -> bool:
     try:
-        async with get_redis_client() as redis_client:
-            await redis_client.ping()
+        await get_redis_client().ping()
     except (redis_exceptions.RedisError, TimeoutError) as error:
         LOG.error("Redis health check failed (%s)", type(error).__name__)
         return False
@@ -131,11 +130,11 @@ async def redis_health_check() -> bool:
 
 
 async def close_connection():
-    global REDIS_POOL
+    global REDIS_CLIENT
     DB_ENGINE.dispose()
-    if REDIS_POOL is not None:
-        pool, REDIS_POOL = REDIS_POOL, None
-        await pool.aclose()
+    if REDIS_CLIENT is not None:
+        client, REDIS_CLIENT = REDIS_CLIENT, None
+        await client.aclose()
     LOG.info("Connections closed")
 
 
@@ -156,17 +155,18 @@ def create_redis_pool():
     return redis.ConnectionPool(**options)
 
 
-def init_redis_pool():
-    global REDIS_POOL
-    REDIS_POOL = create_redis_pool()
+def init_redis_client():
+    global REDIS_CLIENT
+    if REDIS_CLIENT is not None:
+        raise RuntimeError("Redis already initialized")
+    # from_pool transfers ownership; only process shutdown closes this client/pool.
+    REDIS_CLIENT = redis.Redis.from_pool(create_redis_pool())
 
 
 def get_redis_client() -> redis.Redis:
-    if REDIS_POOL is not None:
-        return redis.Redis(connection_pool=REDIS_POOL, decode_responses=True)
-    else:
-        # A short-lived client outside application startup owns and closes its pool.
-        return redis.Redis.from_pool(create_redis_pool())
+    if REDIS_CLIENT is None:
+        raise RuntimeError("Redis not initialized")
+    return REDIS_CLIENT
 
 
 def get_pool_status() -> dict:
@@ -202,6 +202,7 @@ def log_pool_status(operation: str = "unknown"):
 if __name__ == "__main__":
 
     async def main():
+        init_redis_client()
         try:
             result = await redis_health_check()
             print(result)

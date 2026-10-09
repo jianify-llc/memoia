@@ -244,8 +244,7 @@ async def test_delete_fences_inflight_batch_and_resume_cannot_restore_contributi
     try:
         await asyncio.wait_for(entered.wait(), timeout=5)
         # Simulate ownership loss while the supplier still holds the old input.
-        async with get_redis_client() as redis:
-            await redis.delete(UserLease(str(uid), "__root__").key)
+        await get_redis_client().delete(UserLease(str(uid), "__root__").key)
         deleted = await source.delete_messages(uid, "__root__", "dialog-1",
             DeleteMessages(idempotency_key="d", message_ids=["1"]))
         assert deleted.status == "completed"

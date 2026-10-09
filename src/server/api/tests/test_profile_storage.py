@@ -59,8 +59,8 @@ async def test_profile_read_ignores_stale_redis_and_preserves_contract(profile_u
     original = await profile.get_user_profiles(profile_user, DEFAULT_PROJECT_ID)
     cache_key = f"user_profiles::{DEFAULT_PROJECT_ID}::{profile_user}"
     stale_json = original.data().model_dump_json()
-    async with get_redis_client() as redis:
-        await redis.set(cache_key, stale_json, ex=60)
+    redis = get_redis_client()
+    await redis.set(cache_key, stale_json, ex=60)
     try:
         now = datetime.now(timezone.utc)
         with Session() as session:
@@ -82,11 +82,9 @@ async def test_profile_read_ignores_stale_redis_and_preserves_contract(profile_u
         other_user = await profile.get_user_profiles(str(uuid4()), DEFAULT_PROJECT_ID)
         assert other_project.ok() and not other_project.data().profiles
         assert other_user.ok() and not other_user.data().profiles
-        async with get_redis_client() as redis:
-            assert await redis.get(cache_key) == stale_json
+        assert await redis.get(cache_key) == stale_json
     finally:
-        async with get_redis_client() as redis:
-            await redis.delete(cache_key)
+        await redis.delete(cache_key)
 
 
 @pytest.mark.asyncio

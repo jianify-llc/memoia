@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
 
 from api import app
@@ -239,20 +238,20 @@ async def test_empty_structured_content_flush_fails_without_event(
     state["content"] = content
     monkeypatch.setattr(CONFIG, "best_llm_model", "gpt-6-luna")
     monkeypatch.setattr(CONFIG, "summary_llm_model", None)
-    api_client = TestClient(app)
+    api_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
     api_client.headers["Authorization"] = f"Bearer {os.environ['ACCESS_TOKEN']}"
-    user_id = api_client.post("/api/users", json={}).json()["id"]
+    user_id = (await api_client.post("/api/users", json={})).json()["id"]
     try:
-        inserted = api_client.post(f"/api/users/{user_id}/blobs", json={
+        inserted = (await api_client.post(f"/api/users/{user_id}/blobs", json={
             "source_id": "empty-json", "idempotency_key": "empty-json",
             "messages": [{"message_id": "1", "role": "user", "content": "Hello",
-                          "occurred_at": "2026-10-06T00:00:00Z"}]})
+                          "occurred_at": "2026-10-06T00:00:00Z"}]}))
         assert inserted.status_code >= 400
-        assert api_client.get(f"/api/users/{user_id}/events").json()["events"] == []
+        assert (await api_client.get(f"/api/users/{user_id}/events")).json()["events"] == []
         assert len(state["requests"]) == 1
     finally:
-        api_client.delete(f"/api/users/{user_id}")
-        api_client.close()
+        (await api_client.delete(f"/api/users/{user_id}"))
+        (await api_client.aclose())
         await client.close()
 
 
@@ -260,20 +259,20 @@ async def test_empty_structured_content_flush_fails_without_event(
 async def test_complete_structured_empty_facts_flush_succeeds_without_event(openai_transport):
     state, model_client = openai_transport
     state["content"] = '{"facts": []}'
-    client = TestClient(app, headers={"Authorization": f"Bearer {os.environ['ACCESS_TOKEN']}"})
-    uid = client.post("/api/users", json={}).json()["id"]
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", headers={"Authorization": f"Bearer {os.environ['ACCESS_TOKEN']}"})
+    uid = (await client.post("/api/users", json={})).json()["id"]
     try:
-        inserted = client.post(f"/api/users/{uid}/blobs", json={"source_id": "empty-facts",
+        inserted = (await client.post(f"/api/users/{uid}/blobs", json={"source_id": "empty-facts",
             "idempotency_key": "empty-facts", "messages": [{"message_id": "1", "role": "user",
-            "content": "Hello", "occurred_at": "2026-10-06T00:00:00Z"}]})
+            "content": "Hello", "occurred_at": "2026-10-06T00:00:00Z"}]}))
         assert inserted.status_code == 200 and inserted.json()["status"] == "completed"
         assert inserted.json()["result"]["event_ids"] == []
-        assert client.get(f"/api/users/{uid}/events").json()["events"] == []
+        assert (await client.get(f"/api/users/{uid}/events")).json()["events"] == []
         assert len(state["requests"]) == 1
         assert state["requests"][0]["response_format"]["json_schema"]["strict"]
     finally:
-        client.delete(f"/api/users/{uid}")
-        client.close()
+        (await client.delete(f"/api/users/{uid}"))
+        (await client.aclose())
         await model_client.close()
 
 
