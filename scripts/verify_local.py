@@ -19,6 +19,17 @@ from test_push import ROOT, local_env, run
 QUICK_TESTS = (
     "test_llm_logging.py", "test_embedding_validation.py", "test_source_quality.py",
     "test_maintenance_agent.py", "test_maintenance_worker.py", "test_project_model_config.py",
+    *["test_redis_boundaries.py::" + name for name in (
+        "test_pool_bounds_override_url_options_and_disable_replay",
+        "test_removed_provider_fails_in_yaml_and_environment",
+        "test_acquisition_failure_never_installs_write_authority",
+        "test_acquisition_and_release_have_deadlines",
+        "test_renewal_failure_invalidates_authority",
+        "test_cancellation_joins_heartbeat_and_resets_authority",
+        "test_statistics_failure_is_not_reported_as_zero",
+        "test_statistics_failure_does_not_skip_existing_billing",
+        "test_ambiguous_pipeline_write_is_not_replayed",
+    )],
     *["test_temporal_evidence.py::" + name for name in (
         "test_calendar_precision_and_unknown_are_not_invented_dates",
         "test_withdrawn_time_anchor_does_not_survive_independent_untimed_support",
@@ -35,6 +46,7 @@ QUICK_TESTS = (
         "test_luna_json_mode_preserves_legacy_parser_contract", "test_parser_failure_keeps_existing_error_code",
         "test_incomplete_or_failed_response_is_not_success", "test_startup_sanity_uses_dedicated_completion_budget",
         "test_startup_probe_does_not_accept_empty_wrong_or_truncated_output", "test_missing_usage_metadata_does_not_discard_valid_text",
+        "test_accounting_uses_provider_tokens_not_text_estimates", "test_missing_usage_is_unknown_and_does_not_debit",
     )],
 )
 

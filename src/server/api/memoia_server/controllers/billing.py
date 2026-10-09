@@ -8,7 +8,7 @@ from ..models.database import (
 )
 from ..models.response import CODE, IdData, IdsData, UserProfilesData, BillingData
 from ..connectors import Session, ADMIN_URL
-from ..telemetry.capture_key import get_int_key, capture_int_key
+from ..telemetry.capture_key import get_int_key, capture_int_keys
 from ..env import (
     TelemetryKeyName,
     USAGE_TOKEN_LIMIT_MAP,
@@ -111,12 +111,8 @@ async def fallback_billing_data(project_id: str) -> Promise[BillingData]:
 async def project_cost_token_billing(
     project_id: str, input_tokens: int, output_tokens: int
 ) -> Promise[None]:
-    await capture_int_key(
-        TelemetryKeyName.llm_input_tokens, input_tokens, project_id=project_id
-    )
-    await capture_int_key(
-        TelemetryKeyName.llm_output_tokens, output_tokens, project_id=project_id
-    )
+    await capture_int_keys({TelemetryKeyName.llm_input_tokens: input_tokens,
+                            TelemetryKeyName.llm_output_tokens: output_tokens}, project_id=project_id)
     if ADMIN_URL is not None:
         return await admin_api.cost_project_usage(
             project_id, input_tokens, output_tokens

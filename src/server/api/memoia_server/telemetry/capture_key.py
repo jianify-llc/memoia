@@ -1,7 +1,9 @@
 # Modified for Memoia: relocated from the upstream memobase_server package.
 from datetime import datetime, timedelta
+from redis.exceptions import RedisError
 from ..connectors import get_redis_client, PROJECT_ID
 from ..models.database import DEFAULT_PROJECT_ID
+from ..env import LOG
 
 
 def date_key():
@@ -26,13 +28,35 @@ async def capture_int_key(
     expire_days: int = 14,
     project_id: str = DEFAULT_PROJECT_ID,
 ):
-    key = f"{head_key(project_id)}::{name}::{date_key()}"
-    key_month = f"{head_key(project_id)}::{name}::{month_key()}"
-    async with get_redis_client() as r_c:
-        await r_c.incrby(key, value)
-        await r_c.incrby(key_month, value)
-        await r_c.expire(key, expire_days * 24 * 60 * 60)
-        await r_c.expire(key_month, 30 * expire_days * 24 * 60 * 60)
+    return await capture_int_keys({name: value}, expire_days, project_id)
+
+
+async def capture_int_keys(values: dict[str, int], expire_days: int = 14,
+                           project_id: str = DEFAULT_PROJECT_ID) -> bool:
+    now = datetime.now()
+    prefix = head_key(project_id)
+    try:
+        async with get_redis_client() as client:
+            async with client.pipeline(transaction=True) as pipeline:
+                for name, value in values.items():
+                    key = f"{prefix}::{name}::{now:%Y-%m-%d}"
+                    month = f"{prefix}::{name}::{now:%Y-%m}"
+                    pipeline.incrby(key, value)
+                    pipeline.incrby(month, value)
+                    pipeline.expire(key, expire_days * 86400)
+                    pipeline.expire(month, 30 * expire_days * 86400)
+                await pipeline.execute()
+        return True
+    except (RedisError, TimeoutError) as error:
+        # These are display counters, not a ledger. Never replay an ambiguous write.
+        LOG.warning("Usage statistics write failed (%s)", type(error).__name__)
+        return False
+
+
+async def get_int_keys(keys: list[str]) -> list[int]:
+    async with get_redis_client() as client:
+        values = await client.mget(keys)
+    return [int(value) if value is not None else 0 for value in values]
 
 
 async def get_int_key(
@@ -46,8 +70,7 @@ async def get_int_key(
     else:
         using_date = use_date or date_key()
         key = f"{head_key(project_id)}::{name}::{using_date}"
-    async with get_redis_client() as r_c:
-        return int((await r_c.get(key)) or 0)
+    return (await get_int_keys([key]))[0]
 
 
 if __name__ == "__main__":

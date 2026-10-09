@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { runProbe } from "../sdk-probe.mjs";
 
 // These deterministic adapters test the acceptance tool, not Memoia or a model.
-async function fixture(mode = "complete", version = "0.9.0") {
+async function fixture(mode = "complete", version = "0.9.1") {
   const directory = await mkdtemp(join(tmpdir(), "memoia-probe-"));
   const symbol = `memoia-probe-${randomUUID()}`;
   let sourceId = randomUUID();
@@ -275,7 +275,7 @@ test("partial deletion checks synchronous Fact removal but does not accept stale
 
 test("flush failure code is checkpointed before fixture cleanup without error text", async () => {
   const records = [];
-  const { result } = await probe("maintenance-failed", "0.9.0", async record => records.push(record));
+  const { result } = await probe("maintenance-failed", "0.9.1", async record => records.push(record));
   const receipt = records.find(record => record.stage === "import_flush.receipt");
   assert.equal(receipt.maintenance.import.error_code, "model_unavailable");
   assert.equal(receipt.maintenance.import.retryable, true);
@@ -342,7 +342,7 @@ test("history exposing withdrawn evidence fails even when the mutation succeeded
 
 test("partial deletion preserves payload-free failure diagnostics before cleanup", async () => {
   const records = [];
-  const { result } = await probe("partial-name-leak", "0.9.0", async record => records.push(record));
+  const { result } = await probe("partial-name-leak", "0.9.1", async record => records.push(record));
   assert.equal(result.success, false);
   assert.equal(result.checks.cleanup, true);
   const partial = records.find(record => record.stage === "partial.validation");
@@ -593,7 +593,7 @@ test("CLI regular-file boundary survives process exit inside the first mutation"
   try {
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     await mkdir(join(directory, "dist"));
-    await writeFile(join(directory, "package.json"), JSON.stringify({ name: "@jianify/memoia", version: "0.9.0", type: "module" }));
+    await writeFile(join(directory, "package.json"), JSON.stringify({ name: "@jianify/memoia", version: "0.9.1", type: "module" }));
     await writeFile(join(directory, "dist/index.js"), `export class MemoiaError extends Error {}
       export class MemoiaClient {
         async getProfiles() { return { profiles: [] }; }

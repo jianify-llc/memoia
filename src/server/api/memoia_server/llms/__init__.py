@@ -1,8 +1,8 @@
 # Modified for Memoia: relocated from the upstream memobase_server package.
-import time
+from functools import partial
 from ..prompts.utils import convert_response_to_json
-from ..utils import get_encoded_tokens
-from ..env import CONFIG, LOG
+from ..env import CONFIG, LOG, TelemetryKeyName
+from ..telemetry.capture_key import capture_int_key
 from ..controllers.billing import project_cost_token_billing
 from ..models.utils import Promise
 from ..models.response import CODE
@@ -10,10 +10,6 @@ from ..models.database import DEFAULT_PROJECT_ID
 from ..telemetry import telemetry_manager, CounterMetricName, HistogramMetricName
 
 from .openai_model_llm import openai_complete
-from .doubao_cache_llm import doubao_cache_complete
-
-FACTORIES = {"openai": openai_complete, "doubao_cache": doubao_cache_complete}
-assert CONFIG.llm_style in FACTORIES, f"Unsupported LLM style: {CONFIG.llm_style}"
 
 
 # TODO: add TPM/Rate limiter
@@ -31,30 +27,18 @@ async def llm_complete(
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
     try:
-        start_time = time.time()
-        results = await FACTORIES[CONFIG.llm_style](
+        results = await openai_complete(
             use_model,
             prompt,
             system_prompt=system_prompt,
             history_messages=history_messages,
             max_tokens=max_tokens,
+            on_usage=partial(record_completion_usage, project_id),
             **kwargs,
         )
-        latency = (time.time() - start_time) * 1000
     except Exception as e:
         LOG.error("LLM completion failed (%s)", type(e).__name__)
         return Promise.reject(CODE.SERVICE_UNAVAILABLE, "LLM completion failed")
-
-    in_tokens = len(
-        get_encoded_tokens(
-            prompt
-            + (system_prompt or "")
-            + "\n".join([m["content"] for m in history_messages])
-        )
-    )
-    out_tokens = len(get_encoded_tokens(results))
-
-    await record_completion_usage(project_id, in_tokens, out_tokens, latency)
 
     if not json_mode:
         return Promise.resolve(results)
@@ -70,21 +54,23 @@ async def llm_complete(
 async def record_completion_usage(project_id, in_tokens, out_tokens, latency):
     # Await the small accounting write; it must not inherit a memory-write fence or
     # escape as a detached task after the request's lease and process have ended.
-    try:
-        await project_cost_token_billing(project_id, in_tokens, out_tokens)
-    except Exception as error:
-        LOG.error("Completion accounting failed (%s)", type(error).__name__)
-
-    telemetry_manager.increment_counter_metric(
-        CounterMetricName.LLM_TOKENS_INPUT,
-        in_tokens,
-        {"project_id": project_id},
-    )
-    telemetry_manager.increment_counter_metric(
-        CounterMetricName.LLM_TOKENS_OUTPUT,
-        out_tokens,
-        {"project_id": project_id},
-    )
+    usage_known = all(type(value) is int and value >= 0 for value in (in_tokens, out_tokens))
+    if usage_known:
+        try:
+            result = await project_cost_token_billing(project_id, in_tokens, out_tokens)
+            if not result.ok():
+                LOG.warning("Completion accounting rejected (%s)", result.code())
+        except Exception as error:
+            LOG.error("Completion accounting failed (%s)", type(error).__name__)
+        telemetry_manager.increment_counter_metric(CounterMetricName.LLM_TOKENS_INPUT, in_tokens,
+                                                   {"project_id": project_id})
+        telemetry_manager.increment_counter_metric(CounterMetricName.LLM_TOKENS_OUTPUT, out_tokens,
+                                                   {"project_id": project_id})
+    else:
+        LOG.warning("Completion token usage unknown; no token estimate or debit recorded")
+        await capture_int_key(TelemetryKeyName.llm_usage_unknown, project_id=project_id)
+        telemetry_manager.increment_counter_metric(CounterMetricName.LLM_USAGE_UNKNOWN, 1,
+                                                   {"project_id": project_id})
     telemetry_manager.increment_counter_metric(
         CounterMetricName.LLM_INVOCATIONS,
         1,

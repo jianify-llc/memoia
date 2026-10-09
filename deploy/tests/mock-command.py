@@ -127,7 +127,12 @@ elif command == "docker":
     elif args[:2] == ["image", "inspect"]:
         output(os.getenv("FIXTURE_REVISION", "d" * 40))
     elif args[0] == "run":
-        output(os.getenv("FIXTURE_SCHEMA", "f" * 64))
+        if args[-1] == "legacy":
+            output(os.getenv("FIXTURE_LEGACY_SCHEMA", "f" * 64))
+        elif "ghcr.io/jianify/memoia@sha256:" + "a" * 64 in args:
+            output(os.getenv("FIXTURE_ACCEPTED_SCHEMA", "f" * 64))
+        else:
+            output(os.getenv("FIXTURE_SCHEMA", "f" * 64))
     else:
         sys.exit("Unexpected Docker action")
 else:

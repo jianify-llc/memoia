@@ -158,6 +158,19 @@ fi
 fi
 
 config_sha=$(sha256sum "$root/.env" "$root/api/config.yaml" | sha256sum | cut -d' ' -f1)
+schema_matches_baseline() {
+  local candidate=$1 accepted legacy canonical
+  [[ "$candidate" == "$(< schema.sha256)" ]] && return 0
+  [[ -f deploy-state ]] || return 1
+  accepted=$(cut -d' ' -f3 deploy-state)
+  [[ "$accepted" =~ ^ghcr\.io/(jianify|jianify-llc)/memoia@sha256:[0-9a-f]{64}$ ]] || return 1
+  # Trust neither a guessed hash nor the candidate to identify the old baseline.
+  # Both representations must come from the immutable, accepted image.
+  legacy=$(bash "$script_dir/schema-fingerprint.sh" "$accepted" legacy) || return 1
+  [[ "$legacy" == "$(< schema.sha256)" ]] || return 1
+  canonical=$(bash "$script_dir/schema-fingerprint.sh" "$accepted") || return 1
+  [[ "$candidate" == "$canonical" ]]
+}
 tunnel_ready() {
   systemctl is-active --quiet jianify-cloudflared.service &&
     curl -fsS --max-time 5 http://127.0.0.1:20241/ready >/dev/null &&
@@ -183,12 +196,15 @@ runtime_healthy() {
 }
 
 if [[ "$mode" == finalize || "$mode" == finalize-schema ]]; then
+  finalized_schema=$(bash "$script_dir/schema-fingerprint.sh" "$image")
+  [[ "$finalized_schema" =~ ^[0-9a-f]{64}$ ]] || exit 1
   if [[ "$mode" == finalize ]]; then
     [[ ! -e pending-maintenance ]] || { echo 'Schema maintenance requires finalize-schema, not ordinary finalize' >&2; exit 1; }
+    schema_matches_baseline "$finalized_schema" || { echo 'Candidate schema differs from the accepted baseline' >&2; exit 1; }
   else
     python3 "$script_dir/schema-maintenance.py" finalize "$root" "$image" "$source_sha" "$run_id" "$evidence_file"
     "${compose[@]}" exec -T memoia /app/.venv/bin/python -c 'from memoia_server.schema import check_schema; check_schema()'
-    [[ "$(bash "$script_dir/schema-fingerprint.sh" "$image")" == "$(< pending-schema.sha256)" ]] || {
+    [[ "$finalized_schema" == "$(< pending-schema.sha256)" ]] || {
       echo 'Candidate schema differs from pending maintenance' >&2; exit 1;
     }
   fi
@@ -233,9 +249,13 @@ if [[ "$mode" == finalize || "$mode" == finalize-schema ]]; then
   printf '%s %s %s %s %s\n' "$run_id" "$source_sha" "$image" "$compose_sha" "$config_sha" > "$state_tmp"
   cp "$state_tmp" "accepted/$source_sha"
   printf '%s %s %s %s %s\n' "$high_water" "$source_sha" "$image" "$compose_sha" "$config_sha" > "$state_tmp"
+  # Promote the canonical hash only after full acceptance; prepare never rewrites it.
+  schema_tmp=$(mktemp "$state_dir/.schema.XXXXXX")
+  printf '%s\n' "$finalized_schema" > "$schema_tmp"
+  mv "$schema_tmp" schema.sha256
   mv "$state_tmp" deploy-state
   if [[ "$mode" == finalize-schema ]]; then
-    mv pending-schema.sha256 schema.sha256
+    rm pending-schema.sha256
     if [[ -f pending-worker-infra.sha256 ]]; then mv pending-worker-infra.sha256 infra-config.sha256; fi
     # 已变更 schema 的旧镜像仅留诊断归档，不再授予普通 API 恢复资格。
     rm -f previous-accepted
@@ -272,7 +292,7 @@ if [[ "$mode" == adopt-external-postgres ]]; then
   [[ "$next_infra" != "$(< infra-config.sha256)" ]] || {
     echo 'No infrastructure change to adopt' >&2; exit 1;
   }
-  [[ "$(bash "$script_dir/schema-fingerprint.sh" "$image")" == "$(< schema.sha256)" ]] || {
+  schema_matches_baseline "$(bash "$script_dir/schema-fingerprint.sh" "$image")" || {
     echo 'Schema identity changed; this is not a PostgreSQL-only migration' >&2; exit 1;
   }
   api_container=$("${compose[@]}" ps -q memoia)
@@ -373,13 +393,13 @@ if [[ "$mode" == init ]]; then
   exit 0
 fi
 if [[ "$mode" == migrate-schema ]]; then
-  [[ "$schema_sha" != "$(< schema.sha256)" ]] || { echo 'Schema is unchanged; use ordinary prepare' >&2; exit 1; }
+  if schema_matches_baseline "$schema_sha"; then echo 'Schema is unchanged; use ordinary prepare' >&2; exit 1; fi
   worker_flag=()
   [[ "$worker_introduction" != true ]] || worker_flag=(introduce-worker)
   maintenance_record=$(python3 "$script_dir/schema-maintenance.py" preflight "$root" "$image" "$source_sha" "$run_id" "$evidence_file" "${worker_flag[@]}")
   python3 "$script_dir/schema-maintenance.py" audit "$root" "$image"
 else
-  [[ "$schema_sha" == "$(< schema.sha256)" ]] || { echo 'Schema source changed; migration maintenance is required' >&2; exit 1; }
+  schema_matches_baseline "$schema_sha" || { echo 'Schema source changed; migration maintenance is required' >&2; exit 1; }
 fi
 
 # 兼容版本按服务生命周期切换，不要求消费者停写或业务队列为空。

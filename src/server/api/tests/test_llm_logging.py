@@ -37,7 +37,7 @@ def error_logs(request, monkeypatch):
 @pytest.mark.asyncio
 async def test_completion_failure_is_rejected_and_redacted_for_both_loggers(error_logs, monkeypatch):
     private = "private-provider-token-and-prompt"
-    monkeypatch.setitem(llms.FACTORIES, CONFIG.llm_style, AsyncMock(side_effect=ValueError(private)))
+    monkeypatch.setattr(llms, "openai_complete", AsyncMock(side_effect=ValueError(private)))
     result = await llms.llm_complete("__root__", "input")
     assert not result.ok() and result.code() == CODE.SERVICE_UNAVAILABLE
     assert result.msg().endswith("LLM completion failed") and private not in result.msg()
@@ -48,7 +48,10 @@ async def test_completion_failure_is_rejected_and_redacted_for_both_loggers(erro
 @pytest.mark.asyncio
 async def test_accounting_failure_does_not_discard_completion_for_both_loggers(error_logs, monkeypatch):
     private = "private-database-connection-string"
-    monkeypatch.setitem(llms.FACTORIES, CONFIG.llm_style, AsyncMock(return_value="OK"))
+    async def complete(*args, on_usage, **kwargs):
+        await on_usage(10, 5, 1)
+        return "OK"
+    monkeypatch.setattr(llms, "openai_complete", complete)
     monkeypatch.setattr(llms, "project_cost_token_billing", AsyncMock(side_effect=RuntimeError(private)))
     result = await llms.llm_complete("__root__", "input")
     assert result.ok() and result.data() == "OK"

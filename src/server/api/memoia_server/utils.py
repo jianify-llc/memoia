@@ -18,7 +18,6 @@ from .models.blob import (
 from .models.database import GeneralBlob
 from .models.response import UserEventData, EventData
 from .models.utils import Promise, CODE
-from .connectors import get_redis_client, PROJECT_ID
 
 LIST_INT_REGEX = re.compile(r"\[\s*(?:\d+(?:\s*,\s*\d+)*\s*)?\]")
 

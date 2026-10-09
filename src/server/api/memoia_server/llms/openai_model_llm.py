@@ -1,10 +1,14 @@
 # Modified for Memoia: relocated package and GPT-6 Luna request compatibility.
+import time
+from collections.abc import Awaitable, Callable
 from .utils import exclude_special_kwargs, get_openai_async_client_instance
 from ..env import CONFIG, LOG
 
 
 async def openai_complete(
-    model, prompt, system_prompt=None, history_messages=[], **kwargs
+    model, prompt, system_prompt=None, history_messages=[],
+    on_usage: Callable[[int | None, int | None, float], Awaitable[None]] | None = None,
+    **kwargs
 ) -> str:
     sp_args, kwargs = exclude_special_kwargs(kwargs)
     prompt_id = sp_args.get("prompt_id", None)
@@ -24,9 +28,14 @@ async def openai_complete(
         for name in ("temperature", "top_p", "top_logprobs", "logprobs"):
             kwargs.pop(name, None)
 
+    started = time.monotonic()
     response = await openai_async_client.chat.completions.create(
         model=model, messages=messages, timeout=120, **kwargs
     )
+    usage = response.usage
+    if on_usage is not None:
+        await on_usage(getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None),
+                       (time.monotonic() - started) * 1000)
     if not response.choices:
         raise ValueError("LLM returned no completion choices")
     choice = response.choices[0]
@@ -39,7 +48,6 @@ async def openai_complete(
     if not isinstance(content, str):
         raise ValueError("LLM returned no text content")
 
-    usage = response.usage
     cached_tokens = getattr(
         getattr(usage, "prompt_tokens_details", None), "cached_tokens", None
     )

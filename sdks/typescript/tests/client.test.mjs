@@ -467,6 +467,16 @@ describe("permanent account forgetting", () => {
   });
 });
 
+describe("usage completeness", () => {
+  it("preserves unknown usage while retaining the previous additive response contract", async () => {
+    for (const extra of [{ usage_complete: false }, {}]) {
+      const usage = { usages: [{ date: "2026-10-09", total_insert: 0, total_success_insert: 0,
+        total_input_token: 10, total_output_token: 5, ...extra }] };
+      assert.deepEqual(await client(async () => json(usage)).getUsage(1), usage);
+    }
+  });
+});
+
 describe("bounded transport", () => {
   it("rejects redirects without replaying or exposing the destination", async () => {
     for (const status of [301, 302, 303, 307, 308]) {

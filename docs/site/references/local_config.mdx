@@ -67,7 +67,7 @@ Redis remains required for other server functions.
 
 ### LLM Configuration
 - `language`: string, default to `"en"`, available options `{"en", "zh", "ja"}`. The prompt language of Memobase.
-- `llm_style`: string, default to `"openai"`, available options `{"openai", "doubao_cache"}`. The LLM provider style.
+- `llm_style`: string, only `"openai"` is supported. The retired `doubao_cache` configuration fails explicitly; it does not silently switch providers.
 - `llm_base_url`: string, default to `null`. The base URL of any OpenAI-Compatible API.
 - `llm_api_key`: string, required. Your LLM API key.
 - `llm_openai_default_query`: dictionary, default to `null`. Default query parameters for OpenAI API calls.

@@ -102,6 +102,7 @@ class LoopUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     elapsed_seconds: float = 0
+    usage_complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -164,6 +165,7 @@ class _StrictMaintenanceModel(OpenAIResponsesModel):
         self.turns = 0
         self.input_tokens = 0
         self.output_tokens = 0
+        self.usage_complete = True
         self.service_tier = "flex"
 
     async def _fetch_response(self, system_instructions, input, model_settings,
@@ -216,7 +218,10 @@ class _StrictMaintenanceModel(OpenAIResponsesModel):
                 and response.error.code in ("server_error", "rate_limit_exceeded")
                 and response.incomplete_details is None and getattr(response, "output", None) == [])
             if response.usage is not None or not transient_failure:
-                await self._record_usage(response.usage, requested_at)
+                if not await self._record_usage(response.usage, requested_at):
+                    # The pinned SDK accepts absent usage but rejects partial counters.
+                    # Keep our unknown marker; do not manufacture zero provider usage.
+                    response.usage = None
             await self.context.assert_active()
             if transient_failure and self.service_tier == "flex":
                 self.service_tier = "default"
@@ -224,13 +229,21 @@ class _StrictMaintenanceModel(OpenAIResponsesModel):
             self._validate_completion(response, {tool.name: tool.params_json_schema for tool in tools})
             return response
 
-    async def _record_usage(self, usage, requested_at: float) -> None:
+    async def _record_usage(self, usage, requested_at: float) -> bool:
         def value(name):
             return usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
         input_tokens, output_tokens, total = (value(name) for name in (
             "input_tokens", "output_tokens", "total_tokens"))
-        if any(type(tokens) is not int or tokens < 0 for tokens in (input_tokens, output_tokens, total)):
-            raise MaintenanceRunError("MAINTENANCE_USAGE_MISSING")
+        if any(tokens is not None and (type(tokens) is not int or tokens < 0)
+               for tokens in (input_tokens, output_tokens, total)):
+            raise MaintenanceRunError("MAINTENANCE_USAGE_INVALID")
+        if any(tokens is None for tokens in (input_tokens, output_tokens, total)):
+            self.usage_complete = False
+            await record_completion_usage(self.context.project_id, None, None,
+                                          (time.monotonic() - requested_at) * 1000)
+            if output_tokens is not None and output_tokens > MAX_COMPLETION_TOKENS:
+                raise MaintenanceRunError("MAINTENANCE_COMPLETION_LENGTH")
+            return False
         if total != input_tokens + output_tokens:
             raise MaintenanceRunError("MAINTENANCE_USAGE_INVALID")
         self.input_tokens += input_tokens
@@ -241,6 +254,7 @@ class _StrictMaintenanceModel(OpenAIResponsesModel):
                                       (time.monotonic() - requested_at) * 1000)
         if output_tokens > MAX_COMPLETION_TOKENS:
             raise MaintenanceRunError("MAINTENANCE_COMPLETION_LENGTH")
+        return True
 
     @staticmethod
     def _error_usage(error):
@@ -533,7 +547,8 @@ async def run_loop(context: MaintenanceContext) -> LoopPlan:
             await context.assert_active()
             return context.get_plan(LoopUsage(
                 turns=model.turns, input_tokens=model.input_tokens,
-                output_tokens=model.output_tokens, elapsed_seconds=time.monotonic() - started))
+                output_tokens=model.output_tokens, elapsed_seconds=time.monotonic() - started,
+                usage_complete=model.usage_complete))
     except TimeoutError:
         raise MaintenanceRunError("MAINTENANCE_TIMEOUT", retryable=True) from None
     except MaxTurnsExceeded:

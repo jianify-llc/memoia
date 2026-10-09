@@ -47,6 +47,16 @@ Test 长检查先于 Git 连接，hook 按目标 ref 验证本次提交和远端
 
 本地通过、默认分支入口注册、Test 真实发布分别验收；仅注册入口不能证明候选脚本、迁移或业务已上线。
 
+## Redis 运行边界
+
+Usage 的 `usage_complete=false` 表示已记录的模型调用存在未知用量，总量仅是已记录小计；未知调用按同一日/月 TTL 保留，不估算或扣费。统计读取故障返回 503，不返回零。Redis 写入失败只告警，不重放模型；这些计数与完整性标记都不是财务账本，停机期间未写入、数据丢失或过期仍可能无法重建。
+
+数据库结构指纹只包含 ORM 与 Alembic 配置/迁移，不包含 Redis/连接池实现。旧指纹仅通过已接纳的固定 digest 镜像校验，并比较新旧镜像的同一结构指纹；普通发布完整验收后才更新基线表示。真实 ORM/迁移变化仍必须进入 schema maintenance，不因指纹格式调整绕过迁移门禁。
+
+Redis 只用于用户写入租约与轻量统计，Blob/Operation/flush 排队由 PostgreSQL 负责。API 和 Worker 各自默认最多 32 个连接、连接超时 1 秒、命令超时 2 秒（环境变量见 `.env.example`）；不自动重放 Redis 命令。统计故障不能触发模型重试，Usage 故障明确不可用，缺失供应商用量单独标为未知；计数不是财务账本。
+
+Compose 明确使用 `noeviction`，保留 AOF 和配套恢复；不批量清理历史 Redis key。内存上限必须按实际峰值及余量单独确定，本轮未臆测容量。Redis 启动命令变化影响基础设施指纹，不能通过普通镜像发布偷换服务器配置；需另行授权维护与验收。本地模板不代表 Test 已应用。
+
 ## GitHub Organization 与镜像归属
 
 源码仓库为 `jianify-llc/memoia`，历史 Test 镜像仍在 `ghcr.io/jianify/memoia`。工作流使用 `github.repository` 发布新候选到 `ghcr.io/jianify-llc/memoia`；须确认 package 关联仓库、Actions 写权限及匿名拉取。Test 验证 AMD64；Online 验证 AMD64/ARM64。仓库可见性不等于 package 可见性。
@@ -100,7 +110,7 @@ MEMOIA_IMAGE 可填初始候选总 manifest digest，不用 latest；所有应�
 
 2026-09-30，Test 已完成旧独立 PostgreSQL 到公司共享实例 `memoia` 数据库的一次性停写切换；旧 PostgreSQL 已停止，当前 API 连接公司数据库，Test 发布入口已重新启用（本次规范推广后须明确手动验收）。此后按下文日常发布流程操作，不重跑 `backup-cutover` 或 `adopt-external-postgres`，也不以旧库快照覆盖新写入。一次性候选与旧版补丁见[历史切换说明](cutover/README.md)，实际迁移、数据及业务验收见[公司监控切换记录](https://github.com/jianify-llc/Jianify-llc/blob/main/ops/monitoring/test-cutover.md)。
 
-init 记录 infra-config.sha256 和 schema.sha256；前者包含公司 PostgreSQL 只读配置指纹、Memoia Redis、外部网络与应用连接契约，后者只读取镜像内 ORM、建表连接层和迁移源码，不导入应用或连接 DB。Memoia 独立管理自己的服务生命周期；是否已有 Luvel 等消费者不作为日常发布资格，不再创建或读取 standalone-mode 标记。
+init 记录 infra-config.sha256 和 schema.sha256；前者包含公司 PostgreSQL 只读配置指纹、Memoia Redis、外部网络与应用连接契约，后者只读取镜像内 ORM、Alembic 配置和迁移源码，不包含连接池或 Redis 运行代码，不导入应用或连接 DB。Memoia 独立管理自己的服务生命周期；是否已有 Luvel 等消费者不作为日常发布资格，不再创建或读取 standalone-mode 标记。
 
 ## 日常发布
 
@@ -200,7 +210,7 @@ ShellCheck/actionlint/Bash 语法仅静态验证。test_workflow.py 解析真实
 
 ### TypeScript SDK 真实探针
 
-`sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.9.0 已构建产物，不安装依赖或重新打包。stdin 是 JSON：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 是整体预算，默认 360000、上限 900000；地址和 token 不放 argv／日志。输入输出保存为 root:root 0600 受保护文件。两消息专用来源必须确认消息／Blob／证据的 next_*_offset 全为 null，不能用部分页证明完整性。Fact 回执确认后单次调用 flush 并查询原操作；核对固定 Blob 归属和两类派生结果，未知回执不重发，不自动恢复失败直到凑绿。
+`sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.9.1 已构建产物，不安装依赖或重新打包。stdin 是 JSON：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 是整体预算，默认 360000、上限 900000；地址和 token 不放 argv／日志。输入输出保存为 root:root 0600 受保护文件。两消息专用来源必须确认消息／Blob／证据的 next_*_offset 全为 null，不能用部分页证明完整性。Fact 回执确认后单次调用 flush 并查询原操作；核对固定 Blob 归属和两类派生结果，未知回执不重发，不自动恢复失败直到凑绿。
 
 导入／删除 completed 只确认 Fact。探针先验证无需 Event 的 Fact 召回，再单次 flush 并查询该原 Operation，确认固定 Blob 集合完成后才检查画像／Event／历史。超时、失败或退避中的原错误均验收失败，保留原 Operation 和批次，不自动重导入或调用维护恢复；新 flush 的成功不能替代原批次验收。
 

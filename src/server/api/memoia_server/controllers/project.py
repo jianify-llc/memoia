@@ -1,11 +1,12 @@
 # Modified for Memoia: relocated from the upstream memobase_server package.
 from sqlalchemy import cast, String, func, desc
+from redis.exceptions import RedisError
 from ..models.database import Project, User, UserProfile, UserEvent
 from ..models.utils import Promise, CODE
 from ..models.response import IdData, ProfileConfigData, ProjectUsersData, DailyUsage
 from ..connectors import Session
-from ..env import ProfileConfig, TelemetryKeyName
-from ..telemetry.capture_key import get_int_key, date_past_key
+from ..env import ProfileConfig, TelemetryKeyName, LOG
+from ..telemetry.capture_key import get_int_keys, head_key, date_past_key
 
 
 async def get_project_secret(project_id: str) -> Promise[str]:
@@ -153,20 +154,18 @@ async def get_project_usage(
     project_id: str, last_days: int = 7
 ) -> Promise[list[DailyUsage]]:
     query_dates = [date_past_key(i) for i in range(last_days)]
+    names = (TelemetryKeyName.insert_blob_request, TelemetryKeyName.insert_blob_success_request,
+             TelemetryKeyName.llm_input_tokens, TelemetryKeyName.llm_output_tokens,
+             TelemetryKeyName.llm_usage_unknown)
+    keys = [f"{head_key(project_id)}::{name}::{date}" for date in query_dates for name in names]
+    try:
+        values = await get_int_keys(keys)
+    except (RedisError, TimeoutError, ValueError) as error:
+        LOG.warning("Usage statistics read failed (%s)", type(error).__name__)
+        return Promise.reject(CODE.SERVICE_UNAVAILABLE, "Usage statistics unavailable")
     results = []
-    for qd in query_dates:
-        total_insert = await get_int_key(
-            TelemetryKeyName.insert_blob_request, project_id, use_date=qd
-        )
-        total_success_insert = await get_int_key(
-            TelemetryKeyName.insert_blob_success_request, project_id, use_date=qd
-        )
-        total_input_token = await get_int_key(
-            TelemetryKeyName.llm_input_tokens, project_id, use_date=qd
-        )
-        total_output_token = await get_int_key(
-            TelemetryKeyName.llm_output_tokens, project_id, use_date=qd
-        )
+    for index, qd in enumerate(query_dates):
+        total_insert, total_success_insert, total_input_token, total_output_token, unknown = values[index * len(names):(index + 1) * len(names)]
         results.append(
             DailyUsage(
                 date=qd,
@@ -174,6 +173,7 @@ async def get_project_usage(
                 total_success_insert=total_success_insert,
                 total_input_token=total_input_token,
                 total_output_token=total_output_token,
+                usage_complete=unknown == 0,
             )
         )
     return Promise.resolve(results)

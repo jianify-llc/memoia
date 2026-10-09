@@ -565,6 +565,12 @@ export interface components {
              * @default 0
              */
             total_output_token: number;
+            /**
+             * Usage Complete
+             * @description False when recorded calls lacked token usage. Totals are approximate recorded usage, not a billing ledger; outages or expired counters can lose statistics.
+             * @default true
+             */
+            usage_complete: boolean;
         };
         /** DeleteMessages */
         DeleteMessages: {

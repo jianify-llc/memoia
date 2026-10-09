@@ -1,7 +1,7 @@
 """Bounded source processing. PostgreSQL owns effects; Redis avoids duplicate work."""
 import hashlib
 import json
-import time
+from functools import partial
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from uuid import UUID, uuid4
@@ -233,18 +233,16 @@ async def _structured(model, prompt, system, *, project_id=DEFAULT_PROJECT_ID,
     schema = model.model_json_schema()
     # OpenAI strict schemas require all object keys; Pydantic fields here have no defaults.
     try:
-        started = time.monotonic()
         raw = await openai_complete(
             llm_model or CONFIG.best_llm_model, prompt, system_prompt=system,
             reasoning_effort=reasoning_effort or CONFIG.llm_reasoning_effort,
             service_tier="default",
+            on_usage=partial(record_completion_usage, project_id),
             max_completion_tokens=CONFIG.source_output_reserve_tokens,
             response_format={"type": "json_schema", "json_schema": {
                 "name": model.__name__, "strict": True, "schema": schema,
             }},
         )
-        await record_completion_usage(project_id, len(get_encoded_tokens(prompt + system)),
-                                      len(get_encoded_tokens(raw)), (time.monotonic() - started) * 1000)
         return model.model_validate_json(raw)
     except (BadRequestError, AuthenticationError, PermissionDeniedError, NotFoundError) as error:
         raise SourceError("model_configuration_rejected", "Model configuration or credentials were rejected", 503, False) from error

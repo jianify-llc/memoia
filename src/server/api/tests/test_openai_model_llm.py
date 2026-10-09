@@ -14,7 +14,7 @@ from api import app
 from memoia_server import llms
 from memoia_server.env import CONFIG
 from memoia_server.llms.openai_model_llm import openai_complete
-from memoia_server.models.utils import CODE
+from memoia_server.models.utils import CODE, Promise
 
 
 @pytest.fixture
@@ -70,9 +70,40 @@ def openai_transport(monkeypatch):
         "memoia_server.llms.openai_model_llm.get_openai_async_client_instance",
         lambda: client,
     )
-    monkeypatch.setattr(llms, "project_cost_token_billing", AsyncMock())
+    monkeypatch.setattr(llms, "project_cost_token_billing", AsyncMock(return_value=Promise.resolve(None)))
     monkeypatch.setattr(CONFIG, "llm_reasoning_effort", "high")
     return state, client
+
+
+@pytest.mark.asyncio
+async def test_accounting_uses_provider_tokens_not_text_estimates(openai_transport):
+    _, client = openai_transport
+    try:
+        result = await llms.llm_complete("__root__", "a short prompt")
+        assert result.ok()
+        call = llms.project_cost_token_billing.await_args
+        assert call.args == ("__root__", 10, 5)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_usage_is_unknown_and_does_not_debit(openai_transport, monkeypatch):
+    state, client = openai_transport
+    state["usage"] = False
+    calls = []
+    monkeypatch.setattr(llms, "capture_int_key", AsyncMock(return_value=True))
+    monkeypatch.setattr(llms.telemetry_manager, "increment_counter_metric", lambda *args: calls.append(args))
+    try:
+        result = await llms.llm_complete("__root__", "input")
+        assert result.ok()
+        llms.project_cost_token_billing.assert_not_awaited()
+        llms.capture_int_key.assert_awaited_once_with(llms.TelemetryKeyName.llm_usage_unknown, project_id="__root__")
+        assert any(call[0] == llms.CounterMetricName.LLM_USAGE_UNKNOWN for call in calls)
+        assert not any(call[0] in (llms.CounterMetricName.LLM_TOKENS_INPUT,
+                                  llms.CounterMetricName.LLM_TOKENS_OUTPUT) for call in calls)
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio

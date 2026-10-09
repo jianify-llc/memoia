@@ -121,7 +121,7 @@ project/user isolation and profile CRUD/merge/user deletion without Redis comman
 ## Dependencies
 - FastAPI: Web framework
 - SQLAlchemy: Database ORM
-- Redis: Caching and temporary storage
+- Redis: Renewable user-write coordination and approximate usage counters
 - Pydantic: Data validation
 - Tiktoken: Token management
 - Rich: Enhanced logging
@@ -180,30 +180,31 @@ against disposable local PostgreSQL/Redis only. These checks do not establish
 API-key/model access, extraction quality, latency, cost or real source-import acceptance;
 those require an explicitly configured provider acceptance run and a new image.
 
-### Background user lease
+### Redis boundaries
 
-The existing user/project/blob-type lock and queue names are unchanged. Each
-background runner holds a 300-second renewable lease. A separate asyncio heartbeat
-runs throughout the batch, including model waits, and atomically compare-and-expires
-the owner token every one-third TTL. Renewal I/O is bounded to one-third TTL;
-an error, timeout or owner mismatch blocks subsequent batches. Owner verification
-and queue pop are also atomic; an old runner cannot consume the next owner's queue.
-Normal exit, exceptions and cancellation stop/join the heartbeat before the
-existing compare-and-delete release, without deleting a successor's lock.
+PostgreSQL owns fixed Blobs, Operations, flush scheduling and recovery. Redis only
+coordinates user writes and stores approximate day/month usage counters. The old
+`buffer_background` queue and Doubao context cache are removed; historical Buffer
+cleanup remains. Old Redis keys are not bulk-deleted: TTL keys expire naturally,
+and persistent queues require a separate inventory against unfinished DB records.
 
-Lease loss does not cancel or replay an admitted batch: external request cancellation
-does not prove server-side cancellation. This is not a database fencing protocol;
-Redis outages or event-loop stalls longer than TTL can still leave in-flight results
-requiring reconciliation. Do not infer drain completion from a missing/expired lock.
-The existing maximum processing duration is checked between batches, not a hard
-deadline for an individual model request. Shutdown/release safety still requires
-the drain and unknown-result checks in the release guide.
+`UserLease` atomically acquires, renews and releases its owner token. Acquisition
+and release are bounded to 3 seconds; renewal is bounded to one-third TTL or
+3 seconds. Redis failure or owner mismatch invalidates authority. Cancellation
+joins the heartbeat; an old owner cannot release its successor. The existing SQL
+generation/version fence remains the final commit authority. Loops only acquire
+the write lease for their short final commit, not while waiting for the model.
 
-`tests/test_buffer_background.py` executes the real runner/Lua against disposable
-Redis, with the processing boundary controlled by events. It verifies processing
-longer than two TTLs does not admit a second executor, owner replacement cannot
-renew/delete the successor or dequeue work, renewal errors stop later batches, and
-cancellation leaves no heartbeat behind.
+Usage increments and TTLs share a transaction pipeline with no implicit retries.
+Unknown acknowledgements may lose statistics but must not replay model calls.
+Actual provider tokens are used, including reasoning usage; missing metadata is
+unknown (`llm_usage_unknown_total`), not zero or a text-token estimate. Usage totals
+therefore cover known usage only, not a precise billing ledger. Statistics read
+failure returns unavailable; existing project quota debits are retained separately.
+
+`tests/test_redis_boundaries.py` covers bounded failures, cancellation, owner-only
+release and real Redis counters/TTLs; source and maintenance tests cover SQL fencing,
+unknown-result recovery and raw-input cleanup against isolated PostgreSQL/Redis.
 
 ## Development Guidelines
 1. Use async/await for database operations

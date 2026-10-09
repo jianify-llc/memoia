@@ -1,12 +1,7 @@
 # Modified for Memoia: relocated from the upstream memobase_server package.
 from hashlib import sha256
-from datetime import datetime
-from random import random
-from typing import Tuple
-from uuid import uuid4
 from ..models.utils import Promise
 from ..models.response import CODE
-from ..connectors import get_redis_client
 from ..controllers import project
 
 
@@ -18,14 +13,6 @@ def parse_project_id(secret_key: str) -> Promise[str]:
         return Promise.reject(CODE.UNAUTHORIZED, "Invalid secret key")
     project_id = "-".join(parts[:-1]).strip()
     return Promise.resolve(project_id)
-
-
-def token_redis_key(project_id: str) -> str:
-    return f"memobase::auth::token::{project_id}"
-
-
-def project_status_redis_key(project_id: str) -> str:
-    return f"memobase::auth::project_status::{project_id}"
 
 
 async def check_project_secret(project_id: str, secret_key: str) -> Promise[bool]:

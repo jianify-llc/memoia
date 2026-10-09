@@ -1,8 +1,12 @@
 # Modified for Memoia: relocated from the upstream memobase_server package.
 import os
 import asyncio
+import math
 import redis.exceptions as redis_exceptions
 import redis.asyncio as redis
+from redis.asyncio.connection import parse_url
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 from sqlalchemy import create_engine, text
 from sqlalchemy import event
 from sqlalchemy.orm import sessionmaker
@@ -119,30 +123,50 @@ async def redis_health_check() -> bool:
     try:
         async with get_redis_client() as redis_client:
             await redis_client.ping()
-    except redis_exceptions.ConnectionError as e:
-        LOG.error(f"Redis connection failed: {e}")
+    except (redis_exceptions.RedisError, TimeoutError) as error:
+        LOG.error("Redis health check failed (%s)", type(error).__name__)
         return False
     else:
         return True
 
 
 async def close_connection():
+    global REDIS_POOL
     DB_ENGINE.dispose()
     if REDIS_POOL is not None:
-        await REDIS_POOL.aclose()
+        pool, REDIS_POOL = REDIS_POOL, None
+        await pool.aclose()
     LOG.info("Connections closed")
+
+
+def create_redis_pool():
+    # URL query parameters must not silently disable the process-owned limits.
+    options = parse_url(REDIS_URL)
+    limits = {
+        "max_connections": int(os.getenv("REDIS_MAX_CONNECTIONS", "32")),
+        "socket_connect_timeout": float(os.getenv("REDIS_CONNECT_TIMEOUT_SECONDS", "1")),
+        "socket_timeout": float(os.getenv("REDIS_SOCKET_TIMEOUT_SECONDS", "2")),
+    }
+    if any(not math.isfinite(value) or value <= 0 for value in limits.values()):
+        raise ValueError("Redis connection limits must be positive")
+    options.update(limits)
+    # An ambiguous INCR acknowledgement must not replay usage accounting.
+    options.update(decode_responses=True, retry=Retry(NoBackoff(), 0), retry_on_timeout=False,
+                   retry_on_error=[])
+    return redis.ConnectionPool(**options)
 
 
 def init_redis_pool():
     global REDIS_POOL
-    REDIS_POOL = redis.ConnectionPool.from_url(REDIS_URL, decode_responses=True)
+    REDIS_POOL = create_redis_pool()
 
 
 def get_redis_client() -> redis.Redis:
     if REDIS_POOL is not None:
         return redis.Redis(connection_pool=REDIS_POOL, decode_responses=True)
     else:
-        return redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        # A short-lived client outside application startup owns and closes its pool.
+        return redis.Redis.from_pool(create_redis_pool())
 
 
 def get_pool_status() -> dict:

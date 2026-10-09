@@ -3,8 +3,12 @@ import asyncio
 from contextlib import suppress
 from contextvars import ContextVar
 from uuid import uuid4
+from redis.exceptions import RedisError
 
 from ..connectors import get_redis_client, PROJECT_ID
+from ..env import LOG
+
+LEASE_IO_TIMEOUT_SECONDS = 3
 
 
 CHECK_EXPIRE = """
@@ -48,9 +52,15 @@ class UserLease:
             current.assert_owned()
             self._nested = True
             return current
-        async with get_redis_client() as client:
-            if not await client.set(self.key, self.owner, nx=True, px=self.ttl_ms):
-                raise LeaseUnavailable()
+        try:
+            async with asyncio.timeout(LEASE_IO_TIMEOUT_SECONDS):
+                async with get_redis_client() as client:
+                    if not await client.set(self.key, self.owner, nx=True, px=self.ttl_ms):
+                        raise LeaseUnavailable()
+        except (RedisError, TimeoutError) as error:
+            # Lost SET acknowledgements are unknown ownership, not permission to write.
+            LOG.warning("User lease acquisition failed (%s)", type(error).__name__)
+            raise LeaseUnavailable() from error
         self._token = CURRENT_LEASE.set(self)
         self._heartbeat = asyncio.create_task(self._renew())
         return self
@@ -64,15 +74,17 @@ class UserLease:
         try:
             while True:
                 await asyncio.sleep(interval)
-                async with asyncio.timeout(interval):
+                async with asyncio.timeout(min(interval, LEASE_IO_TIMEOUT_SECONDS)):
                     async with get_redis_client() as client:
                         result = await client.eval(CHECK_EXPIRE, 1, self.key, self.owner, self.ttl_ms)
                 if result != 1:
                     self.lost.set()
+                    LOG.warning("User lease ownership lost")
                     return
-        except Exception:
+        except Exception as error:
             # A Redis error is not proof of ownership; the SQL fence remains authoritative.
             self.lost.set()
+            LOG.warning("User lease renewal failed (%s)", type(error).__name__)
 
     async def __aexit__(self, *_):
         if self._nested:
@@ -82,10 +94,12 @@ class UserLease:
             await self._heartbeat
         CURRENT_LEASE.reset(self._token)
         try:
-            async with get_redis_client() as client:
-                await client.eval(CHECK_DELETE, 1, self.key, self.owner)
-        except Exception:
-            self.lost.set()
+            async with asyncio.timeout(LEASE_IO_TIMEOUT_SECONDS):
+                async with get_redis_client() as client:
+                    await client.eval(CHECK_DELETE, 1, self.key, self.owner)
+        except Exception as error:
+            # TTL handles uncertain release; never delete a replacement owner blindly.
+            LOG.warning("User lease release failed (%s)", type(error).__name__)
         finally:
             # Detached tasks inherit ContextVars, not the right to keep using a released lease.
             self.lost.set()

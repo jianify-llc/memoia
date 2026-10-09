@@ -932,9 +932,9 @@ async def execute_claim(claim: Claim, *, runner=None):
                     if time.monotonic() >= deadline:
                         raise SourceError("lease_unavailable", "Memory writer is still busy", 409, True) from None
                     await asyncio.sleep(.1)
-            LOG.info("Flush committed: operation=%s turns=%s input_tokens=%s output_tokens=%s elapsed_seconds=%.3f",
+            LOG.info("Flush committed: operation=%s turns=%s input_tokens=%s output_tokens=%s usage_complete=%s elapsed_seconds=%.3f",
                      claim.operation_id, plan.usage.turns, plan.usage.input_tokens,
-                     plan.usage.output_tokens, plan.usage.elapsed_seconds)
+                     plan.usage.output_tokens, plan.usage.usage_complete, plan.usage.elapsed_seconds)
         except asyncio.CancelledError:
             await _finish_sql(fail_claim, claim, SourceError("maintenance_cancelled", "Flush was interrupted", 503, True))
             raise

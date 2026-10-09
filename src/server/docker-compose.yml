@@ -29,7 +29,7 @@ services:
       - "${REDIS_EXPORT_PORT}:6379"
     volumes:
       - ${REDIS_LOCATION}:/data
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
+    command: ["redis-server", "--maxmemory-policy", "noeviction", "--requirepass", "${REDIS_PASSWORD}"]
     healthcheck:
       test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep -qx PONG"]
       interval: 5s

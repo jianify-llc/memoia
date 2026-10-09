@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Memoia API",
-    "version": "0.9.0"
+    "version": "0.9.1"
   },
   "paths": {
     "/api/users/{user_id}": {
@@ -1939,6 +1939,12 @@
             "title": "Total Output Token",
             "description": "The total output token",
             "default": 0
+          },
+          "usage_complete": {
+            "type": "boolean",
+            "title": "Usage Complete",
+            "description": "False when recorded calls lacked token usage. Totals are approximate recorded usage, not a billing ledger; outages or expired counters can lose statistics.",
+            "default": true
           }
         },
         "type": "object",

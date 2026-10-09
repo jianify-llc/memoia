@@ -262,6 +262,7 @@ class DailyUsage(BaseModel):
     total_success_insert: int = Field(0, description="The total update")
     total_input_token: int = Field(0, description="The total input token")
     total_output_token: int = Field(0, description="The total output token")
+    usage_complete: bool = Field(True, description="False when recorded calls lacked token usage. Totals are approximate recorded usage, not a billing ledger; outages or expired counters can lose statistics.")
 
 
 # API response format

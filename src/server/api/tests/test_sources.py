@@ -118,8 +118,11 @@ async def test_fixed_user_import_is_project_scoped_and_deleted_user_is_not_recre
 
 
 @pytest.mark.asyncio
-async def test_project_accounting_does_not_touch_user_memory_version_or_require_live_lease(source_user):
+@pytest.mark.parametrize("statistics_available", [True, False])
+async def test_project_accounting_does_not_touch_user_memory_version_or_require_live_lease(source_user, monkeypatch, statistics_available):
     from memoia_server.controllers.billing import project_cost_token_billing
+    if not statistics_available:
+        monkeypatch.setattr("memoia_server.controllers.billing.capture_int_keys", AsyncMock(return_value=False))
     with Session.begin() as session:
         billing = session.query(Billing).join(ProjectBilling).filter(ProjectBilling.project_id == "__root__").one()
         before, bid = billing.usage_left, billing.id

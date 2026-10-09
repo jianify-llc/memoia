@@ -301,7 +301,6 @@ async def test_completed_noop_is_valid(transport, text):
     (completion(None, calls=[tool("modify_fact", {})]),
      "MAINTENANCE_COMPLETION_TOOLS"),
     (completion("text", status="failed"), "MAINTENANCE_COMPLETION_INCOMPLETE"),
-    (completion("Done", usage=False), "MAINTENANCE_USAGE_MISSING"),
 ])
 async def test_invalid_protocol_never_returns_a_plan(transport, response, code):
     transport["responses"] = [response]
@@ -695,7 +694,7 @@ async def test_invalid_compaction_cannot_dispatch_tools(transport, checkpoint):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("values", [
-    {"input_tokens": -1}, {"output_tokens": None}, {"input_tokens": True}, {"total_tokens": 16},
+    {"input_tokens": -1}, {"input_tokens": True}, {"total_tokens": 16},
 ])
 async def test_invalid_usage_metadata_does_not_dispatch_tools(transport, values):
     response = completion(None, calls=[tool("read_memory", {"collection": "facts"})])
@@ -705,6 +704,22 @@ async def test_invalid_usage_metadata_does_not_dispatch_tools(transport, values)
     with pytest.raises(MaintenanceRunError, match="MAINTENANCE_USAGE_"):
         await run_loop(context)
     assert context.calls == [] and context.plans == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", [None, "input_tokens", "output_tokens", "total_tokens"])
+async def test_missing_usage_preserves_valid_tools_and_completion(transport, missing):
+    first = completion(None, calls=[tool("read_memory", {"collection": "facts"})], usage=missing is not None)
+    if missing:
+        first["usage"][missing] = None
+    transport["responses"] = [first, completion()]
+    context = Context()
+    plan = await run_loop(context)
+    assert len(context.calls) == 1 and context.plans == 1
+    assert plan.usage.turns == 2 and not plan.usage.usage_complete
+    assert (plan.usage.input_tokens, plan.usage.output_tokens) == (10, 5)
+    assert transport["accounting"][0][1:3] == (None, None)
+    assert transport["accounting"][1][1:3] == (10, 5)
 
 
 @pytest.mark.asyncio

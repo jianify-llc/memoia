@@ -70,6 +70,7 @@ class TelemetryKeyName:
     insert_blob_success_request = "insert_blob_success_request"
     llm_input_tokens = "llm_input_tokens"
     llm_output_tokens = "llm_output_tokens"
+    llm_usage_unknown = "llm_usage_unknown"
     has_request = "has_request"
 
 
@@ -102,7 +103,7 @@ class Config:
 
     # LLM
     language: Literal["en", "zh"] = "en"
-    llm_style: Literal["openai", "doubao_cache"] = "openai"
+    llm_style: Literal["openai"] = "openai"
     llm_base_url: str = None
     llm_api_key: str = None
     llm_openai_default_query: dict[str, str] = None
@@ -160,6 +161,8 @@ class Config:
             env_var_name = f"MEMOBASE_{field_name.upper()}"
             if env_var_name in os.environ:
                 env_value = os.environ[env_var_name]
+                if field_name == "llm_style" and env_value not in ("openai", '"openai"'):
+                    raise ValueError("Only llm_style=openai is supported; doubao_cache has been removed")
 
                 # Try to parse as JSON first
                 try:
@@ -207,6 +210,8 @@ class Config:
         return overwrite_config
 
     def __post_init__(self):
+        if self.llm_style != "openai":
+            raise ValueError("Only llm_style=openai is supported; doubao_cache has been removed")
         if self.best_llm_model is None or self.llm_reasoning_effort is None:
             raise ValueError("The service model and reasoning effort must be configured")
         _validate_llm_configuration(self.best_llm_model, self.llm_reasoning_effort)

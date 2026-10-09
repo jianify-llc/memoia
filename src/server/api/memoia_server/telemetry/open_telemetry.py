@@ -34,6 +34,7 @@ class CounterMetricName(Enum):
     REQUEST = "requests_total"
     HEALTHCHECK = "healthcheck_total"
     LLM_INVOCATIONS = "llm_invocations_total"
+    LLM_USAGE_UNKNOWN = "llm_usage_unknown_total"
     LLM_TOKENS_INPUT = "llm_input_tokens_total"
     LLM_TOKENS_OUTPUT = "llm_output_tokens_total"
     EMBEDDING_TOKENS = "embedding_tokens_total"
@@ -44,6 +45,7 @@ class CounterMetricName(Enum):
             CounterMetricName.REQUEST: "Total number of requests to the memobase server",
             CounterMetricName.HEALTHCHECK: "Total number of healthcheck requests to the memobase server",
             CounterMetricName.LLM_INVOCATIONS: "Total number of LLM invocations",
+            CounterMetricName.LLM_USAGE_UNKNOWN: "LLM responses without valid token usage",
             CounterMetricName.LLM_TOKENS_INPUT: "Total number of input tokens",
             CounterMetricName.LLM_TOKENS_OUTPUT: "Total number of output tokens",
             CounterMetricName.EMBEDDING_TOKENS: "Total number of embedding tokens",

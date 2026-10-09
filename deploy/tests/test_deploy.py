@@ -16,6 +16,30 @@ OLD_IMAGE = "ghcr.io/jianify/memoia@sha256:" + "a" * 64
 SHA = "d" * 40
 
 
+class SchemaFingerprint(unittest.TestCase):
+    def test_runtime_changes_do_not_change_schema_but_models_and_migrations_do(self):
+        # Execute the image script's exact hashing code against credential-free files.
+        script = (SOURCE / "schema-fingerprint.sh").read_text()
+        code = script.split("-c '\n", 1)[1].rsplit("' \"$format\"", 1)[0]
+        with tempfile.TemporaryDirectory(prefix="memoia-fingerprint-") as directory:
+            root = Path(directory)
+            code = code.replace('Path("/app")', f"Path({directory!r})")
+            for name in ("memoia_server/models/database.py", "memoia_server/connectors.py", "migrations/versions/fixture.py"):
+                file = root / name
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text("fixture\n")
+            def fingerprint(mode="schema"):
+                return subprocess.check_output(["python3", "-c", code, mode], text=True).strip()
+            schema, legacy = fingerprint(), fingerprint("legacy")
+            (root / "memoia_server/connectors.py").write_text("Redis-only pool change\n")
+            self.assertEqual(fingerprint(), schema)
+            self.assertNotEqual(fingerprint("legacy"), legacy)
+            for name in ("memoia_server/models/database.py", "migrations/versions/fixture.py"):
+                (root / name).write_text("changed schema\n")
+                self.assertNotEqual(fingerprint(), schema)
+                (root / name).write_text("fixture\n")
+
+
 @unittest.skipUnless(os.getenv("MEMOIA_DEPLOY_TEST_ISOLATED") == "1" and Path("/.dockerenv").exists() and os.geteuid() == 0,
                      "Requires an explicitly isolated disposable root Linux container")
 class DeploymentBoundary(unittest.TestCase):
@@ -326,6 +350,29 @@ else:
         self.assertNotEqual(self.deploy().returncode, 0)
         self.assertFalse(any("stop" in a["args"] or "up" in a["args"] for a in self.actions()))
         self.assertFalse((self.state / "pending-deploy").exists())
+
+    def test_legacy_baseline_accepts_only_same_schema_then_promotes_on_finalize(self):
+        self.env["FIXTURE_SCHEMA"] = "c" * 64
+        self.env["FIXTURE_ACCEPTED_SCHEMA"] = "c" * 64
+        self.assertEqual(self.deploy().returncode, 0)
+        self.assertEqual((self.state / "schema.sha256").read_text().strip(), "f" * 64)
+        self.assertEqual(self.deploy("finalize").returncode, 0)
+        self.assertEqual((self.state / "schema.sha256").read_text().strip(), "c" * 64)
+
+    def test_forged_legacy_baseline_cannot_accept_schema_change(self):
+        self.env["FIXTURE_SCHEMA"] = "c" * 64
+        self.env["FIXTURE_ACCEPTED_SCHEMA"] = "c" * 64
+        self.env["FIXTURE_LEGACY_SCHEMA"] = "b" * 64
+        self.assertNotEqual(self.deploy().returncode, 0)
+        self.assertFalse(any("stop" in a["args"] or "up" in a["args"] for a in self.actions()))
+
+    def test_legacy_same_schema_cannot_enter_migration(self):
+        self.env["FIXTURE_SCHEMA"] = "c" * 64
+        self.env["FIXTURE_ACCEPTED_SCHEMA"] = "c" * 64
+        result = self.deploy("migrate-schema", evidence=self.state / "unused.json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Schema is unchanged", result.stderr)
+        self.assertFalse(any("stop" in a["args"] for a in self.actions()))
 
     def test_incorrect_revision_blocks_before_stop(self):
         self.env["FIXTURE_REVISION"] = "a" * 40

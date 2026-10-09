@@ -141,7 +141,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     return JSONResponse(status_code=413, content={"detail": {"code": "body_too_large", "message": "Request body exceeds 2 MiB", "retryable": False}})
                 body.extend(chunk)
             request._body = bytes(body)
-        # await capture_int_key(TelemetryKeyName.has_request)
 
         normalized_path = self.normalize_path(request.url.path)
 

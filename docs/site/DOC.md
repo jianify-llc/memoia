@@ -2152,7 +2152,7 @@ Redis remains required for other server functions.
 
 ### LLM Configuration
 - `language`: string, default to `"en"`, available options `{"en", "zh", "ja"}`. The prompt language of Memobase.
-- `llm_style`: string, default to `"openai"`, available options `{"openai", "doubao_cache"}`. The LLM provider style.
+- `llm_style`: string, only `"openai"` is supported. The retired `doubao_cache` configuration fails explicitly; it does not silently switch providers.
 - `llm_base_url`: string, default to `null`. The base URL of any OpenAI-Compatible API.
 - `llm_api_key`: string, required. Your LLM API key.
 - `llm_openai_default_query`: dictionary, default to `null`. Default query parameters for OpenAI API calls.
@@ -3000,7 +3000,6 @@ This guide demonstrates a powerful method for adding persistent user memory to t
 - **Is automatic**: Seamlessly saves conversations and injects context without extra code.
 
 This approach offers a clean and non-intrusive way to build personalized, stateful AI experiences into your existing OpenAI applications.
-
 
 
 

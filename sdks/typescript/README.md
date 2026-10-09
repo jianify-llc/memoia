@@ -1,6 +1,6 @@
 # Memoia TypeScript SDK
 
-`@jianify/memoia@0.9.0` supports Node.js and Cloudflare Workers. Protocol types and standalone runtime validators come from `src/server/api/openapi.json`. Every capability uses one unversioned `/api` contract; deploy server and consumers together. No legacy SDK or version alias is supported.
+`@jianify/memoia@0.9.1` supports Node.js and Cloudflare Workers. Protocol types and standalone runtime validators come from `src/server/api/openapi.json`. Every capability uses one unversioned `/api` contract; deploy server and consumers together. No legacy SDK or version alias is supported.
 
 ```ts
 import { MemoiaClient } from "@jianify/memoia";
@@ -59,6 +59,8 @@ Ordering is message ID, Blob `(created_at, id)`, and evidence `(occurred_at, id)
 
 ## Build and local consumption
 
+Daily usage includes additive `usage_complete`: false marks recorded calls without provider token counts. Totals are recorded subtotals, not estimated consumption or a financial ledger. Statistics outages return an error, not a zero total; lost/expired Redis counters cannot be reconstructed from this flag. SDK 0.9.1 adds only this usage metadata; it does not change the memory/schema contract of 0.9.0.
+
 ```bash
 pnpm install --frozen-lockfile
 pnpm check:generated
@@ -70,7 +72,7 @@ The generated validators are standalone JavaScript: runtime use requires no Node
 
 ## Time evidence (0.4)
 
-Import messages may include `time_zone` (original IANA zone). `occurred_at` remains the message recording instant, not the date of the event it describes. Returned source evidence and search facts preserve `event_time` (inclusive dates, precision and verbatim source expressions) and `source_messages` (recording instants/zones). `EventTime` and `Evidence` are exported from generated OpenAPI. Unknown dates must remain unknown. A month/year range is not an exact occurrence or duration. SDK 0.9.0 requires schema revision 0009 and coordinated consumers; no model backfill of historical identity or time is performed.
+Import messages may include `time_zone` (original IANA zone). `occurred_at` remains the message recording instant, not the date of the event it describes. Returned source evidence and search facts preserve `event_time` (inclusive dates, precision and verbatim source expressions) and `source_messages` (recording instants/zones). `EventTime` and `Evidence` are exported from generated OpenAPI. Unknown dates must remain unknown. A month/year range is not an exact occurrence or duration. SDK 0.9.1 requires schema revision 0009 and coordinated consumers; no model backfill of historical identity or time is performed.
 
 `search` and `getContext` send private queries in POST JSON bodies and use read timeouts/retry classification. User, profiles, events, project config/usage and source operations all use this same client. Query retrieval fuses lexical/vector rankings per Fact independently of Event; context keeps their global order. Temporary query embedding failure preserves lexical retrieval; input or configuration rejection fails explicitly. No query date parsing or temporal score is added.
 

@@ -277,7 +277,7 @@ def isolated_config(source, manifest, target):
         config["services"][service].pop("ports", None)
         config["services"][service]["volumes"][0]["source"] = str(target / "api/config.yaml")
     # 先从 RDB 加载；禁止正式 AOF 配置抢先覆盖 RDB。
-    config["services"]["redis"]["command"][2] = 'exec redis-server --appendonly no --requirepass "$${REDIS_PASSWORD}"'
+    config["services"]["redis"]["command"][2] = 'exec redis-server --appendonly no --maxmemory-policy noeviction --requirepass "$${REDIS_PASSWORD}"'
     return config
 
 
@@ -348,7 +348,7 @@ def restore(directory, target):
     run(command + ["stop", "--timeout", "30", "redis"])
     if inspect(redis_container)["State"].get("ExitCode") != 0:
         raise RuntimeError("Redis did not stop gracefully after AOF rewrite")
-    config["services"]["redis"]["command"][2] = 'exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"'
+    config["services"]["redis"]["command"][2] = 'exec redis-server --appendonly yes --maxmemory-policy noeviction --requirepass "$${REDIS_PASSWORD}"'
     file.write_text(json.dumps(config))
     run(command + ["up", "-d", "--no-deps", "--no-build", "redis"])
     wait_healthy(command, "redis")
