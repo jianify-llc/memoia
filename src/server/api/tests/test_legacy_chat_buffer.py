@@ -1,22 +1,16 @@
 # Modified for Memoia: use the renamed internal server package.
 import pytest
-from unittest.mock import AsyncMock, Mock, patch
+from sqlalchemy import select
 from memoia_server import controllers
+from memoia_server.connectors import Session
+from memoia_server.controllers import source
+from memoia_server.env import BufferStatus
 from memoia_server.models import response as res
 from memoia_server.models.database import DEFAULT_PROJECT_ID
 from memoia_server.models.blob import BlobType
-from memoia_server.models.utils import Promise
-from memoia_server.env import CONFIG
+from memoia_server.models.source import memory_operations, memory_facts
 from tests.maintenance_support import maintain
-import numpy as np
 
-
-GD_FACTS = """
-- basic_info::name::Gus
-- interest::foods::Chinese food
-- education::level::High School
-- psychological::emotional_state::Feels bored with high school
-"""
 
 PROFILES = [
     "user likes to play basketball",
@@ -37,115 +31,15 @@ OVER_MAX_PROFILE_ATTRS = [
     {"topic": "interest", "sub_topic": "foods" + str(i)} for i in range(20)
 ]
 
-MERGE_FACTS = [
-    """TTTT
----
-1. UPDATE::Gus
-2. UPDATE::user likes Chinese and Japanese food
-3. UPDATE::High School
-4. UPDATE::Feels bored with high school
-"""
-]
-
-ORGANIZE_FACTS = """
-- foods::Chinese food
-"""
-
 
 def dict_contains(a: dict, b: dict) -> bool:
     return all(a[k] == v for k, v in b.items())
 
 
-@pytest.fixture
-def mock_extract_llm_complete():
-    with patch(
-        "memoia_server.controllers.modal.chat.extract.llm_complete"
-    ) as mock_llm:
-        mock_client1 = AsyncMock()
-        mock_client1.ok = Mock(return_value=True)
-        mock_client1.data = Mock(return_value=GD_FACTS)
-
-        mock_llm.side_effect = [mock_client1]
-        yield mock_llm
-
-
-@pytest.fixture
-def mock_merge_llm_complete():
-    with patch(
-        "memoia_server.controllers.modal.chat.merge_yolo.llm_complete"
-    ) as mock_llm:
-        mock_client1 = AsyncMock()
-        mock_client1.ok = Mock(return_value=True)
-        mock_client1.data = Mock(return_value=MERGE_FACTS[0])
-
-        mock_llm.side_effect = [mock_client1]
-        yield mock_llm
-
-
-@pytest.fixture
-def mock_organize_llm_complete():
-    with patch(
-        "memoia_server.controllers.modal.chat.organize.llm_complete"
-    ) as mock_llm:
-        mock_client2 = AsyncMock()
-        mock_client2.ok = Mock(return_value=True)
-        mock_client2.data = Mock(return_value=ORGANIZE_FACTS)
-
-        mock_llm.side_effect = [mock_client2]
-        yield mock_llm
-
-
-@pytest.fixture
-def mock_event_tag_llm_complete():
-    with patch(
-        "memoia_server.controllers.modal.chat.event_summary.llm_complete"
-    ) as mock_llm:
-
-        mock_client2 = AsyncMock()
-        mock_client2.ok = Mock(return_value=True)
-        mock_client2.data = Mock(return_value="- emotion::happy")
-
-        mock_llm.side_effect = [mock_client2]
-        yield mock_llm
-
-
-@pytest.fixture
-def mock_entry_summary_llm_complete():
-    with patch(
-        "memoia_server.controllers.modal.chat.entry_summary.llm_complete"
-    ) as mock_llm:
-
-        mock_client2 = AsyncMock()
-        mock_client2.ok = Mock(return_value=True)
-        mock_client2.data = Mock(return_value="Melinda is a software engineer")
-
-        mock_llm.side_effect = [mock_client2]
-        yield mock_llm
-
-
-@pytest.fixture
-def mock_event_get_embedding():
-    with patch(
-        "memoia_server.controllers.event.get_embedding"
-    ) as mock_event_get_embedding:
-        async_mock = AsyncMock()
-        async_mock.ok = Mock(return_value=True)
-        async_mock.data = Mock(
-            return_value=np.array([[0.1 for _ in range(CONFIG.embedding_dim)]])
-        )
-        mock_event_get_embedding.return_value = async_mock
-        yield mock_event_get_embedding
-
-
 @pytest.mark.asyncio
-async def test_chat_buffer_modal(
+async def test_chat_buffer_uses_fact_import_and_flush(
     db_env,
     four_fact_source_model,
-    mock_extract_llm_complete,
-    mock_merge_llm_complete,
-    mock_event_tag_llm_complete,
-    mock_entry_summary_llm_complete,
-    mock_event_get_embedding,
 ):
     p = await controllers.user.create_user(res.UserData(), DEFAULT_PROJECT_ID)
     assert p.ok()
@@ -205,7 +99,8 @@ async def test_chat_buffer_modal(
     )
     assert p.ok() and p.data() == 2
 
-    await controllers.buffer.flush_buffer(u_id, DEFAULT_PROJECT_ID, BlobType.chat)
+    flushed = await controllers.buffer.flush_buffer(u_id, DEFAULT_PROJECT_ID, BlobType.chat)
+    assert flushed.ok()
 
     p = await controllers.profile.get_user_profiles(u_id, DEFAULT_PROJECT_ID)
     assert p.ok() and p.data().profiles == []
@@ -218,7 +113,6 @@ async def test_chat_buffer_modal(
     p = await controllers.profile.get_user_profiles(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
     assert len(p.data().profiles) == 4
-    print(p.data())
 
     p = await controllers.profile.truncate_profiles(p.data(), topk=2)
     assert p.ok()
@@ -246,14 +140,9 @@ async def test_chat_buffer_modal(
 
 
 @pytest.mark.asyncio
-async def test_chat_merge_modal(
+async def test_chat_buffer_maintenance_preserves_manual_profiles(
     db_env,
     four_fact_source_model,
-    mock_extract_llm_complete,
-    mock_merge_llm_complete,
-    mock_event_tag_llm_complete,
-    mock_entry_summary_llm_complete,
-    mock_event_get_embedding,
 ):
     p = await controllers.user.create_user(res.UserData(), DEFAULT_PROJECT_ID)
     assert p.ok()
@@ -308,7 +197,8 @@ async def test_chat_merge_modal(
         u_id, DEFAULT_PROJECT_ID, PROFILES, PROFILE_ATTRS
     )
     assert p.ok()
-    await controllers.buffer.flush_buffer(u_id, DEFAULT_PROJECT_ID, BlobType.chat)
+    flushed = await controllers.buffer.flush_buffer(u_id, DEFAULT_PROJECT_ID, BlobType.chat)
+    assert flushed.ok()
 
     p = await controllers.profile.get_user_profiles(u_id, DEFAULT_PROJECT_ID)
     assert p.ok() and sorted(profile.content for profile in p.data().profiles) == sorted(PROFILES)
@@ -336,15 +226,9 @@ async def test_chat_merge_modal(
 
 
 @pytest.mark.asyncio
-async def test_chat_organize_modal(
+async def test_chat_buffer_import_preserves_large_manual_profile_set(
     db_env,
     four_fact_source_model,
-    mock_extract_llm_complete,
-    mock_merge_llm_complete,
-    mock_organize_llm_complete,
-    mock_event_tag_llm_complete,
-    mock_entry_summary_llm_complete,
-    mock_event_get_embedding,
 ):
     p = await controllers.user.create_user(res.UserData(), DEFAULT_PROJECT_ID)
     assert p.ok()
@@ -376,11 +260,56 @@ async def test_chat_organize_modal(
     )
     assert p.ok()
 
-    await controllers.buffer.flush_buffer(u_id, DEFAULT_PROJECT_ID, BlobType.chat)
+    flushed = await controllers.buffer.flush_buffer(u_id, DEFAULT_PROJECT_ID, BlobType.chat)
+    assert flushed.ok()
 
     p = await controllers.profile.get_user_profiles(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
+    assert sorted(profile.content for profile in p.data().profiles) == sorted(OVER_MAX_PROFILEs)
+    assert len(p.data().profiles) == len(OVER_MAX_PROFILE_ATTRS)
 
     p = await controllers.user.delete_user(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
     four_fact_source_model.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_chat_buffer_recovers_original_operation_without_duplicate_facts(db_env, bounded_source_model):
+    created = await controllers.user.create_user(res.UserData(), DEFAULT_PROJECT_ID)
+    assert created.ok()
+    user_id = created.data().id
+    blob = res.BlobData(blob_type=BlobType.chat, blob_data={"messages": [{"role": "user", "content": "I am Gus"}]})
+    inserted = await controllers.blob.insert_blob(user_id, DEFAULT_PROJECT_ID, blob)
+    assert inserted.ok()
+    assert (await controllers.buffer.insert_blob_to_buffer(user_id, DEFAULT_PROJECT_ID, inserted.data().id, blob.to_blob())).ok()
+    extractor = bounded_source_model.side_effect
+    bounded_source_model.side_effect = source.SourceError("model_unavailable", "Temporary model failure", 503, True)
+
+    failed = await controllers.buffer.flush_buffer(user_id, DEFAULT_PROJECT_ID, BlobType.chat)
+    assert not failed.ok()
+    with Session() as session:
+        accepted = session.execute(select(memory_operations).where(memory_operations.c.user_id == user_id,
+            memory_operations.c.project_id == DEFAULT_PROJECT_ID, memory_operations.c.kind == "import")).mappings().one()
+        operation_id = accepted["id"]
+        assert accepted["status"] == "failed"
+        assert session.execute(select(memory_facts.c.id).where(memory_facts.c.user_id == user_id)).all() == []
+    pending = await controllers.buffer.get_unprocessed_buffer_ids(user_id, DEFAULT_PROJECT_ID, BlobType.chat,
+        select_status=BufferStatus.failed)
+    assert pending.ok() and len(pending.data().ids) == 1
+    bounded_source_model.side_effect = extractor
+    recovered = await controllers.buffer.flush_buffer_by_ids(user_id, DEFAULT_PROJECT_ID, BlobType.chat,
+        pending.data().ids, select_status=BufferStatus.failed)
+    assert recovered.ok()
+    repeated = await controllers.buffer.flush_buffer_by_ids(user_id, DEFAULT_PROJECT_ID, BlobType.chat,
+        pending.data().ids, select_status=BufferStatus.failed)
+    assert repeated.ok()
+    with Session() as session:
+        accepted = session.execute(select(memory_operations).where(memory_operations.c.user_id == user_id,
+            memory_operations.c.project_id == DEFAULT_PROJECT_ID, memory_operations.c.kind == "import")).mappings().one()
+        assert accepted["id"] == operation_id and accepted["status"] == "completed"
+        assert "messages" not in accepted["request"]
+        assert len(session.execute(select(memory_facts.c.id).where(memory_facts.c.user_id == user_id)).all()) == 1
+    bounded_source_model.assert_awaited()
+    assert bounded_source_model.await_count == 2
+    assert (await controllers.user.get_user_all_blobs(user_id, DEFAULT_PROJECT_ID, BlobType.chat)).data().ids == []
+    assert (await controllers.user.delete_user(user_id, DEFAULT_PROJECT_ID)).ok()

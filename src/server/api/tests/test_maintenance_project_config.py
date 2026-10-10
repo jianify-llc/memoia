@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import delete, func, select, update
 
 from memoia_server.connectors import Session
-from memoia_server.controllers import maintenance
+from memoia_server.controllers import maintenance, source
 from memoia_server.env import CONFIG
 from memoia_server.maintenance_agent import EventMutation, LoopUsage, ProfileMutation
 from memoia_server.models.database import Project, User, UserEvent, UserProfile
@@ -50,6 +50,53 @@ def claim_project(uid, pid):
     from tests.maintenance_support import claim_for
     maintenance.flush(uid, pid, uuid4().hex)
     return claim_for(uid, project_id=pid)
+
+
+@pytest.mark.parametrize("language,required_topics", [
+    ("en", {"basic_info", "relationships", "interest"}),
+    ("zh", {"基本信息", "兴趣爱好", "人生大事"}),
+])
+@pytest.mark.parametrize("explicit_language", [False, True])
+def test_topic_defaults_follow_project_language_or_service_fallback(
+        projects, monkeypatch, language, required_topics, explicit_language):
+    _, ids = projects
+    monkeypatch.setattr(CONFIG, "language", ("zh" if language == "en" else "en") if explicit_language else language)
+    config = {"language": language} if explicit_language else {}
+    with Session.begin() as session:
+        session.execute(update(Project).where(Project.project_id == ids[0]).values(profile_config=json.dumps(config)))
+        rules = source._project_rules(session, ids[0])
+    assert rules["language"] == language
+    assert required_topics <= {topic["topic"] for topic in rules["profile_topics"]}
+
+
+@pytest.mark.parametrize("strict_mode", [None, False, True])
+def test_project_strict_mode_preserves_explicit_false_and_global_fallback(projects, monkeypatch, strict_mode):
+    _, ids = projects
+    monkeypatch.setattr(CONFIG, "profile_strict_mode", True)
+    with Session.begin() as session:
+        session.execute(update(Project).where(Project.project_id == ids[0]).values(
+            profile_config=json.dumps({"profile_strict_mode": strict_mode})))
+        rules = source._project_rules(session, ids[0])
+    assert rules["strict_mode"] is (True if strict_mode is None else strict_mode)
+
+
+@pytest.mark.parametrize("overwrite", [None, [], [{"topic": "Custom Topic", "description": "Project scope",
+    "sub_topics": [{"name": "Custom Field", "description": "Keep this description", "validate_value": False}]}]])
+def test_project_topic_overrides_and_additions_preserve_descriptions(projects, overwrite):
+    _, ids = projects
+    config = {"language": "en", "overwrite_user_profiles": overwrite,
+              "additional_user_profiles": [{"topic": "Extra Topic", "description": "Additional scope", "sub_topics": []}]}
+    with Session.begin() as session:
+        session.execute(update(Project).where(Project.project_id == ids[0]).values(profile_config=json.dumps(config)))
+        rules = source._project_rules(session, ids[0])
+        assert json.loads(session.scalar(select(Project.profile_config).where(Project.project_id == ids[0]))) == config
+    topics = {topic["topic"]: topic for topic in rules["profile_topics"]}
+    if overwrite:
+        assert topics == {"custom_topic": {"topic": "custom_topic", "description": "Project scope", "sub_topics": [
+            {"name": "custom_field", "description": "Keep this description", "update_description": None, "validate_value": False}]}}
+    else:
+        assert "basic_info" in topics
+        assert topics["extra_topic"] == {"topic": "extra_topic", "description": "Additional scope", "sub_topics": []}
 
 
 @pytest.mark.asyncio

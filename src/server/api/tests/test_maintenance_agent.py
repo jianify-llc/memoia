@@ -79,7 +79,7 @@ def completion(content="Done", *, status="completed", calls=None, refusal=None,
         output.append({"id": "msg-local", "type": "message", "status": "completed",
                        "role": "assistant", "content": parts})
     response = {"id": "resp-local", "object": "response", "created_at": 1,
-                "model": "gpt-6-luna", "status": status, "output": output,
+                "model": "gpt-6-luna", "service_tier": "flex", "status": status, "output": output,
                 "parallel_tool_calls": False}
     if incomplete_reason:
         response["incomplete_details"] = {"reason": incomplete_reason}
@@ -99,10 +99,11 @@ def tool(name, arguments, call_id="call-1"):
 @pytest.fixture
 def transport(monkeypatch):
     state = {"responses": [], "requests": [], "status": 200, "after_response": None,
-             "accounting": [], "paths": [], "outcomes": [], "delays": []}
+             "accounting": [], "accounting_metadata": [], "paths": [], "outcomes": [], "delays": []}
 
-    async def accounting(project_id, input_tokens, output_tokens, latency):
+    async def accounting(project_id, input_tokens, output_tokens, latency, **metadata):
         state["accounting"].append((project_id, input_tokens, output_tokens, latency))
+        state["accounting_metadata"].append(metadata)
 
     async def respond(request):
         state["requests"].append(json.loads(request.content))
@@ -137,6 +138,26 @@ def transport(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model,supported", [
+    ("gpt-6-luna", True), ("gpt-6.1-sol", True), ("gpt-5.6", True),
+    ("gpt-5.4", False), ("custom-project-model", False),
+])
+async def test_loop_cache_respects_model_capability_without_switching_configuration(transport, model, supported):
+    transport["responses"] = [completion()]
+    context = Context()
+    context.llm_model = model
+    plan = await run_loop(context)
+    assert plan.usage.turns == 1
+    body = transport["requests"][0]
+    assert body["model"] == model and body["reasoning"] == {"effort": "high"}
+    if supported:
+        assert body["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}
+    else:
+        assert "prompt_cache_options" not in body
+    assert "prompt_cache_breakpoint" not in json.dumps(body)
+
+
+@pytest.mark.asyncio
 async def test_unified_runner_reads_stages_and_returns_only_after_final(transport):
     change = {"action": "upsert", "id": None, "topic": "relationships",
               "sub_topic": "colleague Wu", "content": "Wu is the user's colleague.",
@@ -162,6 +183,13 @@ async def test_unified_runner_reads_stages_and_returns_only_after_final(transpor
     assert "Use query/search for names, not an ids argument" in first["instructions"]
     assert first["reasoning"] == {"effort": "high"}
     assert all(body["service_tier"] == "flex" for body in transport["requests"])
+    assert all(body["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}
+               for body in transport["requests"])
+    assert all(body["instructions"] == first["instructions"] and body["tools"] == first["tools"]
+               for body in transport["requests"])
+    assert "prompt_cache_breakpoint" not in json.dumps(transport["requests"])
+    for previous, current in zip(transport["requests"], transport["requests"][1:]):
+        assert current["input"][:len(previous["input"])] == previous["input"]
     assert first["parallel_tool_calls"] is False
     assert first["max_output_tokens"] == 32768
     assert "max_tokens" not in first and "max_completion_tokens" not in first and "temperature" not in first
@@ -203,6 +231,43 @@ async def test_custom_topic_definitions_reach_runner_without_guessed_meanings(tr
     payload = json.loads(transport["requests"][0]["input"][-1]["content"])
     assert payload["profile_topics"] == context.profile_topics
     assert "allowed_topics" not in payload
+
+
+@pytest.mark.asyncio
+async def test_stable_configuration_precedes_batch_and_raw_cache_usage_survives_sdk(transport):
+    context = Context()
+    first = completion(None, calls=[tool("read_memory", {"collection": "facts"})])
+    first["usage"]["input_tokens_details"] = {"cached_tokens": 3, "cache_write_tokens": 2}
+    second = completion()
+    del second["usage"]["input_tokens_details"]["cache_write_tokens"]
+    transport["responses"] = [first, second]
+    await run_loop(context)
+    payload = json.loads(transport["requests"][0]["input"][-1]["content"])
+    assert list(payload) == ["profile_topics", "event_tag_definitions", "language",
+                             "through_version", "blob_count", "change_count"]
+    known, partial = transport["accounting_metadata"]
+    assert known == {"kind": "agent_loop", "model": "gpt-6-luna", "service_tier": "flex",
+                     "requested_service_tier": "flex", "cached_tokens": 3, "cache_write_tokens": 2}
+    assert partial["cached_tokens"] == 0 and partial["cache_write_tokens"] is None
+
+
+@pytest.mark.asyncio
+async def test_cache_usage_includes_failed_flex_and_actual_standard_tier(transport):
+    failed_usage = completion()["usage"]
+    failed_usage["input_tokens_details"] = {"cached_tokens": 4, "cache_write_tokens": 1}
+    success = completion()
+    success["service_tier"] = "default"
+    success["usage"]["input_tokens_details"] = {"cached_tokens": 5, "cache_write_tokens": 0}
+    transport["outcomes"] = [http_failure(503, usage=failed_usage), success]
+    plan = await run_loop(Context())
+    first, second = transport["accounting_metadata"]
+    assert first["service_tier"] is None and first["requested_service_tier"] == "flex"
+    assert (first["cached_tokens"], first["cache_write_tokens"]) == (4, 1)
+    assert second["service_tier"] == second["requested_service_tier"] == "default"
+    assert (second["cached_tokens"], second["cache_write_tokens"]) == (5, 0)
+    assert plan.usage.turns == 2
+    assert all(body["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}
+               for body in transport["requests"])
 
 
 @pytest.mark.asyncio
@@ -763,7 +828,9 @@ async def test_flex_transient_failure_retries_only_current_request_with_standard
     assert first["service_tier"] == "flex" and second["service_tier"] == "default"
     assert {k: v for k, v in first.items() if k != "service_tier"} == {
         k: v for k, v in second.items() if k != "service_tier"}
-    assert len(transport["accounting"]) == 1
+    assert len(transport["accounting"]) == 2
+    assert transport["accounting"][0][1:3] == (None, None)
+    assert not plan.usage.usage_complete
 
 
 @pytest.mark.asyncio
@@ -890,7 +957,9 @@ async def test_failed_server_response_without_reported_usage_can_fallback_withou
     transport["outcomes"] = [failed, completion()]
     plan = await run_loop(Context())
     assert plan.usage.turns == 2 and plan.usage.input_tokens == 10
-    assert len(transport["accounting"]) == 1
+    assert len(transport["accounting"]) == 2
+    assert transport["accounting"][0][1:3] == (None, None)
+    assert not plan.usage.usage_complete
 
 
 @pytest.mark.asyncio

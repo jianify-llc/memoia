@@ -32,26 +32,20 @@ Memobase is a user memory system designed for LLM Applications. It provides a Fa
 - Uses SQLAlchemy ORM
 - Key models:
   - `User`: Core user entity
-  - `GeneralBlob`: Stores various types of data
-  - `BufferZone`: Temporary storage for processing
+  - `GeneralBlob` / `BufferZone`: Historical inputs and their recovery/cleanup
+  - Source / fixed Blob / Fact: Current input identity, processing batch and evidence-backed memory
   - `UserProfile`: User memory profiles
-- Supported Blob Types:
-  - Chat
-  - Document
-  - Image
-  - Code
-  - Transcript
+  - `UserEvent`: Derived stories linked to valid Facts
 
 ### 3. Controllers (`controllers/`)
 - Business logic implementation
 - Main modules:
   - `user`: User management
   - `blob`: Blob data handling
-  - `buffer`: Buffer zone operations
+  - `buffer`: Historical Chat/Summary recovery through the current Fact importer
   - `profile`: User profile management
-- Modal processing:
-  - Chat processing
-  - Profile merging and extraction
+  - `source`: Synchronous Fact extraction, evidence deletion and operation receipts
+  - `maintenance`: Fixed Blob flush and atomic Profile/Event maintenance
 
 ### 4. Connectors (`connectors.py`)
 - Database connection management (PostgreSQL)
@@ -72,10 +66,9 @@ Memobase is a user memory system designed for LLM Applications. It provides a Fa
 - Response formatting
 
 ### 7. Prompts System (`prompts/`)
-- Template management for LLM interactions
-- Profile extraction and merging logic
-- Multilingual support (English/Chinese)
-- Summary generation
+- English/Chinese profile topic defaults and project overrides
+- Shared completion parsing utilities
+- Business prompts live with Fact extraction in `controllers/source.py` and the unified loop in `maintenance_agent.py`; the old extraction/merge/summary/roleplay chain is removed.
 
 ## Key Features
 
@@ -88,14 +81,12 @@ Memobase is a user memory system designed for LLM Applications. It provides a Fa
 ### Profile reads and cache ownership
 
 Memoia reads profiles directly from PostgreSQL, including HTTP reads and internal
-extraction, merging and organization. It does not cache profiles in Redis or
+AgentLoop tools. It does not cache profiles in Redis or
 invalidate a server-side profile cache after writes. Reads reflect committed
 database state; they do not wait for in-flight extraction to finish.
 
-Consumers own any profile-cache TTL and invalidation policy. Luvel's existing
-consumer-side KV cache is not changed by this server behavior. Redis remains in
-use for background queues, renewable leases, authentication, telemetry and other
-existing non-profile functions.
+Redis coordinates user writes and stores approximate usage counters. PostgreSQL
+owns the memory data, operation receipts and flush scheduling/recovery.
 
 The obsolete `cache_user_profiles_ttl` YAML option and
 `MEMOBASE_CACHE_USER_PROFILES_TTL` override are ignored. Existing expiring
@@ -115,8 +106,8 @@ project/user isolation and profile CRUD/merge/user deletion without Redis comman
 ### Data Processing
 - Async operation support
 - Batch processing capabilities
-- Automatic profile summarization
-- Multi-modal data handling
+- Synchronous Fact extraction and direct retrieval
+- Unified asynchronous Profile/Event maintenance
 
 ## Dependencies
 - FastAPI: Web framework
@@ -149,15 +140,41 @@ with reasoning enabled can truncate the completion before usable text is produce
 
 Projects can independently override `llm_model` and `reasoning_effort` in their
 configuration YAML; omitted fields inherit service defaults `gpt-6-luna / high`.
-This applies to Fact extraction and both serial maintenance stages. The maintenance
+This applies to Fact extraction and the unified Profile/Event AgentLoop. The maintenance
 tool loop uses Responses with `store=false`, since Luna Chat Completions only supports
 tool calling at `none`; it never silently lowers a project's reasoning setting.
 The optional Inspector Playground has its own runtime model configuration.
 
+### Prompt caching and numerical usage
+
+The two business generation paths use different cache policies, without an application cache:
+
+- Fact extraction (Chat Completions): explicit mode, 30-minute TTL, one text-block breakpoint at the end of fixed developer instructions. Source messages and related facts follow it and are not selected for cache writes. Project/model/reasoning configuration remains authoritative.
+- Unified AgentLoop (Responses through Agents SDK): implicit mode, 30-minute TTL. Fixed instructions and tool definitions remain stable; project configuration precedes batch counts/watermarks. SDK history appends tool results and model output until native compaction. There are no extra per-turn breakpoints, remote conversations or external tracing.
+- Startup completion probes are classified separately; embeddings are not generation calls. Inspector's optional Playground is a separate caller and is not configured by these policies.
+
+Prefixes shorter than the provider's minimum cacheable length may not be cached; do not pad instructions to manufacture hits. Compaction or changes to tools, instructions, model or reasoning can reduce reuse. Cache entries expire at the provider, not in Redis. See [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching).
+
+New cache options and explicit breakpoints are sent only to known GPT-5.6, GPT-6 and GPT-6.1 families (including dated names). Older models and unknown aliases keep their provider's automatic caching defaults; no unsupported cache fields, capability probes or silent model/effort changes are added. The fixed-only extraction policy therefore applies only to supported new-cache models. OpenAI-compatible gateways still require separate request acceptance.
+
+Both generation clients disable SDK retries: Fact failures return to Operation recovery; AgentLoop alone owns its bounded Flex-to-Standard fallback. Reported failed usage is observed, while absent usage stays unknown. Shared model initialization suppresses OpenAI transport request-body DEBUG logs independently of AgentLoop imports. The retired generic JSON parser is removed; Fact extraction still uses its strict Pydantic contract and AgentLoop its validated tools.
+
+Numerical logs and existing Prometheus counters distinguish `kind=fact_extraction`, `agent_loop`, `startup_probe` and other completions, with model, requested tier and provider-reported actual tier (`unknown` if absent). `llm_cache_read_tokens_total` and `llm_cache_write_tokens_total` use raw `cached_tokens`/`cache_write_tokens` before SDK usage normalization. Missing, invalid or inconsistent cache counters increment `llm_cache_usage_unknown_total`; they are not substituted with zero. Unknown-cache responses are excluded from both cache-token counters, so aggregate cache ratios are incomplete when this counter is nonzero. Existing input/output quota accounting is unchanged. Failed Loop responses and tier-switch attempts are included; unreported usage remains unknown. Telemetry failure does not reject a valid completion or replay a model call. No source text, tool payloads or model output are logged.
+
+For cost acceptance, compare comparable tasks' calls/turns, latency, input/output, cache reads/writes and **actual** model/tier prices, including failures. Read/write counts are disjoint subsets of total input:
+
+```text
+ordinary_input = input_tokens - cached_tokens - cache_write_tokens
+cost = (ordinary_input * input_price + cached_tokens * cache_read_price
+        + cache_write_tokens * cache_write_price + output_tokens * output_price) / 1_000_000
+```
+
+Cache writes are not an extra full charge added on top of all input tokens. Use current provider prices, not a generic fixed rate. Missing usage or actual tier prevents a precise per-call cost comparison; provider billing remains authoritative. SDK serialization and fixture usage tests prove the request/observation contract, not real cache hits or savings.
+
 32768 is a generation **ceiling**, covering reasoning and visible output together,
 not a per-call reservation or guaranteed visible output length. Actual usage and
-latency require provider acceptance. Existing application telemetry tokenizes input
-and visible output, not the provider's full reasoning-token usage; it is not a
+latency require provider acceptance. Telemetry records returned provider usage;
+missing usage is marked unknown, and approximate Redis statistics are not a
 provider billing record. GPT-6 Luna is the acceptance target; compatibility with
 older models is no longer promised or tested. This model parameter policy does not change business prompts. Reasoning effort is not a substitute
 for low sampling temperature or a guarantee of deterministic extraction.
@@ -166,16 +183,17 @@ and [Chat Completions limits](https://developers.openai.com/api/reference/resour
 
 Refusal, absent/non-text content, truncation, content filtering and any completion
 state other than `stop` are errors. Normally completed `""` and whitespace strings
-are returned unchanged; the summary business layer treats these as successful
-no-event results. Missing optional usage metadata does not discard valid text.
+are returned unchanged by the shared completion adapter. Fact extraction separately
+requires a valid structured result; `facts: []` is a legitimate empty extraction.
+Missing optional usage metadata does not discard valid text.
 JSON mode routes empty/whitespace output to a parser failure (`UNPROCESSABLE_ENTITY`),
 not an empty object. The legacy fallback for non-empty malformed text remains:
 some malformed text can still become `{}`. This is **not** strict schema validation
-and this patch does not introduce Structured Outputs or guarantee determinism.
+and is not used to validate current Fact extraction or AgentLoop mutations.
 
 `tests/test_openai_model_llm.py` exercises the installed OpenAI SDK through a
-mock HTTP transport, including request serialization, JSON mode, the actual empty
-summary processing path, startup limits and failure responses. Run it and the complete `tests/` suite
+mock HTTP transport, including request serialization, JSON mode, empty completions,
+startup limits and failure responses. Run it and the complete `tests/` suite
 against disposable local PostgreSQL/Redis only. These checks do not establish
 API-key/model access, extraction quality, latency, cost or real source-import acceptance;
 those require an explicitly configured provider acceptance run and a new image.

@@ -1,21 +1,29 @@
 # Modified for Memoia: relocated package and GPT-6 Luna request compatibility.
 import time
 from collections.abc import Awaitable, Callable
-from .utils import exclude_special_kwargs, get_openai_async_client_instance
-from ..env import CONFIG, LOG
+from openai import APIError
+from .utils import get_openai_async_client_instance, get_error_usage, supports_prompt_cache_options
+from ..env import CONFIG
 
 
 async def openai_complete(
     model, prompt, system_prompt=None, history_messages=[],
-    on_usage: Callable[[int | None, int | None, float], Awaitable[None]] | None = None,
+    on_usage: Callable[..., Awaitable[None]] | None = None,
+    cache_fixed_prompt: bool = False,
     **kwargs
 ) -> str:
-    sp_args, kwargs = exclude_special_kwargs(kwargs)
-    prompt_id = sp_args.get("prompt_id", None)
-
     openai_async_client = get_openai_async_client_instance()
     messages = []
-    if system_prompt:
+    if cache_fixed_prompt and not system_prompt:
+        raise ValueError("Explicit caching requires fixed instructions")
+    if cache_fixed_prompt and supports_prompt_cache_options(model):
+        # One-shot extraction caches only instructions, never the unique source input.
+        messages.append({"role": "developer", "content": [{
+            "type": "text", "text": system_prompt,
+            "prompt_cache_breakpoint": {"mode": "explicit"},
+        }]})
+        kwargs["prompt_cache_options"] = {"mode": "explicit", "ttl": "30m"}
+    elif system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.extend(history_messages)
     messages.append({"role": "user", "content": prompt})
@@ -29,13 +37,29 @@ async def openai_complete(
             kwargs.pop(name, None)
 
     started = time.monotonic()
-    response = await openai_async_client.chat.completions.create(
-        model=model, messages=messages, timeout=120, **kwargs
-    )
+    async def report_usage(usage, *, actual_model=model, service_tier=None):
+        if on_usage is None:
+            return
+        def value(obj, name):
+            return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+        details = value(usage, "prompt_tokens_details")
+        await on_usage(value(usage, "prompt_tokens"), value(usage, "completion_tokens"),
+                       (time.monotonic() - started) * 1000,
+                       cached_tokens=value(details, "cached_tokens"),
+                       cache_write_tokens=value(details, "cache_write_tokens"),
+                       model=actual_model, service_tier=service_tier,
+                       requested_service_tier=kwargs.get("service_tier", "auto"))
+
+    try:
+        response = await openai_async_client.chat.completions.create(
+            model=model, messages=messages, timeout=120, **kwargs
+        )
+    except APIError as error:
+        await report_usage(get_error_usage(error))
+        raise
     usage = response.usage
-    if on_usage is not None:
-        await on_usage(getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None),
-                       (time.monotonic() - started) * 1000)
+    await report_usage(usage, actual_model=response.model,
+                       service_tier=getattr(response, "service_tier", None))
     if not response.choices:
         raise ValueError("LLM returned no completion choices")
     choice = response.choices[0]
@@ -48,10 +72,4 @@ async def openai_complete(
     if not isinstance(content, str):
         raise ValueError("LLM returned no text content")
 
-    cached_tokens = getattr(
-        getattr(usage, "prompt_tokens_details", None), "cached_tokens", None
-    )
-    LOG.info(
-        f"Cached {prompt_id} {model} {cached_tokens}/{getattr(usage, 'prompt_tokens', None)}"
-    )
     return content

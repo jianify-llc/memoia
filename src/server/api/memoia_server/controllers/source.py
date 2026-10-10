@@ -237,7 +237,8 @@ async def _structured(model, prompt, system, *, project_id=DEFAULT_PROJECT_ID,
             llm_model or CONFIG.best_llm_model, prompt, system_prompt=system,
             reasoning_effort=reasoning_effort or CONFIG.llm_reasoning_effort,
             service_tier="default",
-            on_usage=partial(record_completion_usage, project_id),
+            cache_fixed_prompt=True,
+            on_usage=partial(record_completion_usage, project_id, kind="fact_extraction"),
             max_completion_tokens=CONFIG.source_output_reserve_tokens,
             response_format={"type": "json_schema", "json_schema": {
                 "name": model.__name__, "strict": True, "schema": schema,
@@ -252,18 +253,21 @@ async def _structured(model, prompt, system, *, project_id=DEFAULT_PROJECT_ID,
 
 
 def _project_rules(session, project_id):
-    from .modal.chat.utils import pack_current_user_profiles
-    from ..models.response import UserProfilesData
+    from ..prompts import user_profile_topics, zh_user_profile_topics
+    from ..prompts.profile_init_utils import read_out_profile_config
     project = session.query(Project.profile_config).filter_by(project_id=project_id).one()
     config = ProfileConfig.load_config_string(project.profile_config or "")
-    packed = pack_current_user_profiles(UserProfilesData(profiles=[]), config)
+    language = config.language or CONFIG.language
+    defaults = user_profile_topics if language == "en" else zh_user_profile_topics
+    topics = read_out_profile_config(config, defaults.CANDIDATE_PROFILE_TOPICS)
     return {
         "llm_model": config.llm_model or CONFIG.best_llm_model,
         "reasoning_effort": config.reasoning_effort or CONFIG.llm_reasoning_effort,
-        "language": packed["use_language"], "strict_mode": packed["strict_mode"],
+        "language": language,
+        "strict_mode": config.profile_strict_mode if config.profile_strict_mode is not None else CONFIG.profile_strict_mode,
         "profile_topics": [{"topic": p.topic, "description": p.description,
                             "sub_topics": [s.model_dump() for s in p.sub_topics]}
-                           for p in packed["project_profile_slots"]],
+                           for p in topics],
         "validate_values": config.profile_validate_mode if config.profile_validate_mode is not None else CONFIG.profile_validate_mode,
         "event_tag_definitions": config.event_tags if config.event_tags is not None else CONFIG.event_tags,
         "event_theme_requirement": config.event_theme_requirement or CONFIG.event_theme_requirement,

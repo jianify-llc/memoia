@@ -1,5 +1,10 @@
 """Both supported logger implementations must preserve redacted failure semantics."""
 import logging
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import textwrap
 from unittest.mock import AsyncMock
 
 import httpx
@@ -11,6 +16,54 @@ from memoia_server import llms
 from memoia_server.env import CONFIG
 from memoia_server.llms import embeddings
 from memoia_server.models.response import CODE
+
+
+def test_standalone_api_debug_never_logs_model_body_before_loop_import(tmp_path):
+    # A fresh process prevents pytest's AgentLoop imports from masking an API leak.
+    child = textwrap.dedent("""
+        import asyncio, io, logging, socket, sys
+        def no_network(*args, **kwargs):
+            raise AssertionError("External network is forbidden")
+        socket.socket.connect = no_network
+        import api
+        assert "memoia_server.maintenance_agent" not in sys.modules
+        import httpx
+        from openai import AsyncOpenAI
+        from memoia_server.llms import openai_model_llm
+        marker = "SYNTHETIC_PRIVATE_MEMORY_BODY"
+        output = io.StringIO()
+        handler = logging.StreamHandler(output)
+        logging.getLogger().addHandler(handler)
+        requests = []
+        def respond(request):
+            requests.append(request)
+            assert marker.encode() in request.content
+            return httpx.Response(200, json={"id": "chatcmpl-local", "object": "chat.completion",
+                "created": 0, "model": "gpt-6-luna", "choices": [{"index": 0, "finish_reason": "stop",
+                "message": {"role": "assistant", "content": marker}}]})
+        async def run():
+            client = AsyncOpenAI(api_key="fixture-only", base_url="https://example.invalid/v1",
+                max_retries=0, http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)))
+            openai_model_llm.get_openai_async_client_instance = lambda: client
+            try:
+                assert await openai_model_llm.openai_complete("gpt-6-luna", marker,
+                    system_prompt=marker, cache_fixed_prompt=True) == marker
+                assert len(requests) == 1
+                assert marker not in output.getvalue()
+            finally:
+                await client.close()
+        asyncio.run(run())
+    """)
+    result = subprocess.run([sys.executable, "-c", child], cwd=tmp_path,
+        env={"PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+             "TMPDIR": tempfile.gettempdir(),
+             "PYTHON_DOTENV_DISABLED": "1", "OPENAI_LOG": "debug",
+             "DATABASE_URL": "postgresql://fixture:fixture@127.0.0.1:1/offline",
+             "REDIS_URL": "redis://127.0.0.1:1", "ACCESS_TOKEN": "fixture-only",
+             "MEMOBASE_LLM_API_KEY": "fixture-only", "PROJECT_ID": "fixture-only"},
+        capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "SYNTHETIC_PRIVATE_MEMORY_BODY" not in result.stdout + result.stderr
 
 
 @pytest.fixture(params=["plain", "json"])
@@ -55,8 +108,9 @@ async def test_accounting_failure_does_not_discard_completion_for_both_loggers(e
     monkeypatch.setattr(llms, "project_cost_token_billing", AsyncMock(side_effect=RuntimeError(private)))
     result = await llms.llm_complete("__root__", "input")
     assert result.ok() and result.data() == "OK"
-    assert len(error_logs) == 1 and "RuntimeError" in error_logs[0]
-    assert private not in error_logs[0]
+    assert len(error_logs) == 2 and "RuntimeError" in error_logs[0]
+    assert "LLM usage:" in error_logs[1]
+    assert all(private not in entry for entry in error_logs)
 
 
 @pytest.mark.asyncio

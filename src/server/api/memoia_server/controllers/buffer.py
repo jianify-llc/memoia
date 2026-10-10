@@ -11,7 +11,6 @@ from ..models.response import CODE, ChatModalResponse, IdsData
 from ..models.database import BufferZone, GeneralBlob
 from ..models.blob import BlobType, Blob
 from ..connectors import Session, log_pool_status
-from .modal import BLOBS_PROCESS
 
 
 async def get_buffer_capacity(
@@ -123,7 +122,7 @@ async def flush_buffer_by_ids(
     select_status: str = BufferStatus.idle,
 ) -> Promise[ChatModalResponse | None]:
     # FIXME: parallel calling will cause duplicated flush
-    if blob_type not in BLOBS_PROCESS:
+    if blob_type not in (BlobType.chat, BlobType.summary):
         return Promise.reject(CODE.BAD_REQUEST, f"Blob type {blob_type} not supported")
     if not len(buffer_ids):
         return Promise.resolve(None)

@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import logging
 import time
 from dataclasses import dataclass, replace
 from typing import Literal, Protocol
@@ -20,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from .env import CONFIG
 from .llms import record_completion_usage
+from .llms.utils import get_error_usage, supports_prompt_cache_options
 from .models.response import EventTag
 from .utils import json_size
 
@@ -27,8 +27,6 @@ from .utils import json_size
 set_tracing_disabled(True)
 _debug.DONT_LOG_MODEL_DATA = True
 _debug.DONT_LOG_TOOL_DATA = True
-# The OpenAI transport also has request-body debug logging, independently of Agents.
-logging.getLogger("openai._base_client").setLevel(logging.WARNING)
 
 MAX_TURNS = 10
 MAX_SECONDS = 300
@@ -206,9 +204,7 @@ class _StrictMaintenanceModel(OpenAIResponsesModel):
                     system_instructions, input, settings, tools, output_schema, handoffs,
                     stream=False)
             except (APIConnectionError, APIStatusError) as error:
-                usage = self._error_usage(error)
-                if usage is not None:
-                    await self._record_usage(usage, requested_at)
+                await self._record_usage(get_error_usage(error), requested_at)
                 await self.context.assert_active()
                 if self.service_tier == "flex" and self._flex_fallback_allowed(error):
                     self.service_tier = "default"
@@ -217,11 +213,12 @@ class _StrictMaintenanceModel(OpenAIResponsesModel):
             transient_failure = (response.status == "failed" and response.error is not None
                 and response.error.code in ("server_error", "rate_limit_exceeded")
                 and response.incomplete_details is None and getattr(response, "output", None) == [])
-            if response.usage is not None or not transient_failure:
-                if not await self._record_usage(response.usage, requested_at):
-                    # The pinned SDK accepts absent usage but rejects partial counters.
-                    # Keep our unknown marker; do not manufacture zero provider usage.
-                    response.usage = None
+            if not await self._record_usage(response.usage, requested_at,
+                                            actual_model=response.model,
+                                            service_tier=getattr(response, "service_tier", None)):
+                # The pinned SDK accepts absent usage but rejects partial counters.
+                # Keep our unknown marker; do not manufacture zero provider usage.
+                response.usage = None
             await self.context.assert_active()
             if transient_failure and self.service_tier == "flex":
                 self.service_tier = "default"
@@ -229,44 +226,37 @@ class _StrictMaintenanceModel(OpenAIResponsesModel):
             self._validate_completion(response, {tool.name: tool.params_json_schema for tool in tools})
             return response
 
-    async def _record_usage(self, usage, requested_at: float) -> bool:
-        def value(name):
-            return usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
-        input_tokens, output_tokens, total = (value(name) for name in (
+    async def _record_usage(self, usage, requested_at: float, *, actual_model=None, service_tier=None) -> bool:
+        def value(obj, name):
+            return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+        input_tokens, output_tokens, total = (value(usage, name) for name in (
             "input_tokens", "output_tokens", "total_tokens"))
         if any(tokens is not None and (type(tokens) is not int or tokens < 0)
                for tokens in (input_tokens, output_tokens, total)):
             raise MaintenanceRunError("MAINTENANCE_USAGE_INVALID")
-        if any(tokens is None for tokens in (input_tokens, output_tokens, total)):
+        complete = all(tokens is not None for tokens in (input_tokens, output_tokens, total))
+        if not complete:
             self.usage_complete = False
-            await record_completion_usage(self.context.project_id, None, None,
-                                          (time.monotonic() - requested_at) * 1000)
-            if output_tokens is not None and output_tokens > MAX_COMPLETION_TOKENS:
-                raise MaintenanceRunError("MAINTENANCE_COMPLETION_LENGTH")
-            return False
-        if total != input_tokens + output_tokens:
-            raise MaintenanceRunError("MAINTENANCE_USAGE_INVALID")
-        self.input_tokens += input_tokens
-        self.output_tokens += output_tokens
+        else:
+            if total != input_tokens + output_tokens:
+                raise MaintenanceRunError("MAINTENANCE_USAGE_INVALID")
+            self.input_tokens += input_tokens
+            self.output_tokens += output_tokens
         # Failed responses can consume tokens too. Account before validation/fallback;
-        # transport failures without reported usage are not invented as zero-cost runs.
-        await record_completion_usage(self.context.project_id, input_tokens, output_tokens,
-                                      (time.monotonic() - requested_at) * 1000)
-        if output_tokens > MAX_COMPLETION_TOKENS:
+        # read raw provider fields before Agents SDK normalizes missing details to zero.
+        details = value(usage, "input_tokens_details")
+        await record_completion_usage(self.context.project_id,
+                                      input_tokens if complete else None,
+                                      output_tokens if complete else None,
+                                      (time.monotonic() - requested_at) * 1000,
+                                      kind="agent_loop", model=actual_model or self.model,
+                                      service_tier=service_tier,
+                                      requested_service_tier=self.service_tier,
+                                      cached_tokens=value(details, "cached_tokens"),
+                                      cache_write_tokens=value(details, "cache_write_tokens"))
+        if output_tokens is not None and output_tokens > MAX_COMPLETION_TOKENS:
             raise MaintenanceRunError("MAINTENANCE_COMPLETION_LENGTH")
-        return True
-
-    @staticmethod
-    def _error_usage(error):
-        if not isinstance(error, APIStatusError):
-            return None
-        if isinstance(error.body, dict) and "usage" in error.body:
-            return error.body["usage"]
-        try:
-            body = error.response.json()
-        except ValueError:
-            return None
-        return body.get("usage") if isinstance(body, dict) else None
+        return complete
 
     @staticmethod
     def _flex_fallback_allowed(error) -> bool:
@@ -504,11 +494,13 @@ async def run_loop(context: MaintenanceContext) -> LoopPlan:
     model = _StrictMaintenanceModel(client, context)
     # Identity is local context, not an argument the model can choose. No session is
     # passed: cross-run memory lives in the database, never in an SDK chat transcript.
-    request = json.dumps({"through_version": context.through_version,
-                          "blob_count": context.blob_count, "change_count": len(context.changes),
-                          "profile_topics": context.profile_topics,
+    # Stable project configuration precedes per-batch changes. Linear SDK history
+    # then remains append-only until native compaction; no per-turn explicit writes.
+    request = json.dumps({"profile_topics": context.profile_topics,
                           "event_tag_definitions": context.event_tag_definitions,
-                          "language": context.language}, ensure_ascii=False)
+                          "language": context.language,
+                          "through_version": context.through_version,
+                          "blob_count": context.blob_count, "change_count": len(context.changes)}, ensure_ascii=False)
     try:
         async with asyncio.timeout(MAX_SECONDS):
             await context.assert_active()
@@ -537,6 +529,8 @@ async def run_loop(context: MaintenanceContext) -> LoopPlan:
                 model_settings=ModelSettings(parallel_tool_calls=False,
                                              reasoning=Reasoning(effort=context.reasoning_effort), retry=None,
                                              store=False, truncation="disabled",
+                                             prompt_cache_options=({"mode": "implicit", "ttl": "30m"}
+                                                 if supports_prompt_cache_options(context.llm_model) else None),
                                              context_management=[{"type": "compaction", "compact_threshold": COMPACT_THRESHOLD}],
                                              response_include=["reasoning.encrypted_content"]),
                 tools=_maintenance_tools(),

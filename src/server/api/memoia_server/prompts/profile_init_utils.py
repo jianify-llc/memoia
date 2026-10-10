@@ -1,8 +1,8 @@
 # Modified for Memoia: relocated from the upstream memobase_server package.
 import yaml
 
-from ..env import CONFIG, LOG, ProfileConfig
-from ..types import UserProfileTopic, EventTag
+from ..env import CONFIG, ProfileConfig
+from ..types import UserProfileTopic
 
 
 def formate_profile_topic(topic: UserProfileTopic) -> str:
@@ -63,24 +63,6 @@ def read_out_profile_config(config: ProfileConfig, default_profiles: list):
     return default_profiles
 
 
-def get_specific_subtopics(
-    topic: str, CANDIDATE_PROFILE_TOPICS: list[UserProfileTopic]
-) -> list[str]:
-    sps = [
-        sp
-        for up in CANDIDATE_PROFILE_TOPICS
-        for sp in up.sub_topics
-        if up.topic == topic
-    ]
-    if not len(sps):
-        return "None"
-    return [
-        f"  - {sp['name']}"
-        + (f"({sp['description']})" if sp.get("description") else "")
-        for sp in sps
-    ]
-
-
 def export_user_profile_to_yaml(profiles: list[UserProfileTopic]):
     final_results = {"profiles": []}
     for p in profiles:
@@ -94,17 +76,3 @@ def export_user_profile_to_yaml(profiles: list[UserProfileTopic]):
             )
         final_results["profiles"].append(res)
     return yaml.dump(final_results, allow_unicode=True)
-
-
-def init_event_tags(event_tags: list[dict]) -> list[EventTag]:
-    event_tags = [
-        et if isinstance(et, dict) else {"name": et, "description": None}
-        for et in event_tags
-    ]
-    return [EventTag(et["name"], et.get("description", None)) for et in event_tags]
-
-
-def read_out_event_tags(config: ProfileConfig) -> list[EventTag]:
-    if config.event_tags is None:
-        return init_event_tags(CONFIG.event_tags)
-    return init_event_tags(config.event_tags)

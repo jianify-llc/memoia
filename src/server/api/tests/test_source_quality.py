@@ -100,6 +100,10 @@ async def test_actual_extract_preserves_full_roles_ids_times_and_joint_support(m
     try:
         result = await source.extract_source(request, rules=rules)
         wire = bodies[0]
+        assert wire["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
+        assert wire["messages"][0] == {"role": "developer", "content": [{
+            "type": "text", "text": source.EXTRACT_SYSTEM,
+            "prompt_cache_breakpoint": {"mode": "explicit"}}]}
         assert json.loads(wire["messages"][1]["content"]) == {
             "configuration": {"language": "en"},
             "related_facts": [],
@@ -230,7 +234,9 @@ async def test_baseline_override_restores_single_prompt_truth_and_strict_evidenc
     try:
         report = await run_quality(read_settings({**SETTINGS, "extract_system": "public baseline system"}), cases=(case,), client=client)
         assert report["passed"] and source.EXTRACT_SYSTEM == original
-        assert bodies[0]["messages"][0]["content"] == "public baseline system"
+        assert bodies[0]["messages"][0] == {"role": "developer", "content": [{
+            "type": "text", "text": "public baseline system",
+            "prompt_cache_breakpoint": {"mode": "explicit"}}]}
         configuration = json.loads(bodies[0]["messages"][1]["content"])["configuration"]
         assert set(configuration) == {"language"}
     finally:

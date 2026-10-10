@@ -56,15 +56,14 @@ memoia_server/
 │   ├── profile.py          # Direct PostgreSQL profile reads
 │   ├── source.py           # Atomic Fact processing and message deletion
 │   ├── maintenance.py      # Fixed flush lease and atomic derived commit
-│   ├── user_lease.py       # Shared user mutation coordination
-│   └── modal/              # Modal processing
+│   └── user_lease.py       # Shared user mutation coordination
 ├── maintenance_agent.py    # Scoped OpenAI Agents SDK tools and in-memory plans
 ├── maintenance_worker.py   # Single per-user Profile/Event AgentLoop
 ├── connectors.py           # Database and Redis connections
 ├── llms/                   # LLM Integration
 │   ├── __init__.py        # LLM service initialization
-│   └── openai.py          # OpenAI implementation
-└── prompts/               # LLM Prompt Templates
+│   └── openai_model_llm.py # OpenAI completion implementation
+└── prompts/               # Shared topic configuration and completion parsing
 ```
 
 ## Data Flow
@@ -138,10 +137,10 @@ sequenceDiagram
 ### System Config
 ```yaml
 config.yaml
-├── buffer_flush_interval
-├── max_chat_blob_buffer_token_size
+├── best_llm_model
+├── llm_reasoning_effort
 ├── language
-└── llm_style
+└── profile_strict_mode
 ```
 
 默认模型与思考等级为 `best_llm_model: gpt-6-luna`、
@@ -175,9 +174,10 @@ graph LR
 4. Update response types
 
 ### 2. Modifying Memory Processing
-1. Update prompts in `prompts/`
-2. Modify Fact extraction in `controllers/source.py`, or scoped derivative tools in `maintenance_agent.py`; tools cannot modify Fact.
-3. Verify replay, deletion, per-user serial takeover and partial-stage recovery using isolated PostgreSQL/Redis.
+1. Fact extraction and its structured prompt live in `controllers/source.py`; the unified Profile/Event prompt and scoped tools live in `maintenance_agent.py`. These are the two business generation paths.
+2. `prompts/` retains English/Chinese topic defaults, project configuration helpers and the shared completion parser. Retired extraction, merge, summary and roleplay pipelines are removed.
+3. Verify replay, deletion, per-user serial takeover and atomic flush recovery using isolated PostgreSQL/Redis. Historical `buffer.py` adapts Chat/Summary inputs into the same Fact import; it does not run another model pipeline.
+4. Keep one-shot Fact caching explicit at fixed instructions and linear AgentLoop caching implicit. Cache/usage instrumentation belongs in the existing LLM adapter, not in controllers or Redis. Policy, unknown-usage handling and cost acceptance are defined in [Prompt caching and numerical usage](readme.md#prompt-caching-and-numerical-usage); use the locked SDK and MockTransport to verify wire payloads before real-provider acceptance.
 
 ### 3. Database Changes
 1. Update models and add a forward Alembic revision; never edit an executed migration.
