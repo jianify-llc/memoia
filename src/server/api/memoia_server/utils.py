@@ -46,6 +46,13 @@ def event_str_repr(event: UserEventData) -> str:
 
 
 def event_embedding_str(event_data: EventData) -> str:
+    # Index factual story fields, not interpretation or duplicated event_tip.
+    story = [event_data.title, event_data.summary, event_data.keywords,
+             event_data.time, event_data.location, event_data.content]
+    if any(story):
+        if not event_data.content:
+            story.append(event_data.event_tip)
+        return "\n".join(value for value in story if value)
     if event_data.profile_delta is None:
         profile_delta_str = ""
     else:

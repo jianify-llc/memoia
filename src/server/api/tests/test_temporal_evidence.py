@@ -211,7 +211,9 @@ async def test_storage_read_search_and_retraction_keep_separate_time_evidence(te
                 fail_next = False
                 return Promise.reject(503, "Controlled embedding failure")
         return Promise.resolve(np.ones((len(texts), CONFIG.embedding_dim)))
-    story_embedding = AsyncMock(side_effect=AssertionError("Maintenance must not embed derived stories"))
+    async def embed_story(_, texts, **kwargs):
+        return Promise.resolve(np.ones((len(texts), CONFIG.embedding_dim)))
+    story_embedding = AsyncMock(side_effect=embed_story)
     monkeypatch.setattr(CONFIG, "enable_event_embedding", True)
     monkeypatch.setattr(source, "extract_source", extract)
     monkeypatch.setattr(source, "get_embedding", embedding)
@@ -304,7 +306,12 @@ async def test_storage_read_search_and_retraction_keep_separate_time_evidence(te
         assert session.query(UserEventGist).filter_by(event_id=derived.id, project_id="__root__").count() == 0
     assert await source.delete_messages(temporal_user, "__root__", "dialog", deletion) == deleted
     assert len(document_inputs) == (3 if fail_rebuild else 2)
-    story_embedding.assert_not_awaited()
+    assert story_embedding.await_count == 2
+    original_story = story_embedding.await_args_list[0].args[1]
+    rebuilt_story = story_embedding.await_args_list[1].args[1]
+    assert len(original_story) == len(rebuilt_story) == 1
+    assert "2025-04" in original_story[0]
+    assert "2025-04" not in rebuilt_story[0]
 
 
 @pytest.mark.asyncio

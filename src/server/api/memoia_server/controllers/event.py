@@ -46,18 +46,37 @@ def fact_evidence(session, fact):
 
 
 def event_view(session, event, *, include_fact_links=False):
-    data = dict(event.event_data)
-    linked = select(memory_event_facts.c.fact_id).where(
-        memory_event_facts.c.user_id == event.user_id, memory_event_facts.c.project_id == event.project_id,
-        memory_event_facts.c.event_id == event.id)
-    rows = session.execute(select(memory_facts, memory_blobs.c.source_id).join(
-        memory_blobs, memory_facts.c.blob_id == memory_blobs.c.id).where(
-        memory_facts.c.user_id == event.user_id, memory_facts.c.project_id == event.project_id,
-        memory_facts.c.active, memory_facts.c.id.in_(linked))).mappings().all()
-    # Text may be pending maintenance; evidence always comes from current facts.
-    if include_fact_links or data.get("blob_id") or data.get("memoia_v2") or data.get("evidence"):
-        data["evidence"] = [entry.model_dump(mode="json") for entry in facts_evidence(session, rows).values()]
-        data["fact_ids"] = [str(row["id"]) for row in rows]
+    return event_views(session, [event], user_id=event.user_id, project_id=event.project_id,
+                       include_fact_links=include_fact_links)[event.id]
+
+
+def event_views(session, events, *, user_id, project_id, include_fact_links=False):
+    """Batch current evidence; delayed story text never validates stale support."""
+    data = {}
+    for event in events:
+        if str(event.user_id) != str(user_id) or event.project_id != project_id:
+            raise ValueError("Event owner mismatch")
+        data[event.id] = dict(event.event_data)
+    needed = [ident for ident, value in data.items() if include_fact_links or
+              value.get("blob_id") or value.get("memoia_v2") or value.get("evidence")]
+    if not needed:
+        return data
+    rows = session.execute(select(memory_facts, memory_blobs.c.source_id,
+        memory_event_facts.c.event_id.label("linked_event_id")).join(
+        memory_blobs, memory_facts.c.blob_id == memory_blobs.c.id).join(memory_event_facts, and_(
+        memory_event_facts.c.fact_id == memory_facts.c.id,
+        memory_event_facts.c.user_id == memory_facts.c.user_id,
+        memory_event_facts.c.project_id == memory_facts.c.project_id)).where(
+        memory_facts.c.user_id == user_id, memory_facts.c.project_id == project_id,
+        memory_facts.c.active, memory_event_facts.c.event_id.in_(needed))
+        .order_by(memory_facts.c.id)).mappings().all()
+    evidence = facts_evidence(session, {row["id"]: row for row in rows}.values())
+    for ident in needed:
+        data[ident]["evidence"], data[ident]["fact_ids"] = [], []
+    for row in rows:
+        entry = data[row["linked_event_id"]]
+        entry["evidence"].append(evidence[row["id"]].model_dump(mode="json"))
+        entry["fact_ids"].append(str(row["id"]))
     return data
 
 
@@ -259,8 +278,8 @@ async def update_user_event(
         previous = dict(original.event_data)
         previous_updated_at = original.updated_at
     new_events = {**previous, **need_to_update}
-    content = new_events.get("event_tip") or ""
-    gists = [line.strip().removeprefix("-").strip() for line in content.splitlines() if line.strip()]
+    content = event_embedding_str(EventData(**new_events))
+    gists = [line.strip().removeprefix("-").strip() for line in (new_events.get("event_tip") or "").splitlines() if line.strip()]
     if CONFIG.enable_event_embedding and content:
         result = await get_embedding(project_id, [content, *gists])
         if not result.ok():

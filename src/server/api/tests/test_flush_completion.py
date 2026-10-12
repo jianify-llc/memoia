@@ -81,7 +81,7 @@ async def test_byte_pagination_includes_staged_entries_once_without_cursor_loop(
         await context.read_changes()
         for index in range(25):
             await context.stage_profile(maintenance_agent.ProfileMutation(action="upsert",
-                content="K" * 4096, topic="interest", sub_topic=f"entry-{index}", fact_ids=[str(fid)]))
+                content="K" * 4096, topic="interests_preferences", sub_topic=f"entry-{index}", fact_ids=[str(fid)]))
         cursor, seen = None, []
         while True:
             page = await context.read("profiles", cursor=cursor, limit=200)
@@ -199,13 +199,19 @@ async def test_one_fact_can_clean_102_derived_entries_atomically(search_users, t
     transport["responses"] = [completion(None, calls=[tool("read_changes", {})]), completion()]
     if fail_commit:
         apply = maintenance._apply_plan
-        def reject_events(session, claim, plan, kind):
+        def reject_events(session, claim, plan, kind, event_embeddings):
             if kind == "event":
                 raise source.SourceError("model_unavailable", "safe", 503, True)
-            return apply(session, claim, plan, kind)
+            return apply(session, claim, plan, kind, event_embeddings)
         monkeypatch.setattr(maintenance, "_apply_plan", reject_events)
     assert await maintain(uid, maintenance_agent.run_loop) is not fail_commit
     with Session() as session:
+        if fail_commit:
+            failed = session.execute(select(memory_operations.c.error).where(
+                memory_operations.c.user_id == uid,
+                memory_operations.c.kind == "flush",
+            )).scalar_one()
+            assert failed["code"] == "model_unavailable"
         assert session.query(UserProfile).filter_by(user_id=uid).count() == (52 if fail_commit else 1)
         assert session.query(UserEvent).filter_by(user_id=uid).count() == (52 if fail_commit else 1)
         assert session.get(UserProfile, (manual_profile, "__root__")) is not None
@@ -229,7 +235,7 @@ async def test_surviving_support_is_never_mechanically_removed(search_users):
         await context.read("profiles", ids=[str(pid)])
         await context.read("events", ids=[str(eid)])
         await context.stage_profile(maintenance_agent.ProfileMutation(action="upsert", id=str(pid),
-            content="Independent evidence", topic="interest", sub_topic="travel", fact_ids=[str(surviving)]))
+            content="Independent evidence", topic="interests_preferences", sub_topic="travel", fact_ids=[str(surviving)]))
         await context.stage_event(maintenance_agent.EventMutation(action="upsert", id=str(eid),
             content="Independent evidence", fact_ids=[str(surviving)]))
         return context.get_plan(maintenance_agent.LoopUsage())

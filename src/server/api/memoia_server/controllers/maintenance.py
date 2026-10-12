@@ -776,7 +776,7 @@ def _verify_resolution(session, claim, plan, kind):
         raise SourceError("maintenance_unresolved_entries", "Changed evidence still has unreviewed derived entries", 502)
 
 
-def _apply_plan(session, claim, plan, kind):
+def _apply_plan(session, claim, plan, kind, event_embeddings):
     changes = plan.profiles if kind == "profile" else plan.events
     if not changes:
         return
@@ -847,12 +847,12 @@ def _apply_plan(session, claim, plan, kind):
                        **change.model_dump(exclude={"action", "id"}), "source_ids": sources,
                        "blob_ids": blob_ids, "source_id": sources[0] if len(sources) == 1 else None,
                        "blob_id": blob_ids[0] if len(blob_ids) == 1 else None},
-                      "embedding": None, "revision": revision}
+                      "embedding": event_embeddings[ident], "revision": revision}
             session.execute(delete(UserEventGist).where(UserEventGist.user_id == claim.user_id,
                 UserEventGist.project_id == claim.project_id, UserEventGist.event_id == ident))
         if existing is None:
             session.execute(table.insert().values(id=ident, user_id=claim.user_id,
-                project_id=claim.project_id, **values, created_at=max(fact["occurred_at"] for fact in supported)))
+                project_id=claim.project_id, **values))
         else:
             session.execute(update(table).where(_scope(table, claim.user_id, claim.project_id),
                 table.c.id == ident).values(**values, updated_at=func.now()))
@@ -875,7 +875,46 @@ def _apply_plan(session, claim, plan, kind):
         ))
 
 
-def _commit_plan(claim, plan, lease, task_lease, model_config):
+async def _prepare_event_embeddings(claim, plan):
+    from ..env import CONFIG
+    from ..models.database import UserEvent
+    from ..models.response import EventData
+    from ..llms.embeddings import get_embedding
+    from ..utils import event_embedding_str
+
+    changes = [change for change in plan.events if change.action == "upsert"]
+    if not changes:
+        return {}
+    if not CONFIG.enable_event_embedding:
+        return {_uuid(change.id): None for change in changes}
+
+    def read_existing():
+        with Session() as session:
+            return {row.id: (event_embedding_str(EventData(**row.event_data)), row.embedding)
+                    for row in session.scalars(select(UserEvent).where(
+                        UserEvent.user_id == claim.user_id, UserEvent.project_id == claim.project_id,
+                        UserEvent.id.in_([_uuid(change.id) for change in changes])))}
+
+    existing = await asyncio.to_thread(read_existing)
+    prepared, pending = {}, {}
+    for change in changes:
+        ident = _uuid(change.id)
+        content = event_embedding_str(EventData(**change.model_dump()))
+        previous = existing.get(ident)
+        if previous is not None and previous[0] == content and previous[1] is not None:
+            prepared[ident] = previous[1]
+        else:
+            pending[ident] = content
+    if pending:
+        result = await get_embedding(claim.project_id, list(pending.values()), phase="document")
+        if not result.ok():
+            retryable = result.code() in {429, 500, 502, 503, 504}
+            raise SourceError("maintenance_embedding_failed", "Event index generation failed", result.code(), retryable)
+        prepared.update(zip(pending, result.data(), strict=True))
+    return prepared
+
+
+def _commit_plan(claim, plan, lease, task_lease, model_config, event_embeddings):
     from ..models.database import Project
     from .source import _fence_snapshot, fence_commit, _project_rules
     with Session.begin() as session:
@@ -892,7 +931,7 @@ def _commit_plan(claim, plan, lease, task_lease, model_config):
         for kind in ("profile", "event"):
             _verify_resolution(session, claim, plan, kind)
         for kind in ("profile", "event"):
-            _apply_plan(session, claim, plan, kind)
+            _apply_plan(session, claim, plan, kind, event_embeddings)
         fence_commit(session, claim.user_id, claim.project_id, lease)
         task_lease.check_active()
         complete_flush(session, claim, plan)
@@ -920,12 +959,16 @@ async def execute_claim(claim: Claim, *, runner=None):
             plan = context.get_plan(LoopUsage()) if all(
                 change.get("kind") == "noop" for change in claim.changes) else await runner(context)
             await task_lease.assert_active()
+            # Network work precedes the short write lease/transaction. The read
+            # set is still checked at commit, including any reused event vector.
+            event_embeddings = await _prepare_event_embeddings(claim, plan)
+            await task_lease.assert_active()
             deadline = time.monotonic() + 30
             while True:
                 try:
                     async with UserLease(claim.user_id, claim.project_id) as lease:
                         await _finish_sql(_commit_plan, claim, plan, lease, task_lease,
-                                          (context.llm_model, context.reasoning_effort))
+                                          (context.llm_model, context.reasoning_effort), event_embeddings)
                     break
                 except LeaseUnavailable:
                     await task_lease.assert_active()

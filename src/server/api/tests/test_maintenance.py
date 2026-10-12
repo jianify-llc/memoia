@@ -18,7 +18,7 @@ from tests.maintenance_support import derive, claim_for
 
 
 @pytest_asyncio.fixture
-async def source_user(db_env):
+async def source_user(db_env, bounded_source_model):
     from memoia_server.controllers import user
     from memoia_server.models.response import UserData
     uid = str((await user.create_user(UserData(), "__root__")).data().id)
@@ -230,10 +230,10 @@ async def test_unified_atomic_commit_rolls_back_profile_if_event_apply_fails(sou
     maintenance.flush(source_user, "__root__", "atomic")
     claim = claim_for(source_user)
     apply = maintenance._apply_plan
-    def fail_event(session, claim, plan, kind):
+    def fail_event(session, claim, plan, kind, event_embeddings):
         if kind == "event":
             raise SourceError("test_event_failure", "safe", 502, True)
-        apply(session, claim, plan, kind)
+        apply(session, claim, plan, kind, event_embeddings)
     monkeypatch.setattr(maintenance, "_apply_plan", fail_event)
     assert not await maintenance.execute_claim(claim, runner=derive())
     with Session() as session:

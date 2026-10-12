@@ -17,7 +17,7 @@ from memoia_server.models.source import (memory_blobs, memory_facts, memory_mess
 
 
 @pytest.fixture
-def projects(db_env):
+def projects(db_env, bounded_source_model):
     uid = uuid4()
     prefix = "model-config-" + uuid4().hex
     ids = [prefix + "-a", prefix + "-b"]
@@ -53,8 +53,8 @@ def claim_project(uid, pid):
 
 
 @pytest.mark.parametrize("language,required_topics", [
-    ("en", {"basic_info", "relationships", "interest"}),
-    ("zh", {"基本信息", "兴趣爱好", "人生大事"}),
+    ("en", {"user_profile", "lifestyle", "relationships", "interests_preferences"}),
+    ("zh", {"user_profile", "lifestyle", "relationships", "interests_preferences"}),
 ])
 @pytest.mark.parametrize("explicit_language", [False, True])
 def test_topic_defaults_follow_project_language_or_service_fallback(
@@ -95,7 +95,7 @@ def test_project_topic_overrides_and_additions_preserve_descriptions(projects, o
         assert topics == {"custom_topic": {"topic": "custom_topic", "description": "Project scope", "sub_topics": [
             {"name": "custom_field", "description": "Keep this description", "update_description": None, "validate_value": False}]}}
     else:
-        assert "basic_info" in topics
+        assert "personal_background" in topics
         assert topics["extra_topic"] == {"topic": "extra_topic", "description": "Additional scope", "sub_topics": []}
 
 
@@ -165,7 +165,7 @@ async def test_model_change_during_phase_conflicts_without_ack_or_partial_writes
         facts = await context.read("facts")
         fact_ids = [fact["id"] for fact in facts["items"]]
         if stage_changes:
-            await context.stage_profile(ProfileMutation(action="upsert", content="Gus", topic="basic_info",
+            await context.stage_profile(ProfileMutation(action="upsert", content="Gus", topic="personal_background",
                 sub_topic="name", fact_ids=fact_ids))
             await context.stage_event(EventMutation(action="upsert", content="The user's name is Gus", fact_ids=fact_ids))
         with Session.begin() as session:

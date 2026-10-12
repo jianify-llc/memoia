@@ -74,6 +74,18 @@ Fact 用 Standard（service_tier=default）；Loop 先 Flex，临时供应商失
 
 所有修改先保存在本轮内存，最终短事务验证执行权、项目配置、读过的 Fact revision 和目标条目 revision，用既有 Redis renewable lease + SQL generation/version 写入保护。Profile、Event 与 flush completed 回执一起提交；失败两类全部回滚。相关删除/纠正/人工编辑使旧计划失败，无关新增不废弃本轮；旧 flush 恢复重新读取当前事实，不能按历史快照覆盖新结果。永久遗忘立即阻断工具读取及最终提交。日志仅状态、轮数、Token、耗时和安全错误码。
 
+## 默认画像目录与三类初始背景
+
+默认一级分类为 `user_profile`、`personal_background`、`work`、`education`、`interests_preferences`、`lifestyle`、`goals_values`、`relationships`。中英文使用相同英文标识，描述与画像正文按项目语言输出；详细边界由 `prompts/user_profile_topics.py` 的双语目录统一维护。二级分类仍由现有 Loop 创建和复用，不新增人物表或单例约束。
+
+`user_profile` 仅保存本人重要稳定背景和长期重点的简短概况，不拼接全部详细分类；`interests_preferences` 保存稳定兴趣和偏好，明确表达的长期交流偏好使用 `sub_topic=interaction_preferences`，不再作为独立一级分类，不保存一次性指示、短期情绪或助手猜测；`lifestyle` 保存持续日常习惯、作息和生活方式，不把一次经历推断成习惯。三类可以各有多条简短、非重复的 Profile，并保留有意义的二级分类。Loop 根据相关 Fact 增删／纠正／证据变化更新，优先查找并修改已有条目；所有画像均直接关联有效 Fact，不互相作为证据，也不为每次聊天重新生成全部概况。偏好是参考资料，调用方的显式设置与当前要求优先。
+
+Luvel 默认分别调用既有 `queryProfiles`，读取 `user_profile`、`interests_preferences`、`lifestyle`（query 省略或 null，不能用空字符串），保留二级分类标签，在共享总预算内选择完整条目；其它分类按需检索。没有条目就返回空，不拼接或回填旧分类。不新增 API、SDK 方法、模型调用或调度器。
+
+只替换系统默认模板，保留项目 overwrite/additional 配置；不修改已存的自定义目录，不建立旧默认映射或迁移／重建工具。修改模板不意味着历史画像被重新整理。Test 旧画像清理需独立定界和授权，且须等新 API/Worker 发布、排除旧在途写入后执行；不隐式清理 Fact/Event/Source/聊天或画像历史。
+
+本地验证目录一致、实际请求提示词、现有查询隔离、二级分类与删除后增量维护；这不能证明模型语义。真实模型首轮验收应区分“今天简短一点”（不存长期偏好）与“通常喜欢简洁解释”（可存），以及“今天走路上班”（不推断习惯）与“通常走路上班”（可存生活方式），验证他人职业只进关系人物、详细工作背景不全量复制入概况，以及删除偏好证据后只更新受影响条目。
+
 ## 删除与派生中间状态
 
 DELETE sources/{source_id}/messages 接收用户定位、message_ids 与稳定幂等键，不需要正文、event_id 或 blob_id。同步处理所有相关 Blob 的支持组、Fact、直接索引、消息墓碑及完成回执，登记该次删除 Blob。重复删除稳定成功；未知消息也写无正文墓碑，迟到导入不能恢复贡献。
@@ -84,7 +96,11 @@ DELETE sources/{source_id}/messages 接收用户定位、message_ids 与稳定�
 
 Event 保存 title/summary/keywords/time/location/content，未知为空；interpretation 单独表示解释/推测，不能回写 Fact 或支撑 Profile。同人物/关键词不自动合并故事，Fact 与 Event 多对多。原文已清除，Loop 必须从 Fact 获取背景，遗漏细节不能补造。
 
-Fact 抽取只产生事实，不重复生成 Event 标签或画像分类。新版检索只计算 Fact 向量，EventLoop 不再生成未使用的故事向量；原有 v1/人工 Event 路径独立保留。Fact 删除、纠正或时间证据变化时同步清理相关历史画像；AgentLoop 不能把旧文本或后续未处理 Blob 所涉及的失效文本重新记入历史。当前派生文本允许延迟更新的契约不变。
+Fact 抽取只产生事实，不重复生成 Event 标签或画像分类。Fact-first search 使用 Fact 向量；独立 events/query 使用 Event 向量。Loop 完成修改集后，在写锁和 SQL 事务外批量计算新增／文本变化 Event 的向量；Profile、Event、向量、关联及 flush 回执仍一次提交。索引失败不提交半成品，复用原 flush 恢复；提交前继续检查事实及目标版本。未变的索引文本复用向量。Loop 与人工 Event 路径共用 factual title/summary/keywords/time/location/content 的索引文本，旧 event_tip/profile_delta/tag 保留兼容，不把 interpretation 当成事实索引正文。显式关闭 embedding 时仅词法查询。
+
+Profile/Event 的 created_at 由数据库在创建时生成，更新不改变；不再用支撑消息的 occurred_at 覆盖。事件发生时间仍由 time 及 Fact.event_time 表达。旧记录曾将来源时间写进 created_at，不能可靠还原的保持 legacy，不以当前时间或 updated_at 猜补；历史 created_* 筛选因此不能保证精确。
+
+Fact 删除、纠正或时间证据变化时同步清理相关历史画像；AgentLoop 不能把旧文本或后续未处理 Blob 所涉及的失效文本重新记入历史。当前派生文本允许延迟更新的契约不变。
 
 永久遗忘 DELETE users/{uid} 仍立即阻断读取及后续提交，不采用派生延迟语义。短 SQL 事务写项目/UUID 墓碑并级联清理；不等待长 Redis/model lease。旧执行者提交遇到墓碑返回 410 user_forgotten。重复调用返回同 UUID forgotten=true；墓碑不含正文，不能随 User 清理消失，也没有恢复身份参数。
 
@@ -121,7 +137,11 @@ SDK 0.10.0 新增 `queryFacts`、`queryEvents`、`queryProfiles`，分别对应 
 - Event：fact_ids（任一有效关联）、created_after/before（数据库创建时间）、event_after/before（有效关联事实的已知发生日期范围重叠，未知不命中）。返回 events/EventRecord 加 score；SDK 0.10.1 用独立 QueriedEventData 保证返回当前有效 fact_ids／evidence（无关联则空列表），不改变原管理 EventData。叙事 time 字符串不伪装成可精确筛选的日期。
 - Profile：topic、sub_topic 精确匹配及 query/IDs。返回 profiles/SearchProfile，仅携带当前同项目、同用户的有效 Fact 引用。画像没有向量列，使用文本匹配；Fact/Event 并行文本与向量查询，沿用 8 秒 embedding 截止及临时故障词法降级。候选上限 500，不承诺穷尽全量历史。
 
-`GET /api/project/identity` 及 SDK `getProjectIdentity` 只返回鉴权确定的 project_id。Inspector 用它与已初始化用户生成缓存 key，不信任浏览器提供的项目归属。此轮只增加读取协议与出站 Prompt，不变更数据库、维护事务或写入语义；真实供应商／远端隔离验收仍独立。
+`GET /api/project/identity` 及 SDK `getProjectIdentity` 只返回鉴权确定的 project_id。Inspector 用它与已初始化用户生成缓存 key，不信任浏览器提供的项目归属。三个查询接口保持只读；Event 索引由上述写入链路维护，不在查询时补写。真实供应商／远端隔离验收仍独立。
+
+独立 Event/Profile 查询按排序候选每页 20 条批量读取关联／当前有效证据，预算容纳足够完整条目即停止；超大条目整条跳过，继续下一页。身份和筛选在读取时再次应用，不逐条查询证据，也不添加记忆缓存。
+
+历史缺失 Event 向量使用 `python -m memoia_server.event_index_backfill --project-id … --user-id … --limit 100` 只读预览；另行授权后添加 `--apply` 才调用 embedding 并写入。每次最多 500 条，输出 last_id 可传 `--after` 继续；并发编辑／删除的行跳过，下次不带游标重新扫描缺失项。只补空向量，不改正文、时间、revision，不重新抽取或运行 Agent。共享库执行与真实模型调用不是本地验证的一部分。
 
 Alembic 0008 建立：维护任务、Fact revision/纠正关系、直接索引、派生多对多及版本约束。旧 Fact active=true，不从 included=false 猜失效；机械迁移已有同归属索引/关联，缺失主体/报告者保持 legacy。0009_blob_flush 前向迁移将旧任务进度/变更/失败转为 Blob 引用和可恢复 flush Operation，随后移除旧维护表；旧在途 owner 不延续，原身份及次数保留，重新读当前 Fact，不重新抽取原文。旧删除操作补固定 Blob，未知消息补无正文墓碑。0006 已清除的聊天不能恢复，不用模型猜补；历史备份/WAL 中正文需独立保留策略。
 

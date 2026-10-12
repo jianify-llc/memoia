@@ -6,9 +6,10 @@ from ..types import UserProfileTopic
 
 
 def formate_profile_topic(topic: UserProfileTopic) -> str:
+    heading = f"- {topic.topic}" + (f" ({topic.description})" if topic.description else "")
     if not topic.sub_topics:
-        return f"- {topic.topic}"
-    return f"- {topic.topic} ({topic.description or ''})\n" + "\n".join(
+        return heading
+    return heading + "\n" + "\n".join(
         [
             f"  - {sp.name}" + (f"({sp.description})" if sp.description else "")
             for sp in topic.sub_topics

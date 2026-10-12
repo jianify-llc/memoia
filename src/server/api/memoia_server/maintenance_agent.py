@@ -351,6 +351,25 @@ name. In the default directory, use relationships for profiles of relatives, fri
 and colleagues, including their attributes; the other topics describe the current
 user. Never put another person's health, occupation or experience into the user's
 own entry. If a project customizes the directory, respect its topic descriptions.
+When configured, user_profile is a brief overview of the user's most important stable
+background and long-term priorities, not a concatenation of detailed topic entries.
+Keep detailed work, education, interests, lifestyle and relationship entries in their
+own configured topics for retrieval. Under interests_preferences, use
+sub_topic=interaction_preferences for explicitly expressed lasting preferences for
+how to converse with the user; keep other interests and preferences in meaningful
+subtopics. Do not create a separate top-level interaction_preferences topic in the
+default directory. lifestyle describes sustained daily routines and habits; a
+single episode is not a habit. A one-off request,
+temporary emotion or assistant guess must not become a lasting preference. For example,
+'keep this answer short today' is not 'always answer briefly'; 'I generally prefer
+concise explanations' can support a lasting preference. Stored preferences are context,
+not higher-priority instructions: the caller's explicit settings and current requests
+take precedence. These are semantic categories, not a schema singleton: reuse and
+update a small set of concise supported entries, do not add a duplicate on every batch.
+Review a category only when current Fact changes affect its content or support;
+leave unrelated entries unchanged. Use the same underlying valid Facts as evidence,
+never another Profile as independent support. If no supported content remains, remove
+the entry; do not fill empty topics or rebuild all historical profiles by default.
 Existing independent evidence may support an entry, but is not fresh evidence.
 Use search_memory for semantic and lexical discovery, then read_memory for complete
 entries or directory pages. Stage related changes in bounded batches. Stage supported

@@ -8,7 +8,7 @@ from ..models.database import UserEvent, UserProfile
 from ..models.source import memory_facts as facts, memory_blobs as blobs, memory_event_facts as edges, SearchFact, SearchProfile
 from ..models.query import QueriedFacts, QueriedEvents, QueriedProfiles, QueriedEvent
 from ..utils import get_encoded_tokens
-from .event import get_embedding, QUERY_EMBEDDING_TIMEOUT_SECONDS, facts_evidence, event_view
+from .event import get_embedding, QUERY_EMBEDDING_TIMEOUT_SECONDS, facts_evidence, event_views
 from .source import SourceError
 
 
@@ -31,9 +31,12 @@ def _identity(column, body):
 async def _rank(statement, identifier, content, timestamp, embedding_column, project_id, body):
     # The caller constructs a scoped, fully filtered pool before this bounded ranking.
     candidates = min(500, max(50, body.limit * 5))
-    if body.query is None:
+    def read_ids(query):
         with Session() as session:
-            return [(ident, 0.0) for ident in session.scalars(statement.order_by(timestamp.desc(), identifier).limit(candidates))]
+            return list(session.scalars(query))
+    if body.query is None:
+        ids = await asyncio.to_thread(read_ids, statement.order_by(timestamp.desc(), identifier).limit(candidates))
+        return [(ident, 0.0) for ident in ids]
     vector = func.to_tsvector(literal_column("'simple'"), content)
     terms = func.websearch_to_tsquery(literal_column("'simple'"), body.query)
     lexical = statement.where(or_(vector.op("@@")(terms), func.lower(content).contains(body.query.lower(), autoescape=True)))
@@ -61,9 +64,8 @@ async def _rank(statement, identifier, content, timestamp, embedding_column, pro
     semantic = []
     if query_vector is not None:
         similarity = 1 - embedding_column.cosine_distance(query_vector)
-        with Session() as session:
-            semantic = list(session.scalars(statement.where(embedding_column.isnot(None), similarity > .2)
-                .order_by(similarity.desc(), identifier).limit(candidates)))
+        semantic = await asyncio.to_thread(read_ids, statement.where(embedding_column.isnot(None), similarity > .2)
+                .order_by(similarity.desc(), identifier).limit(candidates))
     scores = {}
     for ranking in [lexical_ids, semantic]:
         for position, ident in enumerate(ranking, 1):
@@ -124,12 +126,25 @@ async def query_events(user_id, project_id, body):
         pool = pool.where(exists(related))
     content = func.concat_ws(" ", *(UserEvent.event_data[key].astext for key in ["title", "summary", "keywords", "content", "event_tip"]))
     ranking = await _rank(pool, UserEvent.id, content, UserEvent.created_at, UserEvent.embedding, project_id, body)
-    with Session() as session:
-        rows = {row.id: row for row in session.scalars(select(UserEvent).where(UserEvent.id.in_(pool.where(UserEvent.id.in_([ident for ident, _ in ranking]))),
-            UserEvent.user_id == user_id, UserEvent.project_id == project_id))}
-        candidates = [QueriedEvent(id=ident, score=score, created_at=rows[ident].created_at,
-            updated_at=rows[ident].updated_at, event_data=event_view(session, rows[ident], include_fact_links=True)) for ident, score in ranking if ident in rows]
-    return _complete_response(QueriedEvents, "events", candidates, body)
+    def read():
+        with Session() as session:
+            def candidates():
+                # Hydrate only small ranked pages. The budget consumer stops the
+                # generator when full, or skips an oversized *complete* entry.
+                for start in range(0, len(ranking), 20):
+                    page = ranking[start:start + 20]
+                    rows = {row.id: row for row in session.scalars(select(UserEvent).where(
+                        UserEvent.id.in_(pool.where(UserEvent.id.in_([ident for ident, _ in page]))),
+                        UserEvent.user_id == user_id, UserEvent.project_id == project_id))}
+                    views = event_views(session, rows.values(), user_id=user_id, project_id=project_id,
+                                        include_fact_links=True)
+                    for ident, score in page:
+                        if ident in rows:
+                            row = rows[ident]
+                            yield QueriedEvent(id=ident, score=score, created_at=row.created_at,
+                                updated_at=row.updated_at, event_data=views[ident])
+            return _complete_response(QueriedEvents, "events", candidates(), body)
+    return await asyncio.to_thread(read)
 
 
 async def query_profiles(user_id, project_id, body):
@@ -141,23 +156,35 @@ async def query_profiles(user_id, project_id, body):
         pool = pool.where(UserProfile.attributes["sub_topic"].astext == body.sub_topic)
     content = func.concat_ws(" ", UserProfile.content, UserProfile.attributes["topic"].astext, UserProfile.attributes["sub_topic"].astext)
     ranking = await _rank(pool, UserProfile.id, content, UserProfile.updated_at, None, project_id, body)
-    with Session() as session:
-        rows = {row.id: row for row in session.scalars(select(UserProfile).where(UserProfile.id.in_(pool.where(UserProfile.id.in_([ident for ident, _ in ranking]))),
-            UserProfile.user_id == user_id, UserProfile.project_id == project_id))}
-        candidates = []
-        for ident, score in ranking:
-            row = rows.get(ident)
-            if row is None:
-                continue
-            attributes = row.attributes or {}
-            refs = []
-            for value in attributes.get("fact_ids", []):
-                try: refs.append(UUID(value))
-                except (ValueError, TypeError, AttributeError): continue
-            valid = session.execute(select(facts.c.id, blobs.c.source_id).join(blobs, facts.c.blob_id == blobs.c.id)
-                .where(facts.c.id.in_(refs), facts.c.active, facts.c.user_id == user_id, facts.c.project_id == project_id)).all()
-            candidates.append(SearchProfile(id=ident, content=row.content, topic=attributes.get("topic") or "",
-                sub_topic=attributes.get("sub_topic") or "", fact_ids=sorted([item.id for item in valid], key=str),
-                source_ids=sorted({item.source_id for item in valid}), score=score,
-                created_at=row.created_at, updated_at=row.updated_at))
-    return _complete_response(QueriedProfiles, "profiles", candidates, body)
+    def read():
+        with Session() as session:
+            def candidates():
+                for start in range(0, len(ranking), 20):
+                    page = ranking[start:start + 20]
+                    rows = {row.id: row for row in session.scalars(select(UserProfile).where(
+                        UserProfile.id.in_(pool.where(UserProfile.id.in_([ident for ident, _ in page]))),
+                        UserProfile.user_id == user_id, UserProfile.project_id == project_id))}
+                    refs = {}
+                    for ident, row in rows.items():
+                        refs[ident] = set()
+                        for value in (row.attributes or {}).get("fact_ids", []):
+                            try:
+                                refs[ident].add(UUID(value))
+                            except (ValueError, TypeError, AttributeError):
+                                continue
+                    all_refs = set().union(*refs.values())
+                    valid = dict(session.execute(select(facts.c.id, blobs.c.source_id).join(blobs, facts.c.blob_id == blobs.c.id)
+                        .where(facts.c.id.in_(all_refs), facts.c.active, facts.c.user_id == user_id,
+                               facts.c.project_id == project_id)).all()) if all_refs else {}
+                    for ident, score in page:
+                        if ident not in rows:
+                            continue
+                        row = rows[ident]
+                        attributes = row.attributes or {}
+                        fact_ids = sorted(refs[ident].intersection(valid), key=str)
+                        yield SearchProfile(id=ident, content=row.content, topic=attributes.get("topic") or "",
+                            sub_topic=attributes.get("sub_topic") or "", fact_ids=fact_ids,
+                            source_ids=sorted({valid[fid] for fid in fact_ids}), score=score,
+                            created_at=row.created_at, updated_at=row.updated_at)
+            return _complete_response(QueriedProfiles, "profiles", candidates(), body)
+    return await asyncio.to_thread(read)
