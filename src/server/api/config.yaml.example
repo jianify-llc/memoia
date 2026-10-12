@@ -1,6 +1,9 @@
 llm_api_key: YOUR-OPENAI-KEY
 best_llm_model: gpt-6-luna
 llm_reasoning_effort: high
+# Native OpenAI enables the cache contract automatically for supported models.
+# Custom gateways must explicitly declare support; null keeps compatibility mode.
+llm_prompt_cache_options: null
 
 # If you use the lstudio embedded provider, you can refer to the configuration below
 

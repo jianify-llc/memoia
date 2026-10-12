@@ -24,6 +24,14 @@ export type History = ResponseBody<paths["/api/users/{user_id}/history"]["get"]>
 export type Search = ResponseBody<paths["/api/users/{user_id}/search"]["post"]>;
 export type SearchInput = RequestBody<paths["/api/users/{user_id}/search"]["post"]>;
 export type SearchOptions = RequestOptions & Partial<Omit<SearchInput, "query" | "limit">>;
+// Every query parameter has a server default; generated runtime validators remain authoritative.
+export type FactQuery = Partial<RequestBody<paths["/api/users/{user_id}/facts/query"]["post"]>>;
+export type EventQuery = Partial<RequestBody<paths["/api/users/{user_id}/events/query"]["post"]>>;
+export type ProfileQuery = Partial<RequestBody<paths["/api/users/{user_id}/profiles/query"]["post"]>>;
+export type QueriedFacts = ResponseBody<paths["/api/users/{user_id}/facts/query"]["post"]>;
+export type QueriedEvents = ResponseBody<paths["/api/users/{user_id}/events/query"]["post"]>;
+export type QueriedProfiles = ResponseBody<paths["/api/users/{user_id}/profiles/query"]["post"]>;
+export type ProjectIdentity = ResponseBody<paths["/api/project/identity"]["get"]>;
 export type ContextInput = RequestBody<paths["/api/users/{user_id}/context"]["post"]>;
 export type Context = ResponseBody<paths["/api/users/{user_id}/context"]["post"]>;
 export type UserInput = RequestBody<paths["/api/users"]["post"]>;
@@ -201,6 +209,25 @@ export class MemoiaClient {
 
   getProfiles(userId: string, options?: RequestOptions): Promise<Profiles> {
     return this.request("GET", `${this.userPath(userId)}/profiles`, validators.validateProfiles, options);
+  }
+
+  queryFacts(userId: string, input: FactQuery = {}, options?: RequestOptions): Promise<QueriedFacts> {
+    if (!validators.validateFactQuery(input)) throw new MemoiaError("INVALID_INPUT", null, false);
+    return this.request("POST", `${this.userPath(userId)}/facts/query`, validators.validateQueriedFacts, options, input, undefined, true);
+  }
+
+  queryEvents(userId: string, input: EventQuery = {}, options?: RequestOptions): Promise<QueriedEvents> {
+    if (!validators.validateEventQuery(input)) throw new MemoiaError("INVALID_INPUT", null, false);
+    return this.request("POST", `${this.userPath(userId)}/events/query`, validators.validateQueriedEvents, options, input, undefined, true);
+  }
+
+  queryProfiles(userId: string, input: ProfileQuery = {}, options?: RequestOptions): Promise<QueriedProfiles> {
+    if (!validators.validateProfileQuery(input)) throw new MemoiaError("INVALID_INPUT", null, false);
+    return this.request("POST", `${this.userPath(userId)}/profiles/query`, validators.validateQueriedProfiles, options, input, undefined, true);
+  }
+
+  getProjectIdentity(options?: RequestOptions): Promise<ProjectIdentity> {
+    return this.request("GET", "/api/project/identity", validators.validateProjectIdentity, options);
   }
 
   getHistory(userId: string, options?: RequestOptions & HistoryQuery): Promise<History> {

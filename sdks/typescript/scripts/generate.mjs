@@ -13,6 +13,13 @@ const api = JSON.parse(apiText);
 const { version: sdkVersion } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const route = "/api/users/{user_id}";
 const targets = {
+  validateFactQuery: ["post", `${route}/facts/query`, "request"],
+  validateEventQuery: ["post", `${route}/events/query`, "request"],
+  validateProfileQuery: ["post", `${route}/profiles/query`, "request"],
+  validateQueriedFacts: ["post", `${route}/facts/query`, "response"],
+  validateQueriedEvents: ["post", `${route}/events/query`, "response"],
+  validateQueriedProfiles: ["post", `${route}/profiles/query`, "response"],
+  validateProjectIdentity: ["get", "/api/project/identity", "response"],
   validateSearchInput: ["post", `${route}/search`, "request"],
   validateContextInput: ["post", `${route}/context`, "request"],
   validateContext: ["post", `${route}/context`, "response"],

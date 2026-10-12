@@ -3,7 +3,7 @@ import time
 from collections.abc import Awaitable, Callable
 from openai import APIError
 from .utils import get_openai_async_client_instance, get_error_usage, supports_prompt_cache_options
-from ..env import CONFIG
+from ..env import CONFIG, LOG
 
 
 async def openai_complete(
@@ -16,6 +16,8 @@ async def openai_complete(
     messages = []
     if cache_fixed_prompt and not system_prompt:
         raise ValueError("Explicit caching requires fixed instructions")
+    if cache_fixed_prompt:
+        LOG.info("Prompt cache contract: kind=fact_extraction enabled=%s", supports_prompt_cache_options(model))
     if cache_fixed_prompt and supports_prompt_cache_options(model):
         # One-shot extraction caches only instructions, never the unique source input.
         messages.append({"role": "developer", "content": [{
@@ -24,9 +26,10 @@ async def openai_complete(
         }]})
         kwargs["prompt_cache_options"] = {"mode": "explicit", "ttl": "30m"}
     elif system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "developer" if cache_fixed_prompt else "system", "content": system_prompt})
     messages.extend(history_messages)
-    messages.append({"role": "user", "content": prompt})
+    # An extraction's source is reference material, not a fabricated current user.
+    messages.append({"role": "developer" if cache_fixed_prompt else "user", "content": prompt})
 
     if model == "gpt-6-luna":
         # 正式调用默认使用完整推理预算；启动探针可显式指定独立 completion 上限。

@@ -78,6 +78,8 @@ def openai_transport(monkeypatch):
     monkeypatch.setattr(llms, "project_cost_token_billing", AsyncMock(return_value=Promise.resolve(None)))
     monkeypatch.setattr(llms, "capture_int_key", AsyncMock())
     monkeypatch.setattr(CONFIG, "llm_reasoning_effort", "high")
+    monkeypatch.setattr(CONFIG, "llm_base_url", None)
+    monkeypatch.setattr(CONFIG, "llm_prompt_cache_options", None)
     return state, client
 
 
@@ -107,9 +109,35 @@ async def test_one_shot_explicit_cache_excludes_changing_source_input(openai_tra
         assert first["messages"][0] == second["messages"][0] == {
             "role": "developer", "content": [{"type": "text", "text": "fixed instructions",
                                                    "prompt_cache_breakpoint": {"mode": "explicit"}}]}
-        assert first["messages"][1] == {"role": "user", "content": "private first source"}
-        assert second["messages"][1] == {"role": "user", "content": "private second source"}
+        assert first["messages"][1] == {"role": "developer", "content": "private first source"}
+        assert second["messages"][1] == {"role": "developer", "content": "private second source"}
+        assert "prompt_cache_key" not in first
         assert json.dumps(first["messages"]).count("prompt_cache_breakpoint") == 1
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint,declared,enabled", [
+    ("https://api.openai.com/v1", None, True), ("https://api.openai.com:443/v1/", None, True),
+    ("https://api.openai.com.evil/v1", None, False), ("https://api.openai.com:8443/v1", None, False),
+    ("http://api.openai.com/v1", None, False), ("https://user@api.openai.com/v1", None, False),
+    ("https://api.openai.com/v1?key=private", None, False),
+    ("https://gateway.example/v1", None, False), ("https://gateway.example/v1", False, False),
+    ("https://gateway.example/v1", True, True),
+])
+async def test_fact_cache_requires_model_and_endpoint_capabilities(openai_transport, monkeypatch, endpoint, declared, enabled):
+    state, client = openai_transport
+    monkeypatch.setattr(CONFIG, "llm_base_url", endpoint)
+    monkeypatch.setattr(CONFIG, "llm_prompt_cache_options", declared)
+    try:
+        await openai_complete("gpt-6-luna", "reference", system_prompt="fixed", cache_fixed_prompt=True)
+        await openai_complete("older-model", "reference", system_prompt="fixed", cache_fixed_prompt=True)
+        first, old = state["requests"]
+        assert ("prompt_cache_options" in first) == enabled
+        assert json.dumps(first).count("prompt_cache_breakpoint") == int(enabled)
+        assert "prompt_cache_options" not in old and "prompt_cache_key" not in old
+        assert all("prompt_cache_key" not in request for request in state["requests"])
     finally:
         await client.close()
 
@@ -127,13 +155,13 @@ async def test_fixed_cache_respects_model_capability(openai_transport, model, su
                               cache_fixed_prompt=True, reasoning_effort="high")
         body = state["requests"][0]
         assert body["model"] == model and body["reasoning_effort"] == "high"
-        assert body["messages"][-1] == {"role": "user", "content": "changing input"}
+        assert body["messages"][-1] == {"role": "developer", "content": "changing input"}
         if supported:
             assert body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
             assert body["messages"][0]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
         else:
             assert "prompt_cache_options" not in body
-            assert body["messages"][0] == {"role": "system", "content": "fixed instructions"}
+            assert body["messages"][0] == {"role": "developer", "content": "fixed instructions"}
             assert "prompt_cache_breakpoint" not in json.dumps(body)
     finally:
         await client.close()

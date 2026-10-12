@@ -149,7 +149,8 @@ async def test_extraction_anchors_each_message_in_its_recorded_zone_and_rejects_
         {"message_id": "3", "role": "user", "content": "时区未知的昨天", "occurred_at": "2025-12-31T16:30:00Z"}])
     seen = []
     async def structured(model, prompt, system, **kwargs):
-        seen.append(json.loads(prompt))
+        from xml.etree import ElementTree
+        seen.append(json.loads(ElementTree.fromstring(prompt).text))
         return source.Extraction(facts=[source.ExtractedFact(content="Kyoto visit", subject="user",
             reporter="user", certainty="asserted", corrects=[],
             support_groups=[["1"]], event_time=period("2025-12-31", "2025-12-31", "day", "昨天"))])

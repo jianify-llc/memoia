@@ -10,6 +10,41 @@ const source = { idempotency_key: "luvel:batch:1", source_id: sourceId, messages
 const json = (body, status = 200) => Response.json(body, { status });
 const client = (fetch, options = {}) => new MemoiaClient({ baseUrl: "https://memoia.example", apiKey: "private-project-token", fetch, ...options });
 
+describe("independent read queries", () => {
+  it("uses separate private POST bodies and authoritative project identity", async () => {
+    const calls = [];
+    const api = client(async (url, init) => {
+      calls.push({ url, method: init.method, body: init.body && JSON.parse(init.body) });
+      if (url.endsWith("/identity")) return json({ project_id: "scoped-project" });
+      return json({ [url.split("/").at(-2)]: [] });
+    });
+    await api.queryFacts(user, { query: "private fact", ids: [eventId], source_ids: [sourceId], recorded_after: "2026-01-01T00:00:00Z" });
+    await api.queryEvents(user, { query: "private story", fact_ids: [eventId], event_after: "2024-01-01", max_token_size: 1000 });
+    await api.queryProfiles(user, { topic: "relationships", sub_topic: "friend", exclude_ids: [eventId] });
+    assert.deepEqual(await api.getProjectIdentity(), { project_id: "scoped-project" });
+    assert.deepEqual(calls.map(call => call.method), ["POST", "POST", "POST", "GET"]);
+    assert.deepEqual(calls.slice(0, 3).map(call => call.url.split("/").slice(-2).join("/")), ["facts/query", "events/query", "profiles/query"]);
+    assert.equal(calls[0].body.query, "private fact");
+    assert.ok(calls.every(call => !call.url.includes("private")));
+  });
+
+  it("rejects forged ownership and unsupported filters before transport", () => {
+    const api = client(() => { throw new Error("Must not fetch"); });
+    for (const [method, body] of [["queryFacts", { project_id: "forged" }],
+      ["queryEvents", { recorded_after: "2026-01-01T00:00:00Z" }], ["queryProfiles", { source_ids: [sourceId] }]]) {
+      assert.throws(() => api[method](user, body), error => error.code === "INVALID_INPUT");
+    }
+  });
+
+  it("uses read retry semantics for a private query POST without permitting redirects", async () => {
+    let attempts = 0;
+    const api = client(async () => { attempts++; return attempts === 1 ? json({ detail: {
+      code: "query_unavailable", message: "Unavailable", retryable: true } }, 503) : json({ facts: [] }); }, { maxAttempts: 2 });
+    assert.deepEqual(await api.queryFacts(user), { facts: [] });
+    assert.equal(attempts, 2);
+  });
+});
+
 describe("fixed Blob flush contract", () => {
   const progress = { operation_id: eventId, status: "pending", blob_ids: [complete.blob_id],
     attempts: 0, available_at: "2026-10-07T00:00:00Z", error: null, retryable: false };

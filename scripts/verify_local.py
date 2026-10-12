@@ -48,6 +48,7 @@ QUICK_TESTS = (
         "test_luna_service_default_is_used_only_without_explicit_effort",
         "test_completed_empty_text_is_returned_unchanged",
         "test_fixed_cache_respects_model_capability",
+        "test_fact_cache_requires_model_and_endpoint_capabilities",
         "test_fact_client_does_not_hide_retries_and_observes_failed_usage",
         "test_one_shot_explicit_cache_excludes_changing_source_input",
         "test_incomplete_or_failed_response_is_not_success", "test_startup_sanity_uses_dedicated_completion_budget",

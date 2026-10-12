@@ -63,7 +63,7 @@ memoia_server/
 ├── llms/                   # LLM Integration
 │   ├── __init__.py        # LLM service initialization
 │   └── openai_model_llm.py # OpenAI completion implementation
-└── prompts/               # Shared topic configuration and completion parsing
+└── prompts/               # Shared topic configuration and reference-data assembly
 ```
 
 ## Data Flow
@@ -175,9 +175,9 @@ graph LR
 
 ### 2. Modifying Memory Processing
 1. Fact extraction and its structured prompt live in `controllers/source.py`; the unified Profile/Event prompt and scoped tools live in `maintenance_agent.py`. These are the two business generation paths.
-2. `prompts/` retains English/Chinese topic defaults, project configuration helpers and the shared completion parser. Retired extraction, merge, summary and roleplay pipelines are removed.
+2. `prompts/` retains English/Chinese topic defaults, project configuration helpers and reference-data assembly. Retired extraction, merge, summary and roleplay pipelines/parsers are removed.
 3. Verify replay, deletion, per-user serial takeover and atomic flush recovery using isolated PostgreSQL/Redis. Historical `buffer.py` adapts Chat/Summary inputs into the same Fact import; it does not run another model pipeline.
-4. Keep one-shot Fact caching explicit at fixed instructions and linear AgentLoop caching implicit. Cache/usage instrumentation belongs in the existing LLM adapter, not in controllers or Redis. Policy, unknown-usage handling and cost acceptance are defined in [Prompt caching and numerical usage](readme.md#prompt-caching-and-numerical-usage); use the locked SDK and MockTransport to verify wire payloads before real-provider acceptance.
+4. Follow the [company Prompt/cache contract](https://github.com/jianify-llc/Jianify-LLC/blob/main/docs/engineering/llm-prompt-cache.md). Scenario mapping and numerical accounting are defined in [Prompt caching and numerical usage](readme.md#prompt-caching-and-numerical-usage); use the locked SDK and MockTransport to verify wire payloads before real-provider acceptance. Do not move reference materials or batch metadata into fake User messages.
 
 ### 3. Database Changes
 1. Update models and add a forward Alembic revision; never edit an executed migration.

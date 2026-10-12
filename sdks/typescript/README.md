@@ -1,6 +1,8 @@
 # Memoia TypeScript SDK
 
-`@jianify/memoia@0.9.1` supports Node.js and Cloudflare Workers. Protocol types and standalone runtime validators come from `src/server/api/openapi.json`. Every capability uses one unversioned `/api` contract; deploy server and consumers together. No legacy SDK or version alias is supported.
+`@jianify/memoia@0.10.0` supports Node.js and Cloudflare Workers. Protocol types and standalone runtime validators come from `src/server/api/openapi.json`. Every capability uses one unversioned `/api` contract; deploy server and consumers together. No legacy SDK or version alias is supported.
+
+`queryFacts(userId, input)`, `queryEvents(userId, input)` and `queryProfiles(userId, input)` query independent pre-filtered pools; they do not slice `search` results. Query text stays in private read-only POST bodies, using the existing read timeout/retry policy. OpenAPI-derived `FactQuery`/`EventQuery`/`ProfileQuery` and result types are exported. Supported filters and the distinct recording/creation/calendar times are documented in [API-DESIGN](../../src/server/api/API-DESIGN.md#独立只读查询). `getProjectIdentity()` returns the authenticated `project_id` for server-owned cache scope; client input cannot override it. Existing methods retain their contracts; schema remains 0009.
 
 ```ts
 import { MemoiaClient } from "@jianify/memoia";

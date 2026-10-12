@@ -1,4 +1,72 @@
 export interface paths {
+    "/api/project/identity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Project Identity */
+        get: operations["getProjectIdentity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/{user_id}/facts/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Query Facts */
+        post: operations["queryFacts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/{user_id}/events/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Query Events */
+        post: operations["queryEvents"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/users/{user_id}/profiles/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Query Profiles */
+        post: operations["queryProfiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/users/{user_id}": {
         parameters: {
             query?: never;
@@ -617,6 +685,35 @@ export interface components {
              */
             event_tags?: components["schemas"]["EventTag"][] | null;
         };
+        /** EventQuery */
+        EventQuery: {
+            /** Query */
+            query?: string | null;
+            /** Ids */
+            ids?: string[];
+            /** Exclude Ids */
+            exclude_ids?: string[];
+            /**
+             * Limit
+             * @default 10
+             */
+            limit: number;
+            /**
+             * Max Token Size
+             * @default 4000
+             */
+            max_token_size: number;
+            /** Fact Ids */
+            fact_ids?: string[];
+            /** Created After */
+            created_after?: string | null;
+            /** Created Before */
+            created_before?: string | null;
+            /** Event After */
+            event_after?: string | null;
+            /** Event Before */
+            event_before?: string | null;
+        };
         /** EventRecord */
         EventRecord: {
             /**
@@ -706,6 +803,35 @@ export interface components {
             event_time?: components["schemas"]["EventTime"] | null;
             /** Source Messages */
             source_messages?: components["schemas"]["SourceObservation"][];
+        };
+        /** FactQuery */
+        FactQuery: {
+            /** Query */
+            query?: string | null;
+            /** Ids */
+            ids?: string[];
+            /** Exclude Ids */
+            exclude_ids?: string[];
+            /**
+             * Limit
+             * @default 10
+             */
+            limit: number;
+            /**
+             * Max Token Size
+             * @default 4000
+             */
+            max_token_size: number;
+            /** Source Ids */
+            source_ids?: string[];
+            /** Recorded After */
+            recorded_after?: string | null;
+            /** Recorded Before */
+            recorded_before?: string | null;
+            /** Event After */
+            event_after?: string | null;
+            /** Event Before */
+            event_before?: string | null;
         };
         /** FlushInput */
         FlushInput: {
@@ -1016,6 +1142,29 @@ export interface components {
             /** Sub Topic */
             sub_topic: string;
         };
+        /** ProfileQuery */
+        ProfileQuery: {
+            /** Query */
+            query?: string | null;
+            /** Ids */
+            ids?: string[];
+            /** Exclude Ids */
+            exclude_ids?: string[];
+            /**
+             * Limit
+             * @default 10
+             */
+            limit: number;
+            /**
+             * Max Token Size
+             * @default 4000
+             */
+            max_token_size: number;
+            /** Topic */
+            topic?: string | null;
+            /** Sub Topic */
+            sub_topic?: string | null;
+        };
         /** Profiles */
         Profiles: {
             /** Profiles */
@@ -1023,6 +1172,11 @@ export interface components {
         };
         /** ProjectCreate */
         ProjectCreate: {
+            /** Project Id */
+            project_id: string;
+        };
+        /** ProjectIdentity */
+        ProjectIdentity: {
             /** Project Id */
             project_id: string;
         };
@@ -1066,6 +1220,42 @@ export interface components {
         Projects: {
             /** Projects */
             projects: components["schemas"]["ManagedProject"][];
+        };
+        /** QueriedEvent */
+        QueriedEvent: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            event_data: components["schemas"]["EventData"];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Score */
+            score: number;
+        };
+        /** QueriedEvents */
+        QueriedEvents: {
+            /** Events */
+            events: components["schemas"]["QueriedEvent"][];
+        };
+        /** QueriedFacts */
+        QueriedFacts: {
+            /** Facts */
+            facts: components["schemas"]["SearchFact"][];
+        };
+        /** QueriedProfiles */
+        QueriedProfiles: {
+            /** Profiles */
+            profiles: components["schemas"]["SearchProfile"][];
         };
         /** SearchEvent */
         SearchEvent: {
@@ -1345,6 +1535,131 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    getProjectIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectIdentity"];
+                };
+            };
+        };
+    };
+    queryFacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FactQuery"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueriedFacts"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    queryEvents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EventQuery"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueriedEvents"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    queryProfiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfileQuery"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueriedProfiles"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     getUser: {
         parameters: {
             query?: never;

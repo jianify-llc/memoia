@@ -124,7 +124,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if scoped is not None:
                 request.state.memoia_scopes = scoped[1]
         read_request = request.method in {"GET", "HEAD", "OPTIONS"}
-        if request.method == "POST" and request.url.path.endswith(("/context", "/search")):
+        if request.method == "POST" and request.url.path.endswith(("/context", "/search", "/facts/query", "/events/query", "/profiles/query")):
             read_request = True
         required = "read" if read_request else "write"
         if not read_request and request.url.path == "/api/project/config":

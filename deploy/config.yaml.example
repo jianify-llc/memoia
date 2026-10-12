@@ -3,6 +3,9 @@
 language: en
 llm_style: openai
 llm_base_url: https://api.openai.com/v1
+# 自定义网关须显式 true 声明支持新缓存参数；null/false 不发送。
+# null 仅原生 OpenAI 自动启用；兼容模式不能保证关闭供应商隐式缓存。
+llm_prompt_cache_options: null
 best_llm_model: gpt-6-luna
 thinking_llm_model: gpt-6-luna
 enable_event_embedding: true

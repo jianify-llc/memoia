@@ -3,6 +3,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Request, Query, HTTPException, Response
 from ..models.management import SearchInput
+from ..models.query import FactQuery, EventQuery, ProfileQuery, QueriedFacts, QueriedEvents, QueriedProfiles, ProjectIdentity
 from ..models.source import (
     ImportSource, DeleteMessages, Operation, Operations, Source, Sources, Profiles, Profile, Blob,
     SearchResult, SearchEvent, History, HistoryEntry,
@@ -11,6 +12,38 @@ from ..models.source import (
 )
 
 router = APIRouter(prefix="/api", tags=["sources"])
+
+
+@router.get("/project/identity", response_model=ProjectIdentity, operation_id="getProjectIdentity", tags=["projects"])
+async def get_project_identity(request: Request):
+    return ProjectIdentity(project_id=project_id(request))
+
+
+@router.post("/users/{user_id}/facts/query", response_model=QueriedFacts, operation_id="queryFacts", tags=["facts"])
+async def query_facts(user_id: UUID, body: FactQuery, request: Request):
+    from ..controllers.query import query_facts as query
+    try:
+        return await query(user_id, project_id(request), body)
+    except Exception as error:
+        translate(error)
+
+
+@router.post("/users/{user_id}/events/query", response_model=QueriedEvents, operation_id="queryEvents", tags=["events"])
+async def query_events(user_id: UUID, body: EventQuery, request: Request):
+    from ..controllers.query import query_events as query
+    try:
+        return await query(user_id, project_id(request), body)
+    except Exception as error:
+        translate(error)
+
+
+@router.post("/users/{user_id}/profiles/query", response_model=QueriedProfiles, operation_id="queryProfiles", tags=["profiles"])
+async def query_profiles(user_id: UUID, body: ProfileQuery, request: Request):
+    from ..controllers.query import query_profiles as query
+    try:
+        return await query(user_id, project_id(request), body)
+    except Exception as error:
+        translate(error)
 
 
 def project_id(request):

@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+from xml.etree import ElementTree
 from unittest.mock import AsyncMock
 from uuid import UUID
 
@@ -18,6 +19,18 @@ from memoia_server.source_quality_cases import CASES
 
 
 SETTINGS = {"api_key": "quality-fake-key", "model": "gpt-6-luna", "base_url": "https://example.invalid/v1"}
+
+
+@pytest.fixture(autouse=True)
+def native_cache_capability(monkeypatch):
+    monkeypatch.setattr(CONFIG, "llm_base_url", None)
+    monkeypatch.setattr(CONFIG, "llm_prompt_cache_options", None)
+
+
+def source_material(content):
+    root = ElementTree.fromstring(content)
+    assert root.tag == "source_material" and len(root) == 0
+    return json.loads(root.text)
 
 
 def request_body(messages):
@@ -80,7 +93,7 @@ async def test_fact_extraction_uses_project_model_and_reasoning_on_wire(monkeypa
                    "llm_model": model, "reasoning_effort": effort})
         assert result.facts == [] and len(bodies) == 1
         assert bodies[0]["model"] == model and bodies[0]["reasoning_effort"] == effort
-        assert set(json.loads(bodies[0]["messages"][1]["content"])["configuration"]) == {
+        assert set(source_material(bodies[0]["messages"][1]["content"])["configuration"]) == {
             "language"}
     finally:
         await client.close()
@@ -104,7 +117,9 @@ async def test_actual_extract_preserves_full_roles_ids_times_and_joint_support(m
         assert wire["messages"][0] == {"role": "developer", "content": [{
             "type": "text", "text": source.EXTRACT_SYSTEM,
             "prompt_cache_breakpoint": {"mode": "explicit"}}]}
-        assert json.loads(wire["messages"][1]["content"]) == {
+        assert wire["messages"][1]["role"] == "developer"
+        assert "prompt_cache_key" not in wire
+        assert source_material(wire["messages"][1]["content"]) == {
             "configuration": {"language": "en"},
             "related_facts": [],
             "messages": [{**message.model_dump(mode="json"), "local_recorded_date": None}
@@ -173,7 +188,7 @@ async def test_past_relationship_empty_extraction_is_a_quality_failure_without_r
         assert report["passed"] is False and "error" not in report["cases"][0]
         assert report["cases"][0]["checks"]["expected_concepts"] is False
         assert len(bodies) == 1
-        messages = json.loads(bodies[0]["messages"][1]["content"])["messages"]
+        messages = source_material(bodies[0]["messages"][1]["content"])["messages"]
         assert messages[0]["content"] == case.messages[0][2] and messages[0]["message_id"] == "M3"
     finally:
         await client.close()
@@ -237,7 +252,7 @@ async def test_baseline_override_restores_single_prompt_truth_and_strict_evidenc
         assert bodies[0]["messages"][0] == {"role": "developer", "content": [{
             "type": "text", "text": "public baseline system",
             "prompt_cache_breakpoint": {"mode": "explicit"}}]}
-        configuration = json.loads(bodies[0]["messages"][1]["content"])["configuration"]
+        configuration = source_material(bodies[0]["messages"][1]["content"])["configuration"]
         assert set(configuration) == {"language"}
     finally:
         await client.close()
@@ -259,7 +274,7 @@ async def test_extraction_preserves_out_of_profile_evidence_without_duplicate_cl
     try:
         extracted = await source.extract_source(request_body(case.messages), rules=rules)
         assert len(extracted.facts) == 1 and extracted.facts[0]["support_groups"] == [["u-outside"]]
-        extracted_configuration = json.loads(bodies[0]["messages"][1]["content"])["configuration"]
+        extracted_configuration = source_material(bodies[0]["messages"][1]["content"])["configuration"]
         assert extracted_configuration == {"language": "en"}
         assert len(bodies) == 1 and "event_tags" not in bodies[0]["response_format"]["json_schema"]["schema"]["properties"]
         assert rules["strict_mode"] is True and rules["event_theme_requirement"] == "Employment only"

@@ -9,6 +9,7 @@ Imports commit Fact, its retrieval index and receipt synchronously. Completed Fa
 - [Server development](src/server/api/DEVELOPMENT.md)
 - [API and memory architecture](src/server/api/API-DESIGN.md)
 - [TypeScript SDK](sdks/typescript/README.md)
+- [Company Prompt and cache contract](https://github.com/jianify-llc/Jianify-LLC/blob/main/docs/engineering/llm-prompt-cache.md)
 - [Deployment and recovery](deploy/README.md)
 - [Release and coordinated legacy recovery](docs/guide/memoia-release.md)
 

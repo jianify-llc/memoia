@@ -437,7 +437,8 @@ event_tags: []
     seen = []
     async def structured(model, prompt, system, **kwargs):
         import json
-        data = json.loads(prompt)
+        from xml.etree import ElementTree
+        data = json.loads(ElementTree.fromstring(prompt).text)
         seen.append(data)
         assert data["configuration"]["language"] == "zh"
         if model is source.Extraction:

@@ -1,6 +1,7 @@
 # Modified for Memoia: relocated from the upstream memobase_server package.
 import logging
 import re
+from urllib.parse import urlsplit
 
 from openai import AsyncOpenAI, APIStatusError
 from ..env import CONFIG
@@ -26,11 +27,25 @@ def get_openai_async_client_instance() -> AsyncOpenAI:
 
 
 def supports_prompt_cache_options(model: str) -> bool:
-    """Only known new-cache model families opt in; unknown aliases keep defaults."""
-    return re.fullmatch(
+    """Both model and endpoint must support the contract; no capability probes."""
+    known_model = re.fullmatch(
         r"gpt-(?:5\.6|6(?:\.1)?)(?:-(?:luna|sol|astra))?(?:-\d{4}-\d{2}-\d{2})?",
         model,
     ) is not None
+    if not known_model or CONFIG.llm_prompt_cache_options is False:
+        return False
+    if CONFIG.llm_base_url is None:
+        return True  # The SDK's native HTTPS OpenAI endpoint.
+    try:
+        url = urlsplit(CONFIG.llm_base_url)
+        port = url.port
+        if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password or url.query or url.fragment:
+            return False
+        native = (url.scheme == "https" and url.hostname == "api.openai.com" and
+                  port in (None, 443) and url.path.rstrip("/") == "/v1")
+        return native or CONFIG.llm_prompt_cache_options is True
+    except ValueError:
+        return False
 
 
 def get_error_usage(error):

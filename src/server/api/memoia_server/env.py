@@ -105,6 +105,8 @@ class Config:
     language: Literal["en", "zh"] = "en"
     llm_style: Literal["openai"] = "openai"
     llm_base_url: str = None
+    # Custom gateways must declare support; absent means only native OpenAI enables it.
+    llm_prompt_cache_options: bool | None = None
     llm_api_key: str = None
     llm_openai_default_query: dict[str, str] = None
     llm_openai_default_header: dict[str, str] = None
@@ -210,6 +212,8 @@ class Config:
         return overwrite_config
 
     def __post_init__(self):
+        if self.llm_prompt_cache_options is not None and type(self.llm_prompt_cache_options) is not bool:
+            raise ValueError("llm_prompt_cache_options must be a boolean or null")
         if self.llm_style != "openai":
             raise ValueError("Only llm_style=openai is supported; doubao_cache has been removed")
         if self.best_llm_model is None or self.llm_reasoning_effort is None:
