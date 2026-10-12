@@ -10,11 +10,17 @@ def reference_data(name: str, value) -> str:
     return f'<{name} source="memoia">{escape(json.dumps(value, ensure_ascii=False), quote=False)}</{name}>'
 
 
-def developer_data(name: str, value, *, cache: bool = False) -> dict:
+def developer_data(name: str, value, *, cache: bool = False, format_rules: str | None = None) -> dict:
     content = {"type": "input_text", "text": reference_data(name, value)}
     if cache:
         content["prompt_cache_breakpoint"] = {"mode": "explicit"}
-    return {"role": "developer", "content": [content]}
+    blocks = [content]
+    if format_rules is not None:
+        rules = {"type": "input_text", "text": format_rules}
+        if cache:
+            rules["prompt_cache_breakpoint"] = {"mode": "explicit"}
+        blocks.insert(0, rules)
+    return {"role": "developer", "content": blocks}
 
 
 def user_cache_key(project_id: str, user_id: str) -> str:
