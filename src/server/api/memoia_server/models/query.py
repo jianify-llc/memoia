@@ -5,6 +5,7 @@ from typing import Annotated
 from pydantic import AwareDatetime, Field, model_validator
 from .source import StrictModel, SearchFact, SearchProfile
 from .management import EventRecord
+from .response import EventData
 
 
 class MemoryQuery(StrictModel):
@@ -50,7 +51,13 @@ class ProfileQuery(MemoryQuery):
     sub_topic: str | None = Field(default=None, min_length=1, max_length=256)
 
 
+class QueriedEventData(EventData):
+    # Query links are part of the read contract, not discarded management extras.
+    fact_ids: list[UUID]
+
+
 class QueriedEvent(EventRecord):
+    event_data: QueriedEventData
     score: float
 
 

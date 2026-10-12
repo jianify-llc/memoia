@@ -3814,25 +3814,22 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
     evaluated0.items = void 0;
   }
   if (data && typeof data == "object" && !Array.isArray(data)) {
+    if (data.fact_ids === void 0) {
+      const err0 = { instancePath, schemaPath: "#/required", keyword: "required", params: { missingProperty: "fact_ids" }, message: "must have required property 'fact_ids'" };
+      if (vErrors === null) {
+        vErrors = [err0];
+      } else {
+        vErrors.push(err0);
+      }
+      errors++;
+    }
     if (data.title !== void 0) {
       let data0 = data.title;
       const _errs2 = errors;
       let valid1 = false;
       const _errs3 = errors;
       if (typeof data0 !== "string") {
-        const err0 = { instancePath: instancePath + "/title", schemaPath: "#/properties/title/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
-        if (vErrors === null) {
-          vErrors = [err0];
-        } else {
-          vErrors.push(err0);
-        }
-        errors++;
-      }
-      var _valid0 = _errs3 === errors;
-      valid1 = valid1 || _valid0;
-      const _errs5 = errors;
-      if (data0 !== null) {
-        const err1 = { instancePath: instancePath + "/title", schemaPath: "#/properties/title/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
+        const err1 = { instancePath: instancePath + "/title", schemaPath: "#/properties/title/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
         if (vErrors === null) {
           vErrors = [err1];
         } else {
@@ -3840,14 +3837,26 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
         }
         errors++;
       }
-      var _valid0 = _errs5 === errors;
+      var _valid0 = _errs3 === errors;
       valid1 = valid1 || _valid0;
-      if (!valid1) {
-        const err2 = { instancePath: instancePath + "/title", schemaPath: "#/properties/title/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+      const _errs5 = errors;
+      if (data0 !== null) {
+        const err2 = { instancePath: instancePath + "/title", schemaPath: "#/properties/title/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
         if (vErrors === null) {
           vErrors = [err2];
         } else {
           vErrors.push(err2);
+        }
+        errors++;
+      }
+      var _valid0 = _errs5 === errors;
+      valid1 = valid1 || _valid0;
+      if (!valid1) {
+        const err3 = { instancePath: instancePath + "/title", schemaPath: "#/properties/title/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+        if (vErrors === null) {
+          vErrors = [err3];
+        } else {
+          vErrors.push(err3);
         }
         errors++;
       } else {
@@ -3867,19 +3876,7 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
       let valid2 = false;
       const _errs9 = errors;
       if (typeof data1 !== "string") {
-        const err3 = { instancePath: instancePath + "/summary", schemaPath: "#/properties/summary/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
-        if (vErrors === null) {
-          vErrors = [err3];
-        } else {
-          vErrors.push(err3);
-        }
-        errors++;
-      }
-      var _valid1 = _errs9 === errors;
-      valid2 = valid2 || _valid1;
-      const _errs11 = errors;
-      if (data1 !== null) {
-        const err4 = { instancePath: instancePath + "/summary", schemaPath: "#/properties/summary/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
+        const err4 = { instancePath: instancePath + "/summary", schemaPath: "#/properties/summary/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
         if (vErrors === null) {
           vErrors = [err4];
         } else {
@@ -3887,14 +3884,26 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
         }
         errors++;
       }
-      var _valid1 = _errs11 === errors;
+      var _valid1 = _errs9 === errors;
       valid2 = valid2 || _valid1;
-      if (!valid2) {
-        const err5 = { instancePath: instancePath + "/summary", schemaPath: "#/properties/summary/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+      const _errs11 = errors;
+      if (data1 !== null) {
+        const err5 = { instancePath: instancePath + "/summary", schemaPath: "#/properties/summary/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
         if (vErrors === null) {
           vErrors = [err5];
         } else {
           vErrors.push(err5);
+        }
+        errors++;
+      }
+      var _valid1 = _errs11 === errors;
+      valid2 = valid2 || _valid1;
+      if (!valid2) {
+        const err6 = { instancePath: instancePath + "/summary", schemaPath: "#/properties/summary/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+        if (vErrors === null) {
+          vErrors = [err6];
+        } else {
+          vErrors.push(err6);
         }
         errors++;
       } else {
@@ -3914,19 +3923,7 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
       let valid3 = false;
       const _errs15 = errors;
       if (typeof data2 !== "string") {
-        const err6 = { instancePath: instancePath + "/keywords", schemaPath: "#/properties/keywords/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
-        if (vErrors === null) {
-          vErrors = [err6];
-        } else {
-          vErrors.push(err6);
-        }
-        errors++;
-      }
-      var _valid2 = _errs15 === errors;
-      valid3 = valid3 || _valid2;
-      const _errs17 = errors;
-      if (data2 !== null) {
-        const err7 = { instancePath: instancePath + "/keywords", schemaPath: "#/properties/keywords/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
+        const err7 = { instancePath: instancePath + "/keywords", schemaPath: "#/properties/keywords/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
         if (vErrors === null) {
           vErrors = [err7];
         } else {
@@ -3934,14 +3931,26 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
         }
         errors++;
       }
-      var _valid2 = _errs17 === errors;
+      var _valid2 = _errs15 === errors;
       valid3 = valid3 || _valid2;
-      if (!valid3) {
-        const err8 = { instancePath: instancePath + "/keywords", schemaPath: "#/properties/keywords/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+      const _errs17 = errors;
+      if (data2 !== null) {
+        const err8 = { instancePath: instancePath + "/keywords", schemaPath: "#/properties/keywords/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
         if (vErrors === null) {
           vErrors = [err8];
         } else {
           vErrors.push(err8);
+        }
+        errors++;
+      }
+      var _valid2 = _errs17 === errors;
+      valid3 = valid3 || _valid2;
+      if (!valid3) {
+        const err9 = { instancePath: instancePath + "/keywords", schemaPath: "#/properties/keywords/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+        if (vErrors === null) {
+          vErrors = [err9];
+        } else {
+          vErrors.push(err9);
         }
         errors++;
       } else {
@@ -3961,19 +3970,7 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
       let valid4 = false;
       const _errs21 = errors;
       if (typeof data3 !== "string") {
-        const err9 = { instancePath: instancePath + "/time", schemaPath: "#/properties/time/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
-        if (vErrors === null) {
-          vErrors = [err9];
-        } else {
-          vErrors.push(err9);
-        }
-        errors++;
-      }
-      var _valid3 = _errs21 === errors;
-      valid4 = valid4 || _valid3;
-      const _errs23 = errors;
-      if (data3 !== null) {
-        const err10 = { instancePath: instancePath + "/time", schemaPath: "#/properties/time/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
+        const err10 = { instancePath: instancePath + "/time", schemaPath: "#/properties/time/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
         if (vErrors === null) {
           vErrors = [err10];
         } else {
@@ -3981,14 +3978,26 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
         }
         errors++;
       }
-      var _valid3 = _errs23 === errors;
+      var _valid3 = _errs21 === errors;
       valid4 = valid4 || _valid3;
-      if (!valid4) {
-        const err11 = { instancePath: instancePath + "/time", schemaPath: "#/properties/time/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+      const _errs23 = errors;
+      if (data3 !== null) {
+        const err11 = { instancePath: instancePath + "/time", schemaPath: "#/properties/time/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
         if (vErrors === null) {
           vErrors = [err11];
         } else {
           vErrors.push(err11);
+        }
+        errors++;
+      }
+      var _valid3 = _errs23 === errors;
+      valid4 = valid4 || _valid3;
+      if (!valid4) {
+        const err12 = { instancePath: instancePath + "/time", schemaPath: "#/properties/time/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+        if (vErrors === null) {
+          vErrors = [err12];
+        } else {
+          vErrors.push(err12);
         }
         errors++;
       } else {
@@ -4008,19 +4017,7 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
       let valid5 = false;
       const _errs27 = errors;
       if (typeof data4 !== "string") {
-        const err12 = { instancePath: instancePath + "/location", schemaPath: "#/properties/location/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
-        if (vErrors === null) {
-          vErrors = [err12];
-        } else {
-          vErrors.push(err12);
-        }
-        errors++;
-      }
-      var _valid4 = _errs27 === errors;
-      valid5 = valid5 || _valid4;
-      const _errs29 = errors;
-      if (data4 !== null) {
-        const err13 = { instancePath: instancePath + "/location", schemaPath: "#/properties/location/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
+        const err13 = { instancePath: instancePath + "/location", schemaPath: "#/properties/location/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
         if (vErrors === null) {
           vErrors = [err13];
         } else {
@@ -4028,14 +4025,26 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
         }
         errors++;
       }
-      var _valid4 = _errs29 === errors;
+      var _valid4 = _errs27 === errors;
       valid5 = valid5 || _valid4;
-      if (!valid5) {
-        const err14 = { instancePath: instancePath + "/location", schemaPath: "#/properties/location/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+      const _errs29 = errors;
+      if (data4 !== null) {
+        const err14 = { instancePath: instancePath + "/location", schemaPath: "#/properties/location/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
         if (vErrors === null) {
           vErrors = [err14];
         } else {
           vErrors.push(err14);
+        }
+        errors++;
+      }
+      var _valid4 = _errs29 === errors;
+      valid5 = valid5 || _valid4;
+      if (!valid5) {
+        const err15 = { instancePath: instancePath + "/location", schemaPath: "#/properties/location/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+        if (vErrors === null) {
+          vErrors = [err15];
+        } else {
+          vErrors.push(err15);
         }
         errors++;
       } else {
@@ -4055,19 +4064,7 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
       let valid6 = false;
       const _errs33 = errors;
       if (typeof data5 !== "string") {
-        const err15 = { instancePath: instancePath + "/content", schemaPath: "#/properties/content/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
-        if (vErrors === null) {
-          vErrors = [err15];
-        } else {
-          vErrors.push(err15);
-        }
-        errors++;
-      }
-      var _valid5 = _errs33 === errors;
-      valid6 = valid6 || _valid5;
-      const _errs35 = errors;
-      if (data5 !== null) {
-        const err16 = { instancePath: instancePath + "/content", schemaPath: "#/properties/content/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
+        const err16 = { instancePath: instancePath + "/content", schemaPath: "#/properties/content/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
         if (vErrors === null) {
           vErrors = [err16];
         } else {
@@ -4075,14 +4072,26 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
         }
         errors++;
       }
-      var _valid5 = _errs35 === errors;
+      var _valid5 = _errs33 === errors;
       valid6 = valid6 || _valid5;
-      if (!valid6) {
-        const err17 = { instancePath: instancePath + "/content", schemaPath: "#/properties/content/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+      const _errs35 = errors;
+      if (data5 !== null) {
+        const err17 = { instancePath: instancePath + "/content", schemaPath: "#/properties/content/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
         if (vErrors === null) {
           vErrors = [err17];
         } else {
           vErrors.push(err17);
+        }
+        errors++;
+      }
+      var _valid5 = _errs35 === errors;
+      valid6 = valid6 || _valid5;
+      if (!valid6) {
+        const err18 = { instancePath: instancePath + "/content", schemaPath: "#/properties/content/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+        if (vErrors === null) {
+          vErrors = [err18];
+        } else {
+          vErrors.push(err18);
         }
         errors++;
       } else {
@@ -4102,19 +4111,7 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
       let valid7 = false;
       const _errs39 = errors;
       if (typeof data6 !== "string") {
-        const err18 = { instancePath: instancePath + "/interpretation", schemaPath: "#/properties/interpretation/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
-        if (vErrors === null) {
-          vErrors = [err18];
-        } else {
-          vErrors.push(err18);
-        }
-        errors++;
-      }
-      var _valid6 = _errs39 === errors;
-      valid7 = valid7 || _valid6;
-      const _errs41 = errors;
-      if (data6 !== null) {
-        const err19 = { instancePath: instancePath + "/interpretation", schemaPath: "#/properties/interpretation/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
+        const err19 = { instancePath: instancePath + "/interpretation", schemaPath: "#/properties/interpretation/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
         if (vErrors === null) {
           vErrors = [err19];
         } else {
@@ -4122,14 +4119,26 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
         }
         errors++;
       }
-      var _valid6 = _errs41 === errors;
+      var _valid6 = _errs39 === errors;
       valid7 = valid7 || _valid6;
-      if (!valid7) {
-        const err20 = { instancePath: instancePath + "/interpretation", schemaPath: "#/properties/interpretation/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+      const _errs41 = errors;
+      if (data6 !== null) {
+        const err20 = { instancePath: instancePath + "/interpretation", schemaPath: "#/properties/interpretation/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
         if (vErrors === null) {
           vErrors = [err20];
         } else {
           vErrors.push(err20);
+        }
+        errors++;
+      }
+      var _valid6 = _errs41 === errors;
+      valid7 = valid7 || _valid6;
+      if (!valid7) {
+        const err21 = { instancePath: instancePath + "/interpretation", schemaPath: "#/properties/interpretation/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+        if (vErrors === null) {
+          vErrors = [err21];
+        } else {
+          vErrors.push(err21);
         }
         errors++;
       } else {
@@ -4149,19 +4158,7 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
       let valid8 = false;
       const _errs45 = errors;
       if (typeof data7 !== "string") {
-        const err21 = { instancePath: instancePath + "/source_id", schemaPath: "#/properties/source_id/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
-        if (vErrors === null) {
-          vErrors = [err21];
-        } else {
-          vErrors.push(err21);
-        }
-        errors++;
-      }
-      var _valid7 = _errs45 === errors;
-      valid8 = valid8 || _valid7;
-      const _errs47 = errors;
-      if (data7 !== null) {
-        const err22 = { instancePath: instancePath + "/source_id", schemaPath: "#/properties/source_id/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
+        const err22 = { instancePath: instancePath + "/source_id", schemaPath: "#/properties/source_id/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
         if (vErrors === null) {
           vErrors = [err22];
         } else {
@@ -4169,14 +4166,26 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
         }
         errors++;
       }
-      var _valid7 = _errs47 === errors;
+      var _valid7 = _errs45 === errors;
       valid8 = valid8 || _valid7;
-      if (!valid8) {
-        const err23 = { instancePath: instancePath + "/source_id", schemaPath: "#/properties/source_id/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+      const _errs47 = errors;
+      if (data7 !== null) {
+        const err23 = { instancePath: instancePath + "/source_id", schemaPath: "#/properties/source_id/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
         if (vErrors === null) {
           vErrors = [err23];
         } else {
           vErrors.push(err23);
+        }
+        errors++;
+      }
+      var _valid7 = _errs47 === errors;
+      valid8 = valid8 || _valid7;
+      if (!valid8) {
+        const err24 = { instancePath: instancePath + "/source_id", schemaPath: "#/properties/source_id/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+        if (vErrors === null) {
+          vErrors = [err24];
+        } else {
+          vErrors.push(err24);
         }
         errors++;
       } else {
@@ -4197,20 +4206,20 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
       const _errs51 = errors;
       if (typeof data8 === "string") {
         if (!formats48.test(data8)) {
-          const err24 = { instancePath: instancePath + "/blob_id", schemaPath: "#/properties/blob_id/anyOf/0/format", keyword: "format", params: { format: "uuid4" }, message: 'must match format "uuid4"' };
+          const err25 = { instancePath: instancePath + "/blob_id", schemaPath: "#/properties/blob_id/anyOf/0/format", keyword: "format", params: { format: "uuid4" }, message: 'must match format "uuid4"' };
           if (vErrors === null) {
-            vErrors = [err24];
+            vErrors = [err25];
           } else {
-            vErrors.push(err24);
+            vErrors.push(err25);
           }
           errors++;
         }
       } else {
-        const err25 = { instancePath: instancePath + "/blob_id", schemaPath: "#/properties/blob_id/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
+        const err26 = { instancePath: instancePath + "/blob_id", schemaPath: "#/properties/blob_id/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
         if (vErrors === null) {
-          vErrors = [err25];
+          vErrors = [err26];
         } else {
-          vErrors.push(err25);
+          vErrors.push(err26);
         }
         errors++;
       }
@@ -4219,28 +4228,16 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
       const _errs53 = errors;
       if (typeof data8 === "string") {
         if (!formats50.test(data8)) {
-          const err26 = { instancePath: instancePath + "/blob_id", schemaPath: "#/properties/blob_id/anyOf/1/format", keyword: "format", params: { format: "uuid5" }, message: 'must match format "uuid5"' };
+          const err27 = { instancePath: instancePath + "/blob_id", schemaPath: "#/properties/blob_id/anyOf/1/format", keyword: "format", params: { format: "uuid5" }, message: 'must match format "uuid5"' };
           if (vErrors === null) {
-            vErrors = [err26];
+            vErrors = [err27];
           } else {
-            vErrors.push(err26);
+            vErrors.push(err27);
           }
           errors++;
         }
       } else {
-        const err27 = { instancePath: instancePath + "/blob_id", schemaPath: "#/properties/blob_id/anyOf/1/type", keyword: "type", params: { type: "string" }, message: "must be string" };
-        if (vErrors === null) {
-          vErrors = [err27];
-        } else {
-          vErrors.push(err27);
-        }
-        errors++;
-      }
-      var _valid8 = _errs53 === errors;
-      valid9 = valid9 || _valid8;
-      const _errs55 = errors;
-      if (data8 !== null) {
-        const err28 = { instancePath: instancePath + "/blob_id", schemaPath: "#/properties/blob_id/anyOf/2/type", keyword: "type", params: { type: "null" }, message: "must be null" };
+        const err28 = { instancePath: instancePath + "/blob_id", schemaPath: "#/properties/blob_id/anyOf/1/type", keyword: "type", params: { type: "string" }, message: "must be string" };
         if (vErrors === null) {
           vErrors = [err28];
         } else {
@@ -4248,14 +4245,26 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
         }
         errors++;
       }
-      var _valid8 = _errs55 === errors;
+      var _valid8 = _errs53 === errors;
       valid9 = valid9 || _valid8;
-      if (!valid9) {
-        const err29 = { instancePath: instancePath + "/blob_id", schemaPath: "#/properties/blob_id/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+      const _errs55 = errors;
+      if (data8 !== null) {
+        const err29 = { instancePath: instancePath + "/blob_id", schemaPath: "#/properties/blob_id/anyOf/2/type", keyword: "type", params: { type: "null" }, message: "must be null" };
         if (vErrors === null) {
           vErrors = [err29];
         } else {
           vErrors.push(err29);
+        }
+        errors++;
+      }
+      var _valid8 = _errs55 === errors;
+      valid9 = valid9 || _valid8;
+      if (!valid9) {
+        const err30 = { instancePath: instancePath + "/blob_id", schemaPath: "#/properties/blob_id/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+        if (vErrors === null) {
+          vErrors = [err30];
+        } else {
+          vErrors.push(err30);
         }
         errors++;
       } else {
@@ -4280,11 +4289,11 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
           }
         }
       } else {
-        const err30 = { instancePath: instancePath + "/evidence", schemaPath: "#/properties/evidence/type", keyword: "type", params: { type: "array" }, message: "must be array" };
+        const err31 = { instancePath: instancePath + "/evidence", schemaPath: "#/properties/evidence/type", keyword: "type", params: { type: "array" }, message: "must be array" };
         if (vErrors === null) {
-          vErrors = [err30];
+          vErrors = [err31];
         } else {
-          vErrors.push(err30);
+          vErrors.push(err31);
         }
         errors++;
       }
@@ -4300,16 +4309,7 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
           let data12 = data11[i1];
           if (data12 && typeof data12 == "object" && !Array.isArray(data12)) {
             if (data12.content === void 0) {
-              const err31 = { instancePath: instancePath + "/profile_delta/" + i1, schemaPath: "#/components/schemas/ProfileDelta/required", keyword: "required", params: { missingProperty: "content" }, message: "must have required property 'content'" };
-              if (vErrors === null) {
-                vErrors = [err31];
-              } else {
-                vErrors.push(err31);
-              }
-              errors++;
-            }
-            if (data12.attributes === void 0) {
-              const err32 = { instancePath: instancePath + "/profile_delta/" + i1, schemaPath: "#/components/schemas/ProfileDelta/required", keyword: "required", params: { missingProperty: "attributes" }, message: "must have required property 'attributes'" };
+              const err32 = { instancePath: instancePath + "/profile_delta/" + i1, schemaPath: "#/components/schemas/ProfileDelta/required", keyword: "required", params: { missingProperty: "content" }, message: "must have required property 'content'" };
               if (vErrors === null) {
                 vErrors = [err32];
               } else {
@@ -4317,13 +4317,22 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
               }
               errors++;
             }
+            if (data12.attributes === void 0) {
+              const err33 = { instancePath: instancePath + "/profile_delta/" + i1, schemaPath: "#/components/schemas/ProfileDelta/required", keyword: "required", params: { missingProperty: "attributes" }, message: "must have required property 'attributes'" };
+              if (vErrors === null) {
+                vErrors = [err33];
+              } else {
+                vErrors.push(err33);
+              }
+              errors++;
+            }
             if (data12.content !== void 0) {
               if (typeof data12.content !== "string") {
-                const err33 = { instancePath: instancePath + "/profile_delta/" + i1 + "/content", schemaPath: "#/components/schemas/ProfileDelta/properties/content/type", keyword: "type", params: { type: "string" }, message: "must be string" };
+                const err34 = { instancePath: instancePath + "/profile_delta/" + i1 + "/content", schemaPath: "#/components/schemas/ProfileDelta/properties/content/type", keyword: "type", params: { type: "string" }, message: "must be string" };
                 if (vErrors === null) {
-                  vErrors = [err33];
+                  vErrors = [err34];
                 } else {
-                  vErrors.push(err33);
+                  vErrors.push(err34);
                 }
                 errors++;
               }
@@ -4335,19 +4344,7 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
               const _errs71 = errors;
               if (data14 && typeof data14 == "object" && !Array.isArray(data14)) {
               } else {
-                const err34 = { instancePath: instancePath + "/profile_delta/" + i1 + "/attributes", schemaPath: "#/components/schemas/ProfileDelta/properties/attributes/anyOf/0/type", keyword: "type", params: { type: "object" }, message: "must be object" };
-                if (vErrors === null) {
-                  vErrors = [err34];
-                } else {
-                  vErrors.push(err34);
-                }
-                errors++;
-              }
-              var _valid10 = _errs71 === errors;
-              valid17 = valid17 || _valid10;
-              const _errs74 = errors;
-              if (data14 !== null) {
-                const err35 = { instancePath: instancePath + "/profile_delta/" + i1 + "/attributes", schemaPath: "#/components/schemas/ProfileDelta/properties/attributes/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
+                const err35 = { instancePath: instancePath + "/profile_delta/" + i1 + "/attributes", schemaPath: "#/components/schemas/ProfileDelta/properties/attributes/anyOf/0/type", keyword: "type", params: { type: "object" }, message: "must be object" };
                 if (vErrors === null) {
                   vErrors = [err35];
                 } else {
@@ -4355,14 +4352,26 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
                 }
                 errors++;
               }
-              var _valid10 = _errs74 === errors;
+              var _valid10 = _errs71 === errors;
               valid17 = valid17 || _valid10;
-              if (!valid17) {
-                const err36 = { instancePath: instancePath + "/profile_delta/" + i1 + "/attributes", schemaPath: "#/components/schemas/ProfileDelta/properties/attributes/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+              const _errs74 = errors;
+              if (data14 !== null) {
+                const err36 = { instancePath: instancePath + "/profile_delta/" + i1 + "/attributes", schemaPath: "#/components/schemas/ProfileDelta/properties/attributes/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
                 if (vErrors === null) {
                   vErrors = [err36];
                 } else {
                   vErrors.push(err36);
+                }
+                errors++;
+              }
+              var _valid10 = _errs74 === errors;
+              valid17 = valid17 || _valid10;
+              if (!valid17) {
+                const err37 = { instancePath: instancePath + "/profile_delta/" + i1 + "/attributes", schemaPath: "#/components/schemas/ProfileDelta/properties/attributes/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+                if (vErrors === null) {
+                  vErrors = [err37];
+                } else {
+                  vErrors.push(err37);
                 }
                 errors++;
               } else {
@@ -4377,29 +4386,17 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
               }
             }
           } else {
-            const err37 = { instancePath: instancePath + "/profile_delta/" + i1, schemaPath: "#/components/schemas/ProfileDelta/type", keyword: "type", params: { type: "object" }, message: "must be object" };
+            const err38 = { instancePath: instancePath + "/profile_delta/" + i1, schemaPath: "#/components/schemas/ProfileDelta/type", keyword: "type", params: { type: "object" }, message: "must be object" };
             if (vErrors === null) {
-              vErrors = [err37];
+              vErrors = [err38];
             } else {
-              vErrors.push(err37);
+              vErrors.push(err38);
             }
             errors++;
           }
         }
       } else {
-        const err38 = { instancePath: instancePath + "/profile_delta", schemaPath: "#/properties/profile_delta/anyOf/0/type", keyword: "type", params: { type: "array" }, message: "must be array" };
-        if (vErrors === null) {
-          vErrors = [err38];
-        } else {
-          vErrors.push(err38);
-        }
-        errors++;
-      }
-      var _valid9 = _errs62 === errors;
-      valid12 = valid12 || _valid9;
-      const _errs76 = errors;
-      if (data11 !== null) {
-        const err39 = { instancePath: instancePath + "/profile_delta", schemaPath: "#/properties/profile_delta/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
+        const err39 = { instancePath: instancePath + "/profile_delta", schemaPath: "#/properties/profile_delta/anyOf/0/type", keyword: "type", params: { type: "array" }, message: "must be array" };
         if (vErrors === null) {
           vErrors = [err39];
         } else {
@@ -4407,14 +4404,26 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
         }
         errors++;
       }
-      var _valid9 = _errs76 === errors;
+      var _valid9 = _errs62 === errors;
       valid12 = valid12 || _valid9;
-      if (!valid12) {
-        const err40 = { instancePath: instancePath + "/profile_delta", schemaPath: "#/properties/profile_delta/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+      const _errs76 = errors;
+      if (data11 !== null) {
+        const err40 = { instancePath: instancePath + "/profile_delta", schemaPath: "#/properties/profile_delta/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
         if (vErrors === null) {
           vErrors = [err40];
         } else {
           vErrors.push(err40);
+        }
+        errors++;
+      }
+      var _valid9 = _errs76 === errors;
+      valid12 = valid12 || _valid9;
+      if (!valid12) {
+        const err41 = { instancePath: instancePath + "/profile_delta", schemaPath: "#/properties/profile_delta/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+        if (vErrors === null) {
+          vErrors = [err41];
+        } else {
+          vErrors.push(err41);
         }
         errors++;
       } else {
@@ -4434,19 +4443,7 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
       let valid18 = false;
       const _errs80 = errors;
       if (typeof data15 !== "string") {
-        const err41 = { instancePath: instancePath + "/event_tip", schemaPath: "#/properties/event_tip/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
-        if (vErrors === null) {
-          vErrors = [err41];
-        } else {
-          vErrors.push(err41);
-        }
-        errors++;
-      }
-      var _valid11 = _errs80 === errors;
-      valid18 = valid18 || _valid11;
-      const _errs82 = errors;
-      if (data15 !== null) {
-        const err42 = { instancePath: instancePath + "/event_tip", schemaPath: "#/properties/event_tip/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
+        const err42 = { instancePath: instancePath + "/event_tip", schemaPath: "#/properties/event_tip/anyOf/0/type", keyword: "type", params: { type: "string" }, message: "must be string" };
         if (vErrors === null) {
           vErrors = [err42];
         } else {
@@ -4454,14 +4451,26 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
         }
         errors++;
       }
-      var _valid11 = _errs82 === errors;
+      var _valid11 = _errs80 === errors;
       valid18 = valid18 || _valid11;
-      if (!valid18) {
-        const err43 = { instancePath: instancePath + "/event_tip", schemaPath: "#/properties/event_tip/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+      const _errs82 = errors;
+      if (data15 !== null) {
+        const err43 = { instancePath: instancePath + "/event_tip", schemaPath: "#/properties/event_tip/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
         if (vErrors === null) {
           vErrors = [err43];
         } else {
           vErrors.push(err43);
+        }
+        errors++;
+      }
+      var _valid11 = _errs82 === errors;
+      valid18 = valid18 || _valid11;
+      if (!valid18) {
+        const err44 = { instancePath: instancePath + "/event_tip", schemaPath: "#/properties/event_tip/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+        if (vErrors === null) {
+          vErrors = [err44];
+        } else {
+          vErrors.push(err44);
         }
         errors++;
       } else {
@@ -4486,16 +4495,7 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
           let data17 = data16[i2];
           if (data17 && typeof data17 == "object" && !Array.isArray(data17)) {
             if (data17.tag === void 0) {
-              const err44 = { instancePath: instancePath + "/event_tags/" + i2, schemaPath: "#/components/schemas/EventTag/required", keyword: "required", params: { missingProperty: "tag" }, message: "must have required property 'tag'" };
-              if (vErrors === null) {
-                vErrors = [err44];
-              } else {
-                vErrors.push(err44);
-              }
-              errors++;
-            }
-            if (data17.value === void 0) {
-              const err45 = { instancePath: instancePath + "/event_tags/" + i2, schemaPath: "#/components/schemas/EventTag/required", keyword: "required", params: { missingProperty: "value" }, message: "must have required property 'value'" };
+              const err45 = { instancePath: instancePath + "/event_tags/" + i2, schemaPath: "#/components/schemas/EventTag/required", keyword: "required", params: { missingProperty: "tag" }, message: "must have required property 'tag'" };
               if (vErrors === null) {
                 vErrors = [err45];
               } else {
@@ -4503,20 +4503,18 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
               }
               errors++;
             }
+            if (data17.value === void 0) {
+              const err46 = { instancePath: instancePath + "/event_tags/" + i2, schemaPath: "#/components/schemas/EventTag/required", keyword: "required", params: { missingProperty: "value" }, message: "must have required property 'value'" };
+              if (vErrors === null) {
+                vErrors = [err46];
+              } else {
+                vErrors.push(err46);
+              }
+              errors++;
+            }
             if (data17.tag !== void 0) {
               if (typeof data17.tag !== "string") {
-                const err46 = { instancePath: instancePath + "/event_tags/" + i2 + "/tag", schemaPath: "#/components/schemas/EventTag/properties/tag/type", keyword: "type", params: { type: "string" }, message: "must be string" };
-                if (vErrors === null) {
-                  vErrors = [err46];
-                } else {
-                  vErrors.push(err46);
-                }
-                errors++;
-              }
-            }
-            if (data17.value !== void 0) {
-              if (typeof data17.value !== "string") {
-                const err47 = { instancePath: instancePath + "/event_tags/" + i2 + "/value", schemaPath: "#/components/schemas/EventTag/properties/value/type", keyword: "type", params: { type: "string" }, message: "must be string" };
+                const err47 = { instancePath: instancePath + "/event_tags/" + i2 + "/tag", schemaPath: "#/components/schemas/EventTag/properties/tag/type", keyword: "type", params: { type: "string" }, message: "must be string" };
                 if (vErrors === null) {
                   vErrors = [err47];
                 } else {
@@ -4525,30 +4523,29 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
                 errors++;
               }
             }
+            if (data17.value !== void 0) {
+              if (typeof data17.value !== "string") {
+                const err48 = { instancePath: instancePath + "/event_tags/" + i2 + "/value", schemaPath: "#/components/schemas/EventTag/properties/value/type", keyword: "type", params: { type: "string" }, message: "must be string" };
+                if (vErrors === null) {
+                  vErrors = [err48];
+                } else {
+                  vErrors.push(err48);
+                }
+                errors++;
+              }
+            }
           } else {
-            const err48 = { instancePath: instancePath + "/event_tags/" + i2, schemaPath: "#/components/schemas/EventTag/type", keyword: "type", params: { type: "object" }, message: "must be object" };
+            const err49 = { instancePath: instancePath + "/event_tags/" + i2, schemaPath: "#/components/schemas/EventTag/type", keyword: "type", params: { type: "object" }, message: "must be object" };
             if (vErrors === null) {
-              vErrors = [err48];
+              vErrors = [err49];
             } else {
-              vErrors.push(err48);
+              vErrors.push(err49);
             }
             errors++;
           }
         }
       } else {
-        const err49 = { instancePath: instancePath + "/event_tags", schemaPath: "#/properties/event_tags/anyOf/0/type", keyword: "type", params: { type: "array" }, message: "must be array" };
-        if (vErrors === null) {
-          vErrors = [err49];
-        } else {
-          vErrors.push(err49);
-        }
-        errors++;
-      }
-      var _valid12 = _errs86 === errors;
-      valid19 = valid19 || _valid12;
-      const _errs95 = errors;
-      if (data16 !== null) {
-        const err50 = { instancePath: instancePath + "/event_tags", schemaPath: "#/properties/event_tags/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
+        const err50 = { instancePath: instancePath + "/event_tags", schemaPath: "#/properties/event_tags/anyOf/0/type", keyword: "type", params: { type: "array" }, message: "must be array" };
         if (vErrors === null) {
           vErrors = [err50];
         } else {
@@ -4556,14 +4553,26 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
         }
         errors++;
       }
-      var _valid12 = _errs95 === errors;
+      var _valid12 = _errs86 === errors;
       valid19 = valid19 || _valid12;
-      if (!valid19) {
-        const err51 = { instancePath: instancePath + "/event_tags", schemaPath: "#/properties/event_tags/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+      const _errs95 = errors;
+      if (data16 !== null) {
+        const err51 = { instancePath: instancePath + "/event_tags", schemaPath: "#/properties/event_tags/anyOf/1/type", keyword: "type", params: { type: "null" }, message: "must be null" };
         if (vErrors === null) {
           vErrors = [err51];
         } else {
           vErrors.push(err51);
+        }
+        errors++;
+      }
+      var _valid12 = _errs95 === errors;
+      valid19 = valid19 || _valid12;
+      if (!valid19) {
+        const err52 = { instancePath: instancePath + "/event_tags", schemaPath: "#/properties/event_tags/anyOf", keyword: "anyOf", params: {}, message: "must match a schema in anyOf" };
+        if (vErrors === null) {
+          vErrors = [err52];
+        } else {
+          vErrors.push(err52);
         }
         errors++;
       } else {
@@ -4577,19 +4586,55 @@ function validate35(data, { instancePath = "", parentData, parentDataProperty, r
         }
       }
     }
+    if (data.fact_ids !== void 0) {
+      let data20 = data.fact_ids;
+      if (Array.isArray(data20)) {
+        const len3 = data20.length;
+        for (let i3 = 0; i3 < len3; i3++) {
+          let data21 = data20[i3];
+          if (typeof data21 === "string") {
+            if (!formats0.test(data21)) {
+              const err53 = { instancePath: instancePath + "/fact_ids/" + i3, schemaPath: "#/properties/fact_ids/items/format", keyword: "format", params: { format: "uuid" }, message: 'must match format "uuid"' };
+              if (vErrors === null) {
+                vErrors = [err53];
+              } else {
+                vErrors.push(err53);
+              }
+              errors++;
+            }
+          } else {
+            const err54 = { instancePath: instancePath + "/fact_ids/" + i3, schemaPath: "#/properties/fact_ids/items/type", keyword: "type", params: { type: "string" }, message: "must be string" };
+            if (vErrors === null) {
+              vErrors = [err54];
+            } else {
+              vErrors.push(err54);
+            }
+            errors++;
+          }
+        }
+      } else {
+        const err55 = { instancePath: instancePath + "/fact_ids", schemaPath: "#/properties/fact_ids/type", keyword: "type", params: { type: "array" }, message: "must be array" };
+        if (vErrors === null) {
+          vErrors = [err55];
+        } else {
+          vErrors.push(err55);
+        }
+        errors++;
+      }
+    }
   } else {
-    const err52 = { instancePath, schemaPath: "#/type", keyword: "type", params: { type: "object" }, message: "must be object" };
+    const err56 = { instancePath, schemaPath: "#/type", keyword: "type", params: { type: "object" }, message: "must be object" };
     if (vErrors === null) {
-      vErrors = [err52];
+      vErrors = [err56];
     } else {
-      vErrors.push(err52);
+      vErrors.push(err56);
     }
     errors++;
   }
   validate35.errors = vErrors;
   return errors === 0;
 }
-validate35.evaluated = { "props": { "title": true, "summary": true, "keywords": true, "time": true, "location": true, "content": true, "interpretation": true, "source_id": true, "blob_id": true, "evidence": true, "profile_delta": true, "event_tip": true, "event_tags": true }, "dynamicProps": false, "dynamicItems": false };
+validate35.evaluated = { "props": { "title": true, "summary": true, "keywords": true, "time": true, "location": true, "content": true, "interpretation": true, "source_id": true, "blob_id": true, "evidence": true, "profile_delta": true, "event_tip": true, "event_tags": true, "fact_ids": true }, "dynamicProps": false, "dynamicItems": false };
 function validate34(data, { instancePath = "", parentData, parentDataProperty, rootData = data, dynamicAnchors = {} } = {}) {
   let vErrors = null;
   let errors = 0;
@@ -6855,7 +6900,7 @@ function validate53(data, { instancePath = "", parentData, parentDataProperty, r
 }
 validate53.evaluated = { "props": true, "dynamicProps": false, "dynamicItems": false };
 var validateUsersQuery = validate56;
-var schema74 = { "$id": "https://memoia.jianify.dev/sdk/validateUsersQuery", "components": { "schemas": { "Blob": { "properties": { "blob_id": { "type": "string", "format": "uuid", "title": "Blob Id" }, "source_id": { "type": "string", "title": "Source Id" }, "status": { "type": "string", "enum": ["processing", "failed", "active", "retracted", "rebuilding"], "title": "Status" }, "message_ids": { "items": { "type": "string" }, "type": "array", "title": "Message Ids" }, "event_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Event Ids" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "kind": { "type": "string", "enum": ["import", "retract"], "title": "Kind", "default": "import" }, "flush": { "anyOf": [{ "$ref": "#/components/schemas/FlushProgress" }, { "type": "null" }] } }, "additionalProperties": false, "type": "object", "required": ["blob_id", "source_id", "status", "message_ids", "event_ids", "created_at"], "title": "Blob" }, "Context": { "properties": { "context": { "type": "string", "title": "Context" }, "entries": { "items": { "type": "string" }, "type": "array", "title": "Entries" } }, "additionalProperties": false, "type": "object", "required": ["context", "entries"], "title": "Context" }, "ContextInput": { "properties": { "query": { "anyOf": [{ "type": "string", "maxLength": 8192, "minLength": 1 }, { "type": "null" }], "title": "Query" }, "max_token_size": { "type": "integer", "maximum": 1e4, "minimum": 1, "title": "Max Token Size", "default": 500 } }, "additionalProperties": false, "type": "object", "title": "ContextInput" }, "DailyUsage": { "properties": { "date": { "type": "string", "title": "Date", "description": "The date" }, "total_insert": { "type": "integer", "title": "Total Insert", "description": "The total insert", "default": 0 }, "total_success_insert": { "type": "integer", "title": "Total Success Insert", "description": "The total update", "default": 0 }, "total_input_token": { "type": "integer", "title": "Total Input Token", "description": "The total input token", "default": 0 }, "total_output_token": { "type": "integer", "title": "Total Output Token", "description": "The total output token", "default": 0 }, "usage_complete": { "type": "boolean", "title": "Usage Complete", "description": "False when recorded calls lacked token usage. Totals are approximate recorded usage, not a billing ledger; outages or expired counters can lose statistics.", "default": true } }, "type": "object", "required": ["date"], "title": "DailyUsage" }, "DeleteMessages": { "properties": { "idempotency_key": { "type": "string", "maxLength": 255, "minLength": 1, "pattern": "^[^/]+$", "title": "Idempotency Key" }, "message_ids": { "items": { "type": "string", "maxLength": 255, "minLength": 1 }, "type": "array", "maxItems": 1e3, "minItems": 1, "title": "Message Ids" } }, "additionalProperties": false, "type": "object", "required": ["idempotency_key", "message_ids"], "title": "DeleteMessages" }, "EventData": { "properties": { "title": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Title" }, "summary": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Summary" }, "keywords": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Keywords" }, "time": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Time" }, "location": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Location" }, "content": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Content" }, "interpretation": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Interpretation" }, "source_id": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Source Id" }, "blob_id": { "anyOf": [{ "type": "string", "format": "uuid4" }, { "type": "string", "format": "uuid5" }, { "type": "null" }], "title": "Blob Id" }, "evidence": { "items": { "$ref": "#/components/schemas/Evidence" }, "type": "array", "title": "Evidence" }, "profile_delta": { "anyOf": [{ "items": { "$ref": "#/components/schemas/ProfileDelta" }, "type": "array" }, { "type": "null" }], "title": "Profile Delta", "description": "List of profile data" }, "event_tip": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Event Tip", "description": "Event tip" }, "event_tags": { "anyOf": [{ "items": { "$ref": "#/components/schemas/EventTag" }, "type": "array" }, { "type": "null" }], "title": "Event Tags", "description": "List of event tags" } }, "type": "object", "title": "EventData" }, "EventQuery": { "properties": { "query": { "anyOf": [{ "type": "string", "maxLength": 8192, "minLength": 1 }, { "type": "null" }], "title": "Query" }, "ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Ids" }, "exclude_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Exclude Ids" }, "limit": { "type": "integer", "maximum": 100, "minimum": 1, "title": "Limit", "default": 10 }, "max_token_size": { "type": "integer", "maximum": 1e4, "minimum": 1, "title": "Max Token Size", "default": 4e3 }, "fact_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Fact Ids" }, "created_after": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Created After" }, "created_before": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Created Before" }, "event_after": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }], "title": "Event After" }, "event_before": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }], "title": "Event Before" } }, "additionalProperties": false, "type": "object", "title": "EventQuery" }, "EventRecord": { "properties": { "id": { "type": "string", "format": "uuid", "title": "Id" }, "event_data": { "$ref": "#/components/schemas/EventData" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "updated_at": { "type": "string", "format": "date-time", "title": "Updated At" } }, "additionalProperties": false, "type": "object", "required": ["id", "event_data", "created_at", "updated_at"], "title": "EventRecord" }, "EventTag": { "properties": { "tag": { "type": "string", "title": "Tag", "description": "The event tag" }, "value": { "type": "string", "title": "Value", "description": "The event tag value" } }, "type": "object", "required": ["tag", "value"], "title": "EventTag" }, "EventTime": { "properties": { "start": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }], "title": "Start" }, "end": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }], "title": "End" }, "precision": { "type": "string", "enum": ["year", "month", "day", "range", "unknown"], "title": "Precision" }, "evidence": { "items": { "$ref": "#/components/schemas/TimeEvidence" }, "type": "array", "maxItems": 20, "minItems": 1, "title": "Evidence" } }, "additionalProperties": false, "type": "object", "required": ["start", "end", "precision", "evidence"], "title": "EventTime" }, "Events": { "properties": { "events": { "items": { "$ref": "#/components/schemas/EventRecord" }, "type": "array", "title": "Events" } }, "additionalProperties": false, "type": "object", "required": ["events"], "title": "Events" }, "Evidence": { "properties": { "fact_id": { "type": "string", "format": "uuid", "title": "Fact Id" }, "blob_id": { "type": "string", "format": "uuid", "title": "Blob Id" }, "content": { "type": "string", "title": "Content" }, "topic": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Topic" }, "sub_topic": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Sub Topic" }, "subject": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Subject" }, "reporter": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Reporter" }, "certainty": { "type": "string", "enum": ["asserted", "reported", "uncertain", "legacy"], "title": "Certainty", "default": "legacy" }, "revision": { "type": "integer", "title": "Revision", "default": 1 }, "support_groups": { "items": { "items": { "type": "string" }, "type": "array" }, "type": "array", "title": "Support Groups" }, "event_time": { "anyOf": [{ "$ref": "#/components/schemas/EventTime" }, { "type": "null" }] }, "source_messages": { "items": { "$ref": "#/components/schemas/SourceObservation" }, "type": "array", "title": "Source Messages" } }, "additionalProperties": false, "type": "object", "required": ["fact_id", "blob_id", "content", "support_groups"], "title": "Evidence" }, "FactQuery": { "properties": { "query": { "anyOf": [{ "type": "string", "maxLength": 8192, "minLength": 1 }, { "type": "null" }], "title": "Query" }, "ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Ids" }, "exclude_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Exclude Ids" }, "limit": { "type": "integer", "maximum": 100, "minimum": 1, "title": "Limit", "default": 10 }, "max_token_size": { "type": "integer", "maximum": 1e4, "minimum": 1, "title": "Max Token Size", "default": 4e3 }, "source_ids": { "items": { "type": "string", "maxLength": 255, "minLength": 1 }, "type": "array", "maxItems": 100, "title": "Source Ids" }, "recorded_after": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Recorded After" }, "recorded_before": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Recorded Before" }, "event_after": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }], "title": "Event After" }, "event_before": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }], "title": "Event Before" } }, "additionalProperties": false, "type": "object", "title": "FactQuery" }, "FlushInput": { "properties": { "idempotency_key": { "type": "string", "maxLength": 255, "minLength": 1, "pattern": "^[^/]+$", "title": "Idempotency Key" } }, "additionalProperties": false, "type": "object", "required": ["idempotency_key"], "title": "FlushInput" }, "FlushProgress": { "properties": { "operation_id": { "type": "string", "format": "uuid", "title": "Operation Id" }, "status": { "type": "string", "enum": ["pending", "running", "completed", "failed"], "title": "Status" }, "blob_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Blob Ids" }, "attempts": { "type": "integer", "title": "Attempts" }, "available_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Available At" }, "error": { "anyOf": [{ "$ref": "#/components/schemas/OperationError" }, { "type": "null" }] }, "retryable": { "type": "boolean", "title": "Retryable" } }, "additionalProperties": false, "type": "object", "required": ["operation_id", "status", "blob_ids", "attempts", "available_at", "error", "retryable"], "title": "FlushProgress" }, "FlushResult": { "properties": { "blob_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Blob Ids" }, "profile_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Profile Ids" }, "event_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Event Ids" }, "memory_version": { "anyOf": [{ "type": "integer" }, { "type": "null" }], "title": "Memory Version" } }, "additionalProperties": false, "type": "object", "required": ["blob_ids", "profile_ids", "event_ids"], "title": "FlushResult" }, "ForgottenUser": { "properties": { "user_id": { "type": "string", "format": "uuid", "title": "User Id" }, "forgotten": { "type": "boolean", "const": true, "title": "Forgotten" } }, "additionalProperties": false, "type": "object", "required": ["user_id", "forgotten"], "title": "ForgottenUser" }, "HTTPValidationError": { "properties": { "detail": { "items": { "$ref": "#/components/schemas/ValidationError" }, "type": "array", "title": "Detail" } }, "type": "object", "title": "HTTPValidationError" }, "Health": { "properties": { "status": { "type": "string", "title": "Status", "default": "ok" } }, "additionalProperties": false, "type": "object", "title": "Health" }, "HistoricalProfile": { "properties": { "id": { "type": "string", "format": "uuid", "title": "Id" }, "content": { "type": "string", "title": "Content" }, "topic": { "type": "string", "title": "Topic" }, "sub_topic": { "type": "string", "title": "Sub Topic" }, "source_ids": { "items": { "type": "string" }, "type": "array", "title": "Source Ids" }, "fact_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Fact Ids" } }, "additionalProperties": false, "type": "object", "required": ["id", "content", "topic", "sub_topic", "source_ids", "fact_ids"], "title": "HistoricalProfile" }, "History": { "properties": { "entries": { "items": { "$ref": "#/components/schemas/HistoryEntry" }, "type": "array", "title": "Entries" } }, "additionalProperties": false, "type": "object", "required": ["entries"], "title": "History" }, "HistoryEntry": { "properties": { "revision_id": { "type": "string", "format": "uuid", "title": "Revision Id" }, "operation_id": { "anyOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }], "title": "Operation Id" }, "source_id": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Source Id" }, "maintenance_version": { "anyOf": [{ "type": "integer" }, { "type": "null" }], "title": "Maintenance Version" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "profiles": { "items": { "$ref": "#/components/schemas/HistoricalProfile" }, "type": "array", "title": "Profiles" }, "added": { "items": { "$ref": "#/components/schemas/HistoricalProfile" }, "type": "array", "title": "Added" }, "removed": { "items": { "$ref": "#/components/schemas/HistoricalProfile" }, "type": "array", "title": "Removed" } }, "additionalProperties": false, "type": "object", "required": ["revision_id", "operation_id", "source_id", "created_at", "profiles", "added", "removed"], "title": "HistoryEntry" }, "IdData": { "properties": { "id": { "anyOf": [{ "type": "string", "format": "uuid4" }, { "type": "string", "format": "uuid5" }], "title": "Id", "description": "The UUID identifier" } }, "type": "object", "required": ["id"], "title": "IdData" }, "ImportSource": { "properties": { "idempotency_key": { "type": "string", "maxLength": 255, "minLength": 1, "pattern": "^[^/]+$", "title": "Idempotency Key" }, "source_id": { "type": "string", "maxLength": 255, "minLength": 1, "pattern": "^[^/]+$", "title": "Source Id" }, "messages": { "items": { "$ref": "#/components/schemas/SourceMessage" }, "type": "array", "maxItems": 1e3, "minItems": 1, "title": "Messages" }, "metadata": { "additionalProperties": true, "type": "object", "title": "Metadata" } }, "additionalProperties": false, "type": "object", "required": ["idempotency_key", "source_id", "messages"], "title": "ImportSource" }, "IssuedKey": { "properties": { "key_id": { "type": "string", "format": "uuid", "title": "Key Id" }, "name": { "type": "string", "title": "Name" }, "scopes": { "items": { "type": "string", "enum": ["read", "write", "admin"] }, "type": "array", "title": "Scopes" }, "expires_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Expires At" }, "revoked_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Revoked At" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "token": { "type": "string", "title": "Token" } }, "additionalProperties": false, "type": "object", "required": ["key_id", "name", "scopes", "expires_at", "revoked_at", "created_at", "token"], "title": "IssuedKey" }, "KeyCreate": { "properties": { "name": { "type": "string", "maxLength": 128, "minLength": 1, "title": "Name" }, "scopes": { "items": { "type": "string", "enum": ["read", "write", "admin"] }, "type": "array", "maxItems": 3, "minItems": 1, "title": "Scopes" }, "expires_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Expires At" } }, "additionalProperties": false, "type": "object", "required": ["name", "scopes"], "title": "KeyCreate" }, "Keys": { "properties": { "keys": { "items": { "$ref": "#/components/schemas/ManagedKey" }, "type": "array", "title": "Keys" } }, "additionalProperties": false, "type": "object", "required": ["keys"], "title": "Keys" }, "LegacyToken": { "properties": { "token": { "type": "string", "title": "Token" } }, "additionalProperties": false, "type": "object", "required": ["token"], "title": "LegacyToken" }, "MaintenanceStatus": { "properties": { "pending_blob_count": { "type": "integer", "title": "Pending Blob Count" }, "flushes": { "items": { "$ref": "#/components/schemas/FlushProgress" }, "type": "array", "title": "Flushes" } }, "additionalProperties": false, "type": "object", "required": ["pending_blob_count", "flushes"], "title": "MaintenanceStatus" }, "ManagedKey": { "properties": { "key_id": { "type": "string", "format": "uuid", "title": "Key Id" }, "name": { "type": "string", "title": "Name" }, "scopes": { "items": { "type": "string", "enum": ["read", "write", "admin"] }, "type": "array", "title": "Scopes" }, "expires_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Expires At" }, "revoked_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Revoked At" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" } }, "additionalProperties": false, "type": "object", "required": ["key_id", "name", "scopes", "expires_at", "revoked_at", "created_at"], "title": "ManagedKey" }, "ManagedProject": { "properties": { "project_id": { "type": "string", "title": "Project Id" }, "status": { "type": "string", "title": "Status" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" } }, "additionalProperties": false, "type": "object", "required": ["project_id", "status", "created_at"], "title": "ManagedProject" }, "Operation": { "properties": { "operation_id": { "type": "string", "format": "uuid", "title": "Operation Id" }, "kind": { "type": "string", "enum": ["import", "retract", "legacy_import", "flush"], "title": "Kind", "default": "import" }, "status": { "type": "string", "enum": ["processing", "completed", "failed"], "title": "Status" }, "source_id": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Source Id" }, "blob_id": { "anyOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }], "title": "Blob Id" }, "result": { "anyOf": [{ "$ref": "#/components/schemas/SourceResult" }, { "$ref": "#/components/schemas/FlushResult" }, { "type": "null" }], "title": "Result" }, "error": { "anyOf": [{ "$ref": "#/components/schemas/OperationError" }, { "type": "null" }] }, "flush": { "anyOf": [{ "$ref": "#/components/schemas/FlushProgress" }, { "type": "null" }] } }, "additionalProperties": false, "type": "object", "required": ["operation_id", "status", "source_id", "blob_id", "result", "error"], "title": "Operation" }, "OperationError": { "properties": { "code": { "type": "string", "title": "Code" }, "retryable": { "type": "boolean", "title": "Retryable" } }, "additionalProperties": false, "type": "object", "required": ["code", "retryable"], "title": "OperationError" }, "Operations": { "properties": { "operations": { "items": { "$ref": "#/components/schemas/Operation" }, "type": "array", "title": "Operations" } }, "additionalProperties": false, "type": "object", "required": ["operations"], "title": "Operations" }, "Profile": { "properties": { "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "id": { "type": "string", "format": "uuid", "title": "Id" }, "content": { "type": "string", "title": "Content" }, "topic": { "type": "string", "title": "Topic" }, "sub_topic": { "type": "string", "title": "Sub Topic" }, "source_ids": { "items": { "type": "string" }, "type": "array", "title": "Source Ids" }, "updated_at": { "type": "string", "format": "date-time", "title": "Updated At" } }, "additionalProperties": false, "type": "object", "required": ["created_at", "id", "content", "topic", "sub_topic", "source_ids", "updated_at"], "title": "Profile" }, "ProfileConfig": { "properties": { "profile_config": { "type": "string", "title": "Profile Config" } }, "additionalProperties": false, "type": "object", "required": ["profile_config"], "title": "ProfileConfig" }, "ProfileDelta": { "properties": { "content": { "type": "string", "title": "Content", "description": "The profile content" }, "attributes": { "anyOf": [{ "additionalProperties": true, "type": "object" }, { "type": "null" }], "title": "Attributes", "description": "User profile attributes in JSON, containing 'topic', 'sub_topic'" } }, "type": "object", "required": ["content", "attributes"], "title": "ProfileDelta" }, "ProfileInput": { "properties": { "content": { "type": "string", "maxLength": 32768, "minLength": 1, "title": "Content" }, "topic": { "type": "string", "maxLength": 256, "minLength": 1, "title": "Topic" }, "sub_topic": { "type": "string", "maxLength": 256, "minLength": 1, "title": "Sub Topic" } }, "additionalProperties": false, "type": "object", "required": ["content", "topic", "sub_topic"], "title": "ProfileInput" }, "ProfileQuery": { "properties": { "query": { "anyOf": [{ "type": "string", "maxLength": 8192, "minLength": 1 }, { "type": "null" }], "title": "Query" }, "ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Ids" }, "exclude_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Exclude Ids" }, "limit": { "type": "integer", "maximum": 100, "minimum": 1, "title": "Limit", "default": 10 }, "max_token_size": { "type": "integer", "maximum": 1e4, "minimum": 1, "title": "Max Token Size", "default": 4e3 }, "topic": { "anyOf": [{ "type": "string", "maxLength": 256, "minLength": 1 }, { "type": "null" }], "title": "Topic" }, "sub_topic": { "anyOf": [{ "type": "string", "maxLength": 256, "minLength": 1 }, { "type": "null" }], "title": "Sub Topic" } }, "additionalProperties": false, "type": "object", "title": "ProfileQuery" }, "Profiles": { "properties": { "profiles": { "items": { "$ref": "#/components/schemas/Profile" }, "type": "array", "title": "Profiles" } }, "additionalProperties": false, "type": "object", "required": ["profiles"], "title": "Profiles" }, "ProjectCreate": { "properties": { "project_id": { "type": "string", "maxLength": 64, "minLength": 1, "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$", "title": "Project Id" } }, "additionalProperties": false, "type": "object", "required": ["project_id"], "title": "ProjectCreate" }, "ProjectIdentity": { "properties": { "project_id": { "type": "string", "title": "Project Id" } }, "additionalProperties": false, "type": "object", "required": ["project_id"], "title": "ProjectIdentity" }, "ProjectUpdate": { "properties": { "status": { "type": "string", "enum": ["active", "suspended"], "title": "Status" } }, "additionalProperties": false, "type": "object", "required": ["status"], "title": "ProjectUpdate" }, "ProjectUser": { "properties": { "id": { "type": "string", "format": "uuid", "title": "Id" }, "project_id": { "type": "string", "title": "Project Id" }, "additional_fields": { "anyOf": [{ "additionalProperties": true, "type": "object" }, { "type": "null" }], "title": "Additional Fields" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "updated_at": { "type": "string", "format": "date-time", "title": "Updated At" }, "profile_count": { "type": "integer", "title": "Profile Count" }, "event_count": { "type": "integer", "title": "Event Count" } }, "additionalProperties": false, "type": "object", "required": ["id", "project_id", "additional_fields", "created_at", "updated_at", "profile_count", "event_count"], "title": "ProjectUser" }, "Projects": { "properties": { "projects": { "items": { "$ref": "#/components/schemas/ManagedProject" }, "type": "array", "title": "Projects" } }, "additionalProperties": false, "type": "object", "required": ["projects"], "title": "Projects" }, "QueriedEvent": { "properties": { "id": { "type": "string", "format": "uuid", "title": "Id" }, "event_data": { "$ref": "#/components/schemas/EventData" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "updated_at": { "type": "string", "format": "date-time", "title": "Updated At" }, "score": { "type": "number", "title": "Score" } }, "additionalProperties": false, "type": "object", "required": ["id", "event_data", "created_at", "updated_at", "score"], "title": "QueriedEvent" }, "QueriedEvents": { "properties": { "events": { "items": { "$ref": "#/components/schemas/QueriedEvent" }, "type": "array", "title": "Events" } }, "additionalProperties": false, "type": "object", "required": ["events"], "title": "QueriedEvents" }, "QueriedFacts": { "properties": { "facts": { "items": { "$ref": "#/components/schemas/SearchFact" }, "type": "array", "title": "Facts" } }, "additionalProperties": false, "type": "object", "required": ["facts"], "title": "QueriedFacts" }, "QueriedProfiles": { "properties": { "profiles": { "items": { "$ref": "#/components/schemas/SearchProfile" }, "type": "array", "title": "Profiles" } }, "additionalProperties": false, "type": "object", "required": ["profiles"], "title": "QueriedProfiles" }, "SearchEvent": { "properties": { "id": { "type": "string", "format": "uuid", "title": "Id" }, "content": { "type": "string", "title": "Content" }, "source_id": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Source Id" }, "blob_id": { "anyOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }], "title": "Blob Id" }, "score": { "type": "number", "title": "Score" }, "occurred_at": { "type": "string", "format": "date-time", "title": "Occurred At" }, "evidence": { "items": { "$ref": "#/components/schemas/Evidence" }, "type": "array", "title": "Evidence" }, "title": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Title" }, "summary": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Summary" }, "interpretation": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Interpretation" }, "keywords": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Keywords" }, "time": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Time" }, "location": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Location" }, "fact_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Fact Ids" } }, "additionalProperties": false, "type": "object", "required": ["id", "content", "source_id", "blob_id", "score", "occurred_at"], "title": "SearchEvent" }, "SearchFact": { "properties": { "id": { "type": "string", "format": "uuid", "title": "Id" }, "content": { "type": "string", "title": "Content" }, "source_id": { "type": "string", "title": "Source Id" }, "blob_id": { "type": "string", "format": "uuid", "title": "Blob Id" }, "score": { "type": "number", "title": "Score" }, "occurred_at": { "type": "string", "format": "date-time", "title": "Occurred At" }, "evidence": { "$ref": "#/components/schemas/Evidence" } }, "additionalProperties": false, "type": "object", "required": ["id", "content", "source_id", "blob_id", "score", "occurred_at", "evidence"], "title": "SearchFact" }, "SearchInput": { "properties": { "query": { "type": "string", "maxLength": 8192, "minLength": 1, "title": "Query" }, "limit": { "type": "integer", "maximum": 100, "minimum": 1, "title": "Limit", "default": 10 }, "max_token_size": { "type": "integer", "maximum": 1e4, "minimum": 1, "title": "Max Token Size", "default": 4e3 }, "exclude_fact_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Exclude Fact Ids" }, "exclude_event_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Exclude Event Ids" }, "exclude_profile_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Exclude Profile Ids" }, "exclude_profile_topics": { "items": { "type": "string", "maxLength": 256, "minLength": 1 }, "type": "array", "maxItems": 50, "title": "Exclude Profile Topics" }, "include_events": { "type": "boolean", "title": "Include Events", "default": true }, "event_max_tokens": { "anyOf": [{ "type": "integer", "maximum": 8e3, "minimum": 1 }, { "type": "null" }], "title": "Event Max Tokens" } }, "additionalProperties": false, "type": "object", "required": ["query"], "title": "SearchInput" }, "SearchProfile": { "properties": { "id": { "type": "string", "format": "uuid", "title": "Id" }, "content": { "type": "string", "title": "Content" }, "topic": { "type": "string", "title": "Topic" }, "sub_topic": { "type": "string", "title": "Sub Topic" }, "fact_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Fact Ids" }, "source_ids": { "items": { "type": "string" }, "type": "array", "title": "Source Ids" }, "score": { "type": "number", "title": "Score" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "updated_at": { "type": "string", "format": "date-time", "title": "Updated At" } }, "additionalProperties": false, "type": "object", "required": ["id", "content", "topic", "sub_topic", "fact_ids", "source_ids", "score", "created_at", "updated_at"], "title": "SearchProfile" }, "SearchResult": { "properties": { "events": { "items": { "$ref": "#/components/schemas/SearchEvent" }, "type": "array", "title": "Events" }, "facts": { "items": { "$ref": "#/components/schemas/SearchFact" }, "type": "array", "title": "Facts" }, "profiles": { "items": { "$ref": "#/components/schemas/SearchProfile" }, "type": "array", "title": "Profiles" } }, "additionalProperties": false, "type": "object", "required": ["events", "facts", "profiles"], "title": "SearchResult" }, "Source": { "properties": { "source_id": { "type": "string", "title": "Source Id" }, "legacy": { "type": "boolean", "title": "Legacy" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "message_ids": { "items": { "type": "string" }, "type": "array", "title": "Message Ids" }, "deleted_message_ids": { "items": { "type": "string" }, "type": "array", "title": "Deleted Message Ids" }, "blobs": { "items": { "$ref": "#/components/schemas/Blob" }, "type": "array", "title": "Blobs" }, "evidence": { "items": { "$ref": "#/components/schemas/Evidence" }, "type": "array", "title": "Evidence" }, "next_message_offset": { "anyOf": [{ "type": "integer" }, { "type": "null" }], "title": "Next Message Offset" }, "next_blob_offset": { "anyOf": [{ "type": "integer" }, { "type": "null" }], "title": "Next Blob Offset" }, "next_evidence_offset": { "anyOf": [{ "type": "integer" }, { "type": "null" }], "title": "Next Evidence Offset" } }, "additionalProperties": false, "type": "object", "required": ["source_id", "legacy", "created_at", "message_ids", "deleted_message_ids", "blobs", "evidence", "next_message_offset", "next_blob_offset", "next_evidence_offset"], "title": "Source" }, "SourceMessage": { "properties": { "message_id": { "type": "string", "maxLength": 255, "minLength": 1, "title": "Message Id" }, "role": { "type": "string", "enum": ["user", "assistant", "system", "tool"], "title": "Role" }, "content": { "type": "string", "maxLength": 262144, "minLength": 1, "title": "Content" }, "occurred_at": { "type": "string", "format": "date-time", "title": "Occurred At" }, "time_zone": { "anyOf": [{ "type": "string", "maxLength": 100 }, { "type": "null" }], "title": "Time Zone" } }, "additionalProperties": false, "type": "object", "required": ["message_id", "role", "content", "occurred_at"], "title": "SourceMessage" }, "SourceObservation": { "properties": { "message_id": { "type": "string", "title": "Message Id" }, "recorded_at": { "type": "string", "format": "date-time", "title": "Recorded At" }, "time_zone": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Time Zone" } }, "additionalProperties": false, "type": "object", "required": ["message_id", "recorded_at"], "title": "SourceObservation" }, "SourceResult": { "properties": { "event_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Event Ids" }, "profile_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Profile Ids" }, "memory_version": { "anyOf": [{ "type": "integer" }, { "type": "null" }], "title": "Memory Version" }, "fact_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Fact Ids" } }, "additionalProperties": false, "type": "object", "required": ["event_ids", "profile_ids"], "title": "SourceResult" }, "SourceSummary": { "properties": { "source_id": { "type": "string", "title": "Source Id" }, "legacy": { "type": "boolean", "title": "Legacy" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" } }, "additionalProperties": false, "type": "object", "required": ["source_id", "legacy", "created_at"], "title": "SourceSummary" }, "Sources": { "properties": { "sources": { "items": { "$ref": "#/components/schemas/SourceSummary" }, "type": "array", "title": "Sources" } }, "additionalProperties": false, "type": "object", "required": ["sources"], "title": "Sources" }, "TimeEvidence": { "properties": { "message_id": { "type": "string", "maxLength": 255, "minLength": 1, "title": "Message Id" }, "expression": { "type": "string", "maxLength": 1024, "minLength": 1, "title": "Expression" } }, "additionalProperties": false, "type": "object", "required": ["message_id", "expression"], "title": "TimeEvidence" }, "Usage": { "properties": { "usages": { "items": { "$ref": "#/components/schemas/DailyUsage" }, "type": "array", "title": "Usages" } }, "additionalProperties": false, "type": "object", "required": ["usages"], "title": "Usage" }, "UserData": { "properties": { "data": { "anyOf": [{ "additionalProperties": true, "type": "object" }, { "type": "null" }], "title": "Data", "description": "User additional data in JSON" }, "id": { "anyOf": [{ "type": "string", "format": "uuid4" }, { "type": "string", "format": "uuid5" }, { "type": "null" }], "title": "Id", "description": "User ID in UUIDv4/5" }, "created_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Created At", "description": "Timestamp when the user was created" }, "updated_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Updated At", "description": "Timestamp when the user was last updated" } }, "type": "object", "title": "UserData" }, "Users": { "properties": { "users": { "items": { "$ref": "#/components/schemas/ProjectUser" }, "type": "array", "title": "Users" }, "count": { "type": "integer", "title": "Count" } }, "additionalProperties": false, "type": "object", "required": ["users", "count"], "title": "Users" }, "ValidationError": { "properties": { "loc": { "items": { "anyOf": [{ "type": "string" }, { "type": "integer" }] }, "type": "array", "title": "Location" }, "msg": { "type": "string", "title": "Message" }, "type": { "type": "string", "title": "Error Type" } }, "type": "object", "required": ["loc", "msg", "type"], "title": "ValidationError" } }, "securitySchemes": { "BearerAuth": { "type": "http", "scheme": "bearer" } } }, "allOf": [{ "type": "object", "additionalProperties": false, "properties": { "search": { "type": "string", "maxLength": 256, "default": "", "title": "Search" }, "order_by": { "enum": ["updated_at", "profile_count", "event_count"], "type": "string", "default": "updated_at", "title": "Order By" }, "order_desc": { "type": "boolean", "default": true, "title": "Order Desc" }, "limit": { "type": "integer", "maximum": 100, "minimum": 1, "default": 10, "title": "Limit" }, "offset": { "type": "integer", "minimum": 0, "default": 0, "title": "Offset" } }, "required": [] }] };
+var schema74 = { "$id": "https://memoia.jianify.dev/sdk/validateUsersQuery", "components": { "schemas": { "Blob": { "properties": { "blob_id": { "type": "string", "format": "uuid", "title": "Blob Id" }, "source_id": { "type": "string", "title": "Source Id" }, "status": { "type": "string", "enum": ["processing", "failed", "active", "retracted", "rebuilding"], "title": "Status" }, "message_ids": { "items": { "type": "string" }, "type": "array", "title": "Message Ids" }, "event_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Event Ids" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "kind": { "type": "string", "enum": ["import", "retract"], "title": "Kind", "default": "import" }, "flush": { "anyOf": [{ "$ref": "#/components/schemas/FlushProgress" }, { "type": "null" }] } }, "additionalProperties": false, "type": "object", "required": ["blob_id", "source_id", "status", "message_ids", "event_ids", "created_at"], "title": "Blob" }, "Context": { "properties": { "context": { "type": "string", "title": "Context" }, "entries": { "items": { "type": "string" }, "type": "array", "title": "Entries" } }, "additionalProperties": false, "type": "object", "required": ["context", "entries"], "title": "Context" }, "ContextInput": { "properties": { "query": { "anyOf": [{ "type": "string", "maxLength": 8192, "minLength": 1 }, { "type": "null" }], "title": "Query" }, "max_token_size": { "type": "integer", "maximum": 1e4, "minimum": 1, "title": "Max Token Size", "default": 500 } }, "additionalProperties": false, "type": "object", "title": "ContextInput" }, "DailyUsage": { "properties": { "date": { "type": "string", "title": "Date", "description": "The date" }, "total_insert": { "type": "integer", "title": "Total Insert", "description": "The total insert", "default": 0 }, "total_success_insert": { "type": "integer", "title": "Total Success Insert", "description": "The total update", "default": 0 }, "total_input_token": { "type": "integer", "title": "Total Input Token", "description": "The total input token", "default": 0 }, "total_output_token": { "type": "integer", "title": "Total Output Token", "description": "The total output token", "default": 0 }, "usage_complete": { "type": "boolean", "title": "Usage Complete", "description": "False when recorded calls lacked token usage. Totals are approximate recorded usage, not a billing ledger; outages or expired counters can lose statistics.", "default": true } }, "type": "object", "required": ["date"], "title": "DailyUsage" }, "DeleteMessages": { "properties": { "idempotency_key": { "type": "string", "maxLength": 255, "minLength": 1, "pattern": "^[^/]+$", "title": "Idempotency Key" }, "message_ids": { "items": { "type": "string", "maxLength": 255, "minLength": 1 }, "type": "array", "maxItems": 1e3, "minItems": 1, "title": "Message Ids" } }, "additionalProperties": false, "type": "object", "required": ["idempotency_key", "message_ids"], "title": "DeleteMessages" }, "EventData": { "properties": { "title": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Title" }, "summary": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Summary" }, "keywords": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Keywords" }, "time": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Time" }, "location": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Location" }, "content": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Content" }, "interpretation": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Interpretation" }, "source_id": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Source Id" }, "blob_id": { "anyOf": [{ "type": "string", "format": "uuid4" }, { "type": "string", "format": "uuid5" }, { "type": "null" }], "title": "Blob Id" }, "evidence": { "items": { "$ref": "#/components/schemas/Evidence" }, "type": "array", "title": "Evidence" }, "profile_delta": { "anyOf": [{ "items": { "$ref": "#/components/schemas/ProfileDelta" }, "type": "array" }, { "type": "null" }], "title": "Profile Delta", "description": "List of profile data" }, "event_tip": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Event Tip", "description": "Event tip" }, "event_tags": { "anyOf": [{ "items": { "$ref": "#/components/schemas/EventTag" }, "type": "array" }, { "type": "null" }], "title": "Event Tags", "description": "List of event tags" } }, "type": "object", "title": "EventData" }, "EventQuery": { "properties": { "query": { "anyOf": [{ "type": "string", "maxLength": 8192, "minLength": 1 }, { "type": "null" }], "title": "Query" }, "ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Ids" }, "exclude_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Exclude Ids" }, "limit": { "type": "integer", "maximum": 100, "minimum": 1, "title": "Limit", "default": 10 }, "max_token_size": { "type": "integer", "maximum": 1e4, "minimum": 1, "title": "Max Token Size", "default": 4e3 }, "fact_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Fact Ids" }, "created_after": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Created After" }, "created_before": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Created Before" }, "event_after": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }], "title": "Event After" }, "event_before": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }], "title": "Event Before" } }, "additionalProperties": false, "type": "object", "title": "EventQuery" }, "EventRecord": { "properties": { "id": { "type": "string", "format": "uuid", "title": "Id" }, "event_data": { "$ref": "#/components/schemas/EventData" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "updated_at": { "type": "string", "format": "date-time", "title": "Updated At" } }, "additionalProperties": false, "type": "object", "required": ["id", "event_data", "created_at", "updated_at"], "title": "EventRecord" }, "EventTag": { "properties": { "tag": { "type": "string", "title": "Tag", "description": "The event tag" }, "value": { "type": "string", "title": "Value", "description": "The event tag value" } }, "type": "object", "required": ["tag", "value"], "title": "EventTag" }, "EventTime": { "properties": { "start": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }], "title": "Start" }, "end": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }], "title": "End" }, "precision": { "type": "string", "enum": ["year", "month", "day", "range", "unknown"], "title": "Precision" }, "evidence": { "items": { "$ref": "#/components/schemas/TimeEvidence" }, "type": "array", "maxItems": 20, "minItems": 1, "title": "Evidence" } }, "additionalProperties": false, "type": "object", "required": ["start", "end", "precision", "evidence"], "title": "EventTime" }, "Events": { "properties": { "events": { "items": { "$ref": "#/components/schemas/EventRecord" }, "type": "array", "title": "Events" } }, "additionalProperties": false, "type": "object", "required": ["events"], "title": "Events" }, "Evidence": { "properties": { "fact_id": { "type": "string", "format": "uuid", "title": "Fact Id" }, "blob_id": { "type": "string", "format": "uuid", "title": "Blob Id" }, "content": { "type": "string", "title": "Content" }, "topic": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Topic" }, "sub_topic": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Sub Topic" }, "subject": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Subject" }, "reporter": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Reporter" }, "certainty": { "type": "string", "enum": ["asserted", "reported", "uncertain", "legacy"], "title": "Certainty", "default": "legacy" }, "revision": { "type": "integer", "title": "Revision", "default": 1 }, "support_groups": { "items": { "items": { "type": "string" }, "type": "array" }, "type": "array", "title": "Support Groups" }, "event_time": { "anyOf": [{ "$ref": "#/components/schemas/EventTime" }, { "type": "null" }] }, "source_messages": { "items": { "$ref": "#/components/schemas/SourceObservation" }, "type": "array", "title": "Source Messages" } }, "additionalProperties": false, "type": "object", "required": ["fact_id", "blob_id", "content", "support_groups"], "title": "Evidence" }, "FactQuery": { "properties": { "query": { "anyOf": [{ "type": "string", "maxLength": 8192, "minLength": 1 }, { "type": "null" }], "title": "Query" }, "ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Ids" }, "exclude_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Exclude Ids" }, "limit": { "type": "integer", "maximum": 100, "minimum": 1, "title": "Limit", "default": 10 }, "max_token_size": { "type": "integer", "maximum": 1e4, "minimum": 1, "title": "Max Token Size", "default": 4e3 }, "source_ids": { "items": { "type": "string", "maxLength": 255, "minLength": 1 }, "type": "array", "maxItems": 100, "title": "Source Ids" }, "recorded_after": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Recorded After" }, "recorded_before": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Recorded Before" }, "event_after": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }], "title": "Event After" }, "event_before": { "anyOf": [{ "type": "string", "format": "date" }, { "type": "null" }], "title": "Event Before" } }, "additionalProperties": false, "type": "object", "title": "FactQuery" }, "FlushInput": { "properties": { "idempotency_key": { "type": "string", "maxLength": 255, "minLength": 1, "pattern": "^[^/]+$", "title": "Idempotency Key" } }, "additionalProperties": false, "type": "object", "required": ["idempotency_key"], "title": "FlushInput" }, "FlushProgress": { "properties": { "operation_id": { "type": "string", "format": "uuid", "title": "Operation Id" }, "status": { "type": "string", "enum": ["pending", "running", "completed", "failed"], "title": "Status" }, "blob_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Blob Ids" }, "attempts": { "type": "integer", "title": "Attempts" }, "available_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Available At" }, "error": { "anyOf": [{ "$ref": "#/components/schemas/OperationError" }, { "type": "null" }] }, "retryable": { "type": "boolean", "title": "Retryable" } }, "additionalProperties": false, "type": "object", "required": ["operation_id", "status", "blob_ids", "attempts", "available_at", "error", "retryable"], "title": "FlushProgress" }, "FlushResult": { "properties": { "blob_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Blob Ids" }, "profile_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Profile Ids" }, "event_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Event Ids" }, "memory_version": { "anyOf": [{ "type": "integer" }, { "type": "null" }], "title": "Memory Version" } }, "additionalProperties": false, "type": "object", "required": ["blob_ids", "profile_ids", "event_ids"], "title": "FlushResult" }, "ForgottenUser": { "properties": { "user_id": { "type": "string", "format": "uuid", "title": "User Id" }, "forgotten": { "type": "boolean", "const": true, "title": "Forgotten" } }, "additionalProperties": false, "type": "object", "required": ["user_id", "forgotten"], "title": "ForgottenUser" }, "HTTPValidationError": { "properties": { "detail": { "items": { "$ref": "#/components/schemas/ValidationError" }, "type": "array", "title": "Detail" } }, "type": "object", "title": "HTTPValidationError" }, "Health": { "properties": { "status": { "type": "string", "title": "Status", "default": "ok" } }, "additionalProperties": false, "type": "object", "title": "Health" }, "HistoricalProfile": { "properties": { "id": { "type": "string", "format": "uuid", "title": "Id" }, "content": { "type": "string", "title": "Content" }, "topic": { "type": "string", "title": "Topic" }, "sub_topic": { "type": "string", "title": "Sub Topic" }, "source_ids": { "items": { "type": "string" }, "type": "array", "title": "Source Ids" }, "fact_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Fact Ids" } }, "additionalProperties": false, "type": "object", "required": ["id", "content", "topic", "sub_topic", "source_ids", "fact_ids"], "title": "HistoricalProfile" }, "History": { "properties": { "entries": { "items": { "$ref": "#/components/schemas/HistoryEntry" }, "type": "array", "title": "Entries" } }, "additionalProperties": false, "type": "object", "required": ["entries"], "title": "History" }, "HistoryEntry": { "properties": { "revision_id": { "type": "string", "format": "uuid", "title": "Revision Id" }, "operation_id": { "anyOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }], "title": "Operation Id" }, "source_id": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Source Id" }, "maintenance_version": { "anyOf": [{ "type": "integer" }, { "type": "null" }], "title": "Maintenance Version" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "profiles": { "items": { "$ref": "#/components/schemas/HistoricalProfile" }, "type": "array", "title": "Profiles" }, "added": { "items": { "$ref": "#/components/schemas/HistoricalProfile" }, "type": "array", "title": "Added" }, "removed": { "items": { "$ref": "#/components/schemas/HistoricalProfile" }, "type": "array", "title": "Removed" } }, "additionalProperties": false, "type": "object", "required": ["revision_id", "operation_id", "source_id", "created_at", "profiles", "added", "removed"], "title": "HistoryEntry" }, "IdData": { "properties": { "id": { "anyOf": [{ "type": "string", "format": "uuid4" }, { "type": "string", "format": "uuid5" }], "title": "Id", "description": "The UUID identifier" } }, "type": "object", "required": ["id"], "title": "IdData" }, "ImportSource": { "properties": { "idempotency_key": { "type": "string", "maxLength": 255, "minLength": 1, "pattern": "^[^/]+$", "title": "Idempotency Key" }, "source_id": { "type": "string", "maxLength": 255, "minLength": 1, "pattern": "^[^/]+$", "title": "Source Id" }, "messages": { "items": { "$ref": "#/components/schemas/SourceMessage" }, "type": "array", "maxItems": 1e3, "minItems": 1, "title": "Messages" }, "metadata": { "additionalProperties": true, "type": "object", "title": "Metadata" } }, "additionalProperties": false, "type": "object", "required": ["idempotency_key", "source_id", "messages"], "title": "ImportSource" }, "IssuedKey": { "properties": { "key_id": { "type": "string", "format": "uuid", "title": "Key Id" }, "name": { "type": "string", "title": "Name" }, "scopes": { "items": { "type": "string", "enum": ["read", "write", "admin"] }, "type": "array", "title": "Scopes" }, "expires_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Expires At" }, "revoked_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Revoked At" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "token": { "type": "string", "title": "Token" } }, "additionalProperties": false, "type": "object", "required": ["key_id", "name", "scopes", "expires_at", "revoked_at", "created_at", "token"], "title": "IssuedKey" }, "KeyCreate": { "properties": { "name": { "type": "string", "maxLength": 128, "minLength": 1, "title": "Name" }, "scopes": { "items": { "type": "string", "enum": ["read", "write", "admin"] }, "type": "array", "maxItems": 3, "minItems": 1, "title": "Scopes" }, "expires_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Expires At" } }, "additionalProperties": false, "type": "object", "required": ["name", "scopes"], "title": "KeyCreate" }, "Keys": { "properties": { "keys": { "items": { "$ref": "#/components/schemas/ManagedKey" }, "type": "array", "title": "Keys" } }, "additionalProperties": false, "type": "object", "required": ["keys"], "title": "Keys" }, "LegacyToken": { "properties": { "token": { "type": "string", "title": "Token" } }, "additionalProperties": false, "type": "object", "required": ["token"], "title": "LegacyToken" }, "MaintenanceStatus": { "properties": { "pending_blob_count": { "type": "integer", "title": "Pending Blob Count" }, "flushes": { "items": { "$ref": "#/components/schemas/FlushProgress" }, "type": "array", "title": "Flushes" } }, "additionalProperties": false, "type": "object", "required": ["pending_blob_count", "flushes"], "title": "MaintenanceStatus" }, "ManagedKey": { "properties": { "key_id": { "type": "string", "format": "uuid", "title": "Key Id" }, "name": { "type": "string", "title": "Name" }, "scopes": { "items": { "type": "string", "enum": ["read", "write", "admin"] }, "type": "array", "title": "Scopes" }, "expires_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Expires At" }, "revoked_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Revoked At" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" } }, "additionalProperties": false, "type": "object", "required": ["key_id", "name", "scopes", "expires_at", "revoked_at", "created_at"], "title": "ManagedKey" }, "ManagedProject": { "properties": { "project_id": { "type": "string", "title": "Project Id" }, "status": { "type": "string", "title": "Status" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" } }, "additionalProperties": false, "type": "object", "required": ["project_id", "status", "created_at"], "title": "ManagedProject" }, "Operation": { "properties": { "operation_id": { "type": "string", "format": "uuid", "title": "Operation Id" }, "kind": { "type": "string", "enum": ["import", "retract", "legacy_import", "flush"], "title": "Kind", "default": "import" }, "status": { "type": "string", "enum": ["processing", "completed", "failed"], "title": "Status" }, "source_id": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Source Id" }, "blob_id": { "anyOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }], "title": "Blob Id" }, "result": { "anyOf": [{ "$ref": "#/components/schemas/SourceResult" }, { "$ref": "#/components/schemas/FlushResult" }, { "type": "null" }], "title": "Result" }, "error": { "anyOf": [{ "$ref": "#/components/schemas/OperationError" }, { "type": "null" }] }, "flush": { "anyOf": [{ "$ref": "#/components/schemas/FlushProgress" }, { "type": "null" }] } }, "additionalProperties": false, "type": "object", "required": ["operation_id", "status", "source_id", "blob_id", "result", "error"], "title": "Operation" }, "OperationError": { "properties": { "code": { "type": "string", "title": "Code" }, "retryable": { "type": "boolean", "title": "Retryable" } }, "additionalProperties": false, "type": "object", "required": ["code", "retryable"], "title": "OperationError" }, "Operations": { "properties": { "operations": { "items": { "$ref": "#/components/schemas/Operation" }, "type": "array", "title": "Operations" } }, "additionalProperties": false, "type": "object", "required": ["operations"], "title": "Operations" }, "Profile": { "properties": { "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "id": { "type": "string", "format": "uuid", "title": "Id" }, "content": { "type": "string", "title": "Content" }, "topic": { "type": "string", "title": "Topic" }, "sub_topic": { "type": "string", "title": "Sub Topic" }, "source_ids": { "items": { "type": "string" }, "type": "array", "title": "Source Ids" }, "updated_at": { "type": "string", "format": "date-time", "title": "Updated At" } }, "additionalProperties": false, "type": "object", "required": ["created_at", "id", "content", "topic", "sub_topic", "source_ids", "updated_at"], "title": "Profile" }, "ProfileConfig": { "properties": { "profile_config": { "type": "string", "title": "Profile Config" } }, "additionalProperties": false, "type": "object", "required": ["profile_config"], "title": "ProfileConfig" }, "ProfileDelta": { "properties": { "content": { "type": "string", "title": "Content", "description": "The profile content" }, "attributes": { "anyOf": [{ "additionalProperties": true, "type": "object" }, { "type": "null" }], "title": "Attributes", "description": "User profile attributes in JSON, containing 'topic', 'sub_topic'" } }, "type": "object", "required": ["content", "attributes"], "title": "ProfileDelta" }, "ProfileInput": { "properties": { "content": { "type": "string", "maxLength": 32768, "minLength": 1, "title": "Content" }, "topic": { "type": "string", "maxLength": 256, "minLength": 1, "title": "Topic" }, "sub_topic": { "type": "string", "maxLength": 256, "minLength": 1, "title": "Sub Topic" } }, "additionalProperties": false, "type": "object", "required": ["content", "topic", "sub_topic"], "title": "ProfileInput" }, "ProfileQuery": { "properties": { "query": { "anyOf": [{ "type": "string", "maxLength": 8192, "minLength": 1 }, { "type": "null" }], "title": "Query" }, "ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Ids" }, "exclude_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Exclude Ids" }, "limit": { "type": "integer", "maximum": 100, "minimum": 1, "title": "Limit", "default": 10 }, "max_token_size": { "type": "integer", "maximum": 1e4, "minimum": 1, "title": "Max Token Size", "default": 4e3 }, "topic": { "anyOf": [{ "type": "string", "maxLength": 256, "minLength": 1 }, { "type": "null" }], "title": "Topic" }, "sub_topic": { "anyOf": [{ "type": "string", "maxLength": 256, "minLength": 1 }, { "type": "null" }], "title": "Sub Topic" } }, "additionalProperties": false, "type": "object", "title": "ProfileQuery" }, "Profiles": { "properties": { "profiles": { "items": { "$ref": "#/components/schemas/Profile" }, "type": "array", "title": "Profiles" } }, "additionalProperties": false, "type": "object", "required": ["profiles"], "title": "Profiles" }, "ProjectCreate": { "properties": { "project_id": { "type": "string", "maxLength": 64, "minLength": 1, "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$", "title": "Project Id" } }, "additionalProperties": false, "type": "object", "required": ["project_id"], "title": "ProjectCreate" }, "ProjectIdentity": { "properties": { "project_id": { "type": "string", "title": "Project Id" } }, "additionalProperties": false, "type": "object", "required": ["project_id"], "title": "ProjectIdentity" }, "ProjectUpdate": { "properties": { "status": { "type": "string", "enum": ["active", "suspended"], "title": "Status" } }, "additionalProperties": false, "type": "object", "required": ["status"], "title": "ProjectUpdate" }, "ProjectUser": { "properties": { "id": { "type": "string", "format": "uuid", "title": "Id" }, "project_id": { "type": "string", "title": "Project Id" }, "additional_fields": { "anyOf": [{ "additionalProperties": true, "type": "object" }, { "type": "null" }], "title": "Additional Fields" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "updated_at": { "type": "string", "format": "date-time", "title": "Updated At" }, "profile_count": { "type": "integer", "title": "Profile Count" }, "event_count": { "type": "integer", "title": "Event Count" } }, "additionalProperties": false, "type": "object", "required": ["id", "project_id", "additional_fields", "created_at", "updated_at", "profile_count", "event_count"], "title": "ProjectUser" }, "Projects": { "properties": { "projects": { "items": { "$ref": "#/components/schemas/ManagedProject" }, "type": "array", "title": "Projects" } }, "additionalProperties": false, "type": "object", "required": ["projects"], "title": "Projects" }, "QueriedEvent": { "properties": { "id": { "type": "string", "format": "uuid", "title": "Id" }, "event_data": { "$ref": "#/components/schemas/QueriedEventData" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "updated_at": { "type": "string", "format": "date-time", "title": "Updated At" }, "score": { "type": "number", "title": "Score" } }, "additionalProperties": false, "type": "object", "required": ["id", "event_data", "created_at", "updated_at", "score"], "title": "QueriedEvent" }, "QueriedEventData": { "properties": { "title": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Title" }, "summary": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Summary" }, "keywords": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Keywords" }, "time": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Time" }, "location": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Location" }, "content": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Content" }, "interpretation": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Interpretation" }, "source_id": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Source Id" }, "blob_id": { "anyOf": [{ "type": "string", "format": "uuid4" }, { "type": "string", "format": "uuid5" }, { "type": "null" }], "title": "Blob Id" }, "evidence": { "items": { "$ref": "#/components/schemas/Evidence" }, "type": "array", "title": "Evidence" }, "profile_delta": { "anyOf": [{ "items": { "$ref": "#/components/schemas/ProfileDelta" }, "type": "array" }, { "type": "null" }], "title": "Profile Delta", "description": "List of profile data" }, "event_tip": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Event Tip", "description": "Event tip" }, "event_tags": { "anyOf": [{ "items": { "$ref": "#/components/schemas/EventTag" }, "type": "array" }, { "type": "null" }], "title": "Event Tags", "description": "List of event tags" }, "fact_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Fact Ids" } }, "type": "object", "required": ["fact_ids"], "title": "QueriedEventData" }, "QueriedEvents": { "properties": { "events": { "items": { "$ref": "#/components/schemas/QueriedEvent" }, "type": "array", "title": "Events" } }, "additionalProperties": false, "type": "object", "required": ["events"], "title": "QueriedEvents" }, "QueriedFacts": { "properties": { "facts": { "items": { "$ref": "#/components/schemas/SearchFact" }, "type": "array", "title": "Facts" } }, "additionalProperties": false, "type": "object", "required": ["facts"], "title": "QueriedFacts" }, "QueriedProfiles": { "properties": { "profiles": { "items": { "$ref": "#/components/schemas/SearchProfile" }, "type": "array", "title": "Profiles" } }, "additionalProperties": false, "type": "object", "required": ["profiles"], "title": "QueriedProfiles" }, "SearchEvent": { "properties": { "id": { "type": "string", "format": "uuid", "title": "Id" }, "content": { "type": "string", "title": "Content" }, "source_id": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Source Id" }, "blob_id": { "anyOf": [{ "type": "string", "format": "uuid" }, { "type": "null" }], "title": "Blob Id" }, "score": { "type": "number", "title": "Score" }, "occurred_at": { "type": "string", "format": "date-time", "title": "Occurred At" }, "evidence": { "items": { "$ref": "#/components/schemas/Evidence" }, "type": "array", "title": "Evidence" }, "title": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Title" }, "summary": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Summary" }, "interpretation": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Interpretation" }, "keywords": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Keywords" }, "time": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Time" }, "location": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Location" }, "fact_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Fact Ids" } }, "additionalProperties": false, "type": "object", "required": ["id", "content", "source_id", "blob_id", "score", "occurred_at"], "title": "SearchEvent" }, "SearchFact": { "properties": { "id": { "type": "string", "format": "uuid", "title": "Id" }, "content": { "type": "string", "title": "Content" }, "source_id": { "type": "string", "title": "Source Id" }, "blob_id": { "type": "string", "format": "uuid", "title": "Blob Id" }, "score": { "type": "number", "title": "Score" }, "occurred_at": { "type": "string", "format": "date-time", "title": "Occurred At" }, "evidence": { "$ref": "#/components/schemas/Evidence" } }, "additionalProperties": false, "type": "object", "required": ["id", "content", "source_id", "blob_id", "score", "occurred_at", "evidence"], "title": "SearchFact" }, "SearchInput": { "properties": { "query": { "type": "string", "maxLength": 8192, "minLength": 1, "title": "Query" }, "limit": { "type": "integer", "maximum": 100, "minimum": 1, "title": "Limit", "default": 10 }, "max_token_size": { "type": "integer", "maximum": 1e4, "minimum": 1, "title": "Max Token Size", "default": 4e3 }, "exclude_fact_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Exclude Fact Ids" }, "exclude_event_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Exclude Event Ids" }, "exclude_profile_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "maxItems": 500, "title": "Exclude Profile Ids" }, "exclude_profile_topics": { "items": { "type": "string", "maxLength": 256, "minLength": 1 }, "type": "array", "maxItems": 50, "title": "Exclude Profile Topics" }, "include_events": { "type": "boolean", "title": "Include Events", "default": true }, "event_max_tokens": { "anyOf": [{ "type": "integer", "maximum": 8e3, "minimum": 1 }, { "type": "null" }], "title": "Event Max Tokens" } }, "additionalProperties": false, "type": "object", "required": ["query"], "title": "SearchInput" }, "SearchProfile": { "properties": { "id": { "type": "string", "format": "uuid", "title": "Id" }, "content": { "type": "string", "title": "Content" }, "topic": { "type": "string", "title": "Topic" }, "sub_topic": { "type": "string", "title": "Sub Topic" }, "fact_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Fact Ids" }, "source_ids": { "items": { "type": "string" }, "type": "array", "title": "Source Ids" }, "score": { "type": "number", "title": "Score" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "updated_at": { "type": "string", "format": "date-time", "title": "Updated At" } }, "additionalProperties": false, "type": "object", "required": ["id", "content", "topic", "sub_topic", "fact_ids", "source_ids", "score", "created_at", "updated_at"], "title": "SearchProfile" }, "SearchResult": { "properties": { "events": { "items": { "$ref": "#/components/schemas/SearchEvent" }, "type": "array", "title": "Events" }, "facts": { "items": { "$ref": "#/components/schemas/SearchFact" }, "type": "array", "title": "Facts" }, "profiles": { "items": { "$ref": "#/components/schemas/SearchProfile" }, "type": "array", "title": "Profiles" } }, "additionalProperties": false, "type": "object", "required": ["events", "facts", "profiles"], "title": "SearchResult" }, "Source": { "properties": { "source_id": { "type": "string", "title": "Source Id" }, "legacy": { "type": "boolean", "title": "Legacy" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" }, "message_ids": { "items": { "type": "string" }, "type": "array", "title": "Message Ids" }, "deleted_message_ids": { "items": { "type": "string" }, "type": "array", "title": "Deleted Message Ids" }, "blobs": { "items": { "$ref": "#/components/schemas/Blob" }, "type": "array", "title": "Blobs" }, "evidence": { "items": { "$ref": "#/components/schemas/Evidence" }, "type": "array", "title": "Evidence" }, "next_message_offset": { "anyOf": [{ "type": "integer" }, { "type": "null" }], "title": "Next Message Offset" }, "next_blob_offset": { "anyOf": [{ "type": "integer" }, { "type": "null" }], "title": "Next Blob Offset" }, "next_evidence_offset": { "anyOf": [{ "type": "integer" }, { "type": "null" }], "title": "Next Evidence Offset" } }, "additionalProperties": false, "type": "object", "required": ["source_id", "legacy", "created_at", "message_ids", "deleted_message_ids", "blobs", "evidence", "next_message_offset", "next_blob_offset", "next_evidence_offset"], "title": "Source" }, "SourceMessage": { "properties": { "message_id": { "type": "string", "maxLength": 255, "minLength": 1, "title": "Message Id" }, "role": { "type": "string", "enum": ["user", "assistant", "system", "tool"], "title": "Role" }, "content": { "type": "string", "maxLength": 262144, "minLength": 1, "title": "Content" }, "occurred_at": { "type": "string", "format": "date-time", "title": "Occurred At" }, "time_zone": { "anyOf": [{ "type": "string", "maxLength": 100 }, { "type": "null" }], "title": "Time Zone" } }, "additionalProperties": false, "type": "object", "required": ["message_id", "role", "content", "occurred_at"], "title": "SourceMessage" }, "SourceObservation": { "properties": { "message_id": { "type": "string", "title": "Message Id" }, "recorded_at": { "type": "string", "format": "date-time", "title": "Recorded At" }, "time_zone": { "anyOf": [{ "type": "string" }, { "type": "null" }], "title": "Time Zone" } }, "additionalProperties": false, "type": "object", "required": ["message_id", "recorded_at"], "title": "SourceObservation" }, "SourceResult": { "properties": { "event_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Event Ids" }, "profile_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Profile Ids" }, "memory_version": { "anyOf": [{ "type": "integer" }, { "type": "null" }], "title": "Memory Version" }, "fact_ids": { "items": { "type": "string", "format": "uuid" }, "type": "array", "title": "Fact Ids" } }, "additionalProperties": false, "type": "object", "required": ["event_ids", "profile_ids"], "title": "SourceResult" }, "SourceSummary": { "properties": { "source_id": { "type": "string", "title": "Source Id" }, "legacy": { "type": "boolean", "title": "Legacy" }, "created_at": { "type": "string", "format": "date-time", "title": "Created At" } }, "additionalProperties": false, "type": "object", "required": ["source_id", "legacy", "created_at"], "title": "SourceSummary" }, "Sources": { "properties": { "sources": { "items": { "$ref": "#/components/schemas/SourceSummary" }, "type": "array", "title": "Sources" } }, "additionalProperties": false, "type": "object", "required": ["sources"], "title": "Sources" }, "TimeEvidence": { "properties": { "message_id": { "type": "string", "maxLength": 255, "minLength": 1, "title": "Message Id" }, "expression": { "type": "string", "maxLength": 1024, "minLength": 1, "title": "Expression" } }, "additionalProperties": false, "type": "object", "required": ["message_id", "expression"], "title": "TimeEvidence" }, "Usage": { "properties": { "usages": { "items": { "$ref": "#/components/schemas/DailyUsage" }, "type": "array", "title": "Usages" } }, "additionalProperties": false, "type": "object", "required": ["usages"], "title": "Usage" }, "UserData": { "properties": { "data": { "anyOf": [{ "additionalProperties": true, "type": "object" }, { "type": "null" }], "title": "Data", "description": "User additional data in JSON" }, "id": { "anyOf": [{ "type": "string", "format": "uuid4" }, { "type": "string", "format": "uuid5" }, { "type": "null" }], "title": "Id", "description": "User ID in UUIDv4/5" }, "created_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Created At", "description": "Timestamp when the user was created" }, "updated_at": { "anyOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }], "title": "Updated At", "description": "Timestamp when the user was last updated" } }, "type": "object", "title": "UserData" }, "Users": { "properties": { "users": { "items": { "$ref": "#/components/schemas/ProjectUser" }, "type": "array", "title": "Users" }, "count": { "type": "integer", "title": "Count" } }, "additionalProperties": false, "type": "object", "required": ["users", "count"], "title": "Users" }, "ValidationError": { "properties": { "loc": { "items": { "anyOf": [{ "type": "string" }, { "type": "integer" }] }, "type": "array", "title": "Location" }, "msg": { "type": "string", "title": "Message" }, "type": { "type": "string", "title": "Error Type" } }, "type": "object", "required": ["loc", "msg", "type"], "title": "ValidationError" } }, "securitySchemes": { "BearerAuth": { "type": "http", "scheme": "bearer" } } }, "allOf": [{ "type": "object", "additionalProperties": false, "properties": { "search": { "type": "string", "maxLength": 256, "default": "", "title": "Search" }, "order_by": { "enum": ["updated_at", "profile_count", "event_count"], "type": "string", "default": "updated_at", "title": "Order By" }, "order_desc": { "type": "boolean", "default": true, "title": "Order Desc" }, "limit": { "type": "integer", "maximum": 100, "minimum": 1, "default": 10, "title": "Limit" }, "offset": { "type": "integer", "minimum": 0, "default": 0, "title": "Offset" } }, "required": [] }] };
 function validate56(data, { instancePath = "", parentData, parentDataProperty, rootData = data, dynamicAnchors = {} } = {}) {
   ;
   let vErrors = null;

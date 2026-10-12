@@ -11,6 +11,14 @@ const json = (body, status = 200) => Response.json(body, { status });
 const client = (fetch, options = {}) => new MemoiaClient({ baseUrl: "https://memoia.example", apiKey: "private-project-token", fetch, ...options });
 
 describe("independent read queries", () => {
+  it("preserves queried event Fact links and rejects a silently incomplete response", async () => {
+    const row = { id: eventId, event_data: { title: "Story", fact_ids: [sourceId], evidence: [] },
+      score: 0.1, created_at: "2026-10-12T00:00:00Z", updated_at: "2026-10-12T00:00:00Z" };
+    const api = client(async () => json({ events: [row] }));
+    assert.deepEqual((await api.queryEvents(user)).events[0].event_data.fact_ids, [sourceId]);
+    const missing = client(async () => json({ events: [{ ...row, event_data: { title: "Story" } }] }));
+    await assert.rejects(missing.queryEvents(user), error => error.code === "INVALID_RESPONSE");
+  });
   it("uses separate private POST bodies and authoritative project identity", async () => {
     const calls = [];
     const api = client(async (url, init) => {

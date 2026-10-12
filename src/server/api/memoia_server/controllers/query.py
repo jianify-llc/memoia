@@ -128,7 +128,7 @@ async def query_events(user_id, project_id, body):
         rows = {row.id: row for row in session.scalars(select(UserEvent).where(UserEvent.id.in_(pool.where(UserEvent.id.in_([ident for ident, _ in ranking]))),
             UserEvent.user_id == user_id, UserEvent.project_id == project_id))}
         candidates = [QueriedEvent(id=ident, score=score, created_at=rows[ident].created_at,
-            updated_at=rows[ident].updated_at, event_data=event_view(session, rows[ident])) for ident, score in ranking if ident in rows]
+            updated_at=rows[ident].updated_at, event_data=event_view(session, rows[ident], include_fact_links=True)) for ident, score in ranking if ident in rows]
     return _complete_response(QueriedEvents, "events", candidates, body)
 
 

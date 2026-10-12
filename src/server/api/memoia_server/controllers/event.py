@@ -45,7 +45,7 @@ def fact_evidence(session, fact):
     return facts_evidence(session, [fact])[fact["id"]]
 
 
-def event_view(session, event):
+def event_view(session, event, *, include_fact_links=False):
     data = dict(event.event_data)
     linked = select(memory_event_facts.c.fact_id).where(
         memory_event_facts.c.user_id == event.user_id, memory_event_facts.c.project_id == event.project_id,
@@ -55,7 +55,7 @@ def event_view(session, event):
         memory_facts.c.user_id == event.user_id, memory_facts.c.project_id == event.project_id,
         memory_facts.c.active, memory_facts.c.id.in_(linked))).mappings().all()
     # Text may be pending maintenance; evidence always comes from current facts.
-    if data.get("blob_id") or data.get("memoia_v2") or data.get("evidence"):
+    if include_fact_links or data.get("blob_id") or data.get("memoia_v2") or data.get("evidence"):
         data["evidence"] = [entry.model_dump(mode="json") for entry in facts_evidence(session, rows).values()]
         data["fact_ids"] = [str(row["id"]) for row in rows]
     return data

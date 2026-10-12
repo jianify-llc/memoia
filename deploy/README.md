@@ -212,7 +212,7 @@ ShellCheck/actionlint/Bash 语法仅静态验证。test_workflow.py 解析真实
 
 ### TypeScript SDK 真实探针
 
-`sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.10.0 已构建产物，不安装依赖或重新打包。stdin 是 JSON：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 是整体预算，默认 360000、上限 900000；地址和 token 不放 argv／日志。输入输出保存为 root:root 0600 受保护文件。两消息专用来源必须确认消息／Blob／证据的 next_*_offset 全为 null，不能用部分页证明完整性。Fact 回执确认后单次调用 flush 并查询原操作；核对固定 Blob 归属和两类派生结果，未知回执不重发，不自动恢复失败直到凑绿。
+`sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.10.1 已构建产物，不安装依赖或重新打包。stdin 是 JSON：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 是整体预算，默认 360000、上限 900000；地址和 token 不放 argv／日志。输入输出保存为 root:root 0600 受保护文件。两消息专用来源必须确认消息／Blob／证据的 next_*_offset 全为 null，不能用部分页证明完整性。Fact 回执确认后单次调用 flush 并查询原操作；核对固定 Blob 归属和两类派生结果，未知回执不重发，不自动恢复失败直到凑绿。
 
 导入／删除 completed 只确认 Fact。探针先验证无需 Event 的 Fact 召回，再单次 flush 并查询该原 Operation，确认固定 Blob 集合完成后才检查画像／Event／历史。超时、失败或退避中的原错误均验收失败，保留原 Operation 和批次，不自动重导入或调用维护恢复；新 flush 的成功不能替代原批次验收。
 

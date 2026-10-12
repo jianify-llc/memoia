@@ -51,7 +51,12 @@ async def test_event_query_has_its_own_keywords_links_and_calendar_time(search_u
     assert found.status_code == 200
     assert [row["id"] for row in found.json()["events"]] == [str(event)]
     assert found.json()["events"][0]["created_at"].startswith("2026-")
+    assert found.json()["events"][0]["event_data"]["fact_ids"] == [str(ids[0])]
     assert found.json()["events"][0]["event_data"]["evidence"][0]["event_time"]["start"] == "2024-04-01"
+    with Session.begin() as session:
+        session.execute(update(UserEvent).where(UserEvent.id == event).values(event_data={"event_tip": "Legacy Sakura story"}))
+    legacy = await client.post(f"/api/users/{uid}/events/query", json={"ids": [str(event)]})
+    assert legacy.json()["events"][0]["event_data"]["fact_ids"] == [str(ids[0])]
     no_time = await client.post(f"/api/users/{uid}/events/query", json={"event_after": "2025-01-01"})
     assert no_time.json()["events"] == []
     no_link = await client.post(f"/api/users/{uid}/events/query", json={"fact_ids": [str(uuid4())]})

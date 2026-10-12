@@ -1228,7 +1228,7 @@ export interface components {
              * Format: uuid
              */
             id: string;
-            event_data: components["schemas"]["EventData"];
+            event_data: components["schemas"]["QueriedEventData"];
             /**
              * Created At
              * Format: date-time
@@ -1241,6 +1241,46 @@ export interface components {
             updated_at: string;
             /** Score */
             score: number;
+        };
+        /** QueriedEventData */
+        QueriedEventData: {
+            /** Title */
+            title?: string | null;
+            /** Summary */
+            summary?: string | null;
+            /** Keywords */
+            keywords?: string | null;
+            /** Time */
+            time?: string | null;
+            /** Location */
+            location?: string | null;
+            /** Content */
+            content?: string | null;
+            /** Interpretation */
+            interpretation?: string | null;
+            /** Source Id */
+            source_id?: string | null;
+            /** Blob Id */
+            blob_id?: string | null;
+            /** Evidence */
+            evidence?: components["schemas"]["Evidence"][];
+            /**
+             * Profile Delta
+             * @description List of profile data
+             */
+            profile_delta?: components["schemas"]["ProfileDelta"][] | null;
+            /**
+             * Event Tip
+             * @description Event tip
+             */
+            event_tip?: string | null;
+            /**
+             * Event Tags
+             * @description List of event tags
+             */
+            event_tags?: components["schemas"]["EventTag"][] | null;
+            /** Fact Ids */
+            fact_ids: string[];
         };
         /** QueriedEvents */
         QueriedEvents: {

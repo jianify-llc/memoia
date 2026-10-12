@@ -118,7 +118,7 @@ Luvel 用固定 Fact 回执确认批次/删除，不等待 Event ID；派生失�
 SDK 0.10.0 新增 `queryFacts`、`queryEvents`、`queryProfiles`，分别对应 `POST /api/users/{user_id}/facts/query`、`events/query`、`profiles/query`，均只需要 read scope。每类先应用自身归属和筛选，再从独立候选池做有界排序；不调用混合 search 后拆字段。旧 search/context/list 接口不变。公共参数为 query（可空）、ids、exclude_ids、limit（默认 10，最多 100）、max_token_size（默认 4000，最多 10000）；未支持的字段拒绝，预算只容纳完整条目及证据，最小空响应也放不下时返回 422。
 
 - Fact：source_ids、recorded_after/before（带时区时间）、event_after/before（日期）。返回 facts/SearchFact；历史 `occurred_at` 明确是支撑消息记录时间，发生日期在 evidence.event_time；不存在真实 Fact 创建时间列，不能以 Blob 创建时间冒充。
-- Event：fact_ids（任一有效关联）、created_after/before（数据库创建时间）、event_after/before（有效关联事实的已知发生日期范围重叠，未知不命中）。返回 events/EventRecord 加 score；叙事 time 字符串不伪装成可精确筛选的日期。
+- Event：fact_ids（任一有效关联）、created_after/before（数据库创建时间）、event_after/before（有效关联事实的已知发生日期范围重叠，未知不命中）。返回 events/EventRecord 加 score；SDK 0.10.1 用独立 QueriedEventData 保证返回当前有效 fact_ids／evidence（无关联则空列表），不改变原管理 EventData。叙事 time 字符串不伪装成可精确筛选的日期。
 - Profile：topic、sub_topic 精确匹配及 query/IDs。返回 profiles/SearchProfile，仅携带当前同项目、同用户的有效 Fact 引用。画像没有向量列，使用文本匹配；Fact/Event 并行文本与向量查询，沿用 8 秒 embedding 截止及临时故障词法降级。候选上限 500，不承诺穷尽全量历史。
 
 `GET /api/project/identity` 及 SDK `getProjectIdentity` 只返回鉴权确定的 project_id。Inspector 用它与已初始化用户生成缓存 key，不信任浏览器提供的项目归属。此轮只增加读取协议与出站 Prompt，不变更数据库、维护事务或写入语义；真实供应商／远端隔离验收仍独立。
