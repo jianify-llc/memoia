@@ -76,6 +76,8 @@ Fact 用 Standard（service_tier=default）；Loop 先 Flex，临时供应商失
 
 ## 默认画像目录与三类初始背景
 
+维护工具向模型声明与执行检查一致的读取范围：目录／变更页 1–200、搜索 1–20、精确读取最多 200 个 ID、查询最多 500 字符。超限仍失败，不静默放宽；诊断只记录工具名、数量及长度，不记录查询正文或 ID。Schema 声明不保证模型永不超限，真实模型失败须保留原操作证据。
+
 默认一级分类为 `user_profile`、`personal_background`、`work`、`education`、`interests_preferences`、`lifestyle`、`goals_values`、`relationships`。中英文使用相同英文标识，描述与画像正文按项目语言输出；详细边界由 `prompts/user_profile_topics.py` 的双语目录统一维护。二级分类仍由现有 Loop 创建和复用，不新增人物表或单例约束。
 
 `user_profile` 仅保存本人重要稳定背景和长期重点的简短概况，不拼接全部详细分类；`interests_preferences` 保存稳定兴趣和偏好，明确表达的长期交流偏好使用 `sub_topic=interaction_preferences`，不再作为独立一级分类，不保存一次性指示、短期情绪或助手猜测；`lifestyle` 保存持续日常习惯、作息和生活方式，不把一次经历推断成习惯。三类可以各有多条简短、非重复的 Profile，并保留有意义的二级分类。Loop 根据相关 Fact 增删／纠正／证据变化更新，优先查找并修改已有条目；所有画像均直接关联有效 Fact，不互相作为证据，也不为每次聊天重新生成全部概况。偏好是参考资料，调用方的显式设置与当前要求优先。

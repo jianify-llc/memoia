@@ -220,6 +220,12 @@ async def test_unified_runner_reads_stages_and_returns_only_after_final(transpor
         assert "Copy exact Fact ids" in definition["properties"]["fact_ids"]["description"]
     assert "project_id" not in tools["read_memory"]["properties"]
     assert "user_id" not in tools["read_memory"]["properties"]
+    for name, maximum in (("read_memory", 200), ("read_changes", 200), ("search_memory", 20)):
+        limit = tools[name]["properties"]["limit"]
+        assert limit["minimum"] == 1 and limit["maximum"] == maximum
+    assert tools["read_memory"]["properties"]["ids"]["anyOf"][0]["maxItems"] == 200
+    assert tools["read_memory"]["properties"]["query"]["anyOf"][0]["maxLength"] == 500
+    assert tools["search_memory"]["properties"]["query"]["maxLength"] == 500
     from xml.etree import ElementTree
     assert "deleted-fact" not in json.dumps(first["input"])
     assert json.loads(ElementTree.fromstring(first["input"][-1]["content"][0]["text"]).text)["change_count"] == 1

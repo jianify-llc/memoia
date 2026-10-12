@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, replace
-from typing import Literal, Protocol
+from typing import Annotated, Literal, Protocol
 
 from agents import (Agent, ModelSettings, OpenAIResponsesModel, RunConfig,
                     RunContextWrapper, Runner, function_tool, set_tracing_disabled)
@@ -39,6 +39,11 @@ COMPACT_THRESHOLD = 262144
 
 ReadCollection = Literal["facts", "profiles", "events"]
 ReadSet = dict[ReadCollection, dict[str, int | None]]
+# Advertise the same bounds enforced below, preserving the existing safe error codes.
+PageLimit = Annotated[int, Field(json_schema_extra={"minimum": 1, "maximum": MAX_PAGE_SIZE})]
+SearchLimit = Annotated[int, Field(json_schema_extra={"minimum": 1, "maximum": MAX_SEARCH_RESULTS})]
+ToolQuery = Annotated[str, Field(json_schema_extra={"maxLength": 500})]
+ReadIds = Annotated[list[str], Field(json_schema_extra={"maxItems": MAX_PAGE_SIZE})]
 
 
 class ProfileMutation(BaseModel):
@@ -412,17 +417,19 @@ def _maintenance_tools():
 
     @function_tool(failure_error_function=None)
     async def read_memory(ctx: RunContextWrapper[MaintenanceContext],
-                          collection: ReadCollection, ids: list[str] | None = None,
-                          cursor: str | None = None, query: str | None = None,
-                          limit: int = 100) -> dict:
+                          collection: ReadCollection, ids: ReadIds | None = None,
+                          cursor: str | None = None, query: ToolQuery | None = None,
+                          limit: PageLimit = 100) -> dict:
         """Read complete current-user entries. ids must be exact returned UUIDs, never names/labels.
 
         Use query for text/name matching; ids=null for directory selection. Follow next_cursor.
         Byte-sized pages may contain fewer than limit.
         """
         if not 1 <= limit <= MAX_PAGE_SIZE or (ids is not None and len(ids) > MAX_PAGE_SIZE):
+            LOG.warning("Maintenance bound rejected: tool=read_memory limit=%s id_count=%s", limit, len(ids or []))
             raise MaintenanceRunError("MAINTENANCE_READ_LIMIT")
         if query is not None and len(query) > 500:
+            LOG.warning("Maintenance bound rejected: tool=read_memory query_chars=%s", len(query))
             raise MaintenanceRunError("MAINTENANCE_READ_LIMIT")
         async with serial:
             await ctx.context.assert_active()
@@ -435,14 +442,15 @@ def _maintenance_tools():
             return data
 
     @function_tool(failure_error_function=None)
-    async def search_memory(ctx: RunContextWrapper[MaintenanceContext], query: str,
-                            limit: int = 20) -> dict:
+    async def search_memory(ctx: RunContextWrapper[MaintenanceContext], query: ToolQuery,
+                            limit: SearchLimit = 20) -> dict:
         """Search current-user facts by meaning and words, with related profiles/events.
 
         Refine query with actors, actions or causes. Use read_memory for exact IDs,
         paginated directories or text filters on profile/event fields.
         """
         if not query.strip() or len(query) > 500 or not 1 <= limit <= MAX_SEARCH_RESULTS:
+            LOG.warning("Maintenance bound rejected: tool=search_memory limit=%s query_chars=%s", limit, len(query))
             raise MaintenanceRunError("MAINTENANCE_READ_LIMIT")
         async with serial:
             await ctx.context.assert_active()
@@ -485,9 +493,10 @@ def _maintenance_tools():
 
     @function_tool(failure_error_function=None)
     async def read_changes(ctx: RunContextWrapper[MaintenanceContext],
-                           cursor: str | None = None, limit: int = 100) -> dict:
+                           cursor: str | None = None, limit: PageLimit = 100) -> dict:
         """Read fixed Fact changes with current facts (null means invalid/deleted); follow every next_cursor before finishing."""
         if not 1 <= limit <= MAX_PAGE_SIZE:
+            LOG.warning("Maintenance bound rejected: tool=read_changes limit=%s", limit)
             raise MaintenanceRunError("MAINTENANCE_READ_LIMIT")
         async with serial:
             await ctx.context.assert_active()
