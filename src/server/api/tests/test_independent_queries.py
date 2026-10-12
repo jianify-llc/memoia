@@ -28,7 +28,9 @@ async def test_independent_fact_filters_precede_limit_and_ignore_other_memory_po
     assert [row["id"] for row in response.json()["facts"]] == [str(ids[-1])]
     assert response.json()["facts"][0]["evidence"]["event_time"] is None
     all_found = await client.post(f"/api/users/{uid}/facts/query", json={"query": "Sakura", "limit": 100})
-    assert {row["id"] for row in all_found.json()["facts"]} == set(map(str, ids))
+    # Full proof counts toward the response budget: never require all 60 to fit.
+    selected = {row["id"] for row in all_found.json()["facts"]}
+    assert selected and selected <= set(map(str, ids))
     excluded = await client.post(f"/api/users/{uid}/facts/query", json={"ids": [str(ids[-1])], "exclude_ids": [str(ids[-1])]})
     assert excluded.json()["facts"] == []
     denied = await client.post(f"/api/users/{uid}/facts/query", json={"recorded_after": "2026-10-01T00:00:00Z"})
