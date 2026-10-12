@@ -1,4 +1,4 @@
-# Modified for Memoia: relocated package and GPT-6 Luna request compatibility.
+# Memoia one-shot Responses boundary; task/transaction recovery owns retries.
 import time
 from collections.abc import Awaitable, Callable
 from openai import APIError
@@ -7,35 +7,34 @@ from ..env import CONFIG, LOG
 
 
 async def openai_complete(
-    model, prompt, system_prompt=None, history_messages=[],
+    model, prompt, system_prompt=None,
     on_usage: Callable[..., Awaitable[None]] | None = None,
     cache_fixed_prompt: bool = False,
     **kwargs
 ) -> str:
     openai_async_client = get_openai_async_client_instance()
-    messages = []
+    inputs = []
     if cache_fixed_prompt and not system_prompt:
         raise ValueError("Explicit caching requires fixed instructions")
     if cache_fixed_prompt:
         LOG.info("Prompt cache contract: kind=fact_extraction enabled=%s", supports_prompt_cache_options(model))
-    if cache_fixed_prompt and supports_prompt_cache_options(model):
+    cache_enabled = cache_fixed_prompt and supports_prompt_cache_options(model)
+    if system_prompt:
         # One-shot extraction caches only instructions, never the unique source input.
-        messages.append({"role": "developer", "content": [{
-            "type": "text", "text": system_prompt,
-            "prompt_cache_breakpoint": {"mode": "explicit"},
-        }]})
+        fixed = {"type": "input_text", "text": system_prompt}
+        if cache_enabled:
+            fixed["prompt_cache_breakpoint"] = {"mode": "explicit"}
+        inputs.append({"role": "developer", "content": [fixed]})
+    if cache_enabled:
         kwargs["prompt_cache_options"] = {"mode": "explicit", "ttl": "30m"}
-    elif system_prompt:
-        messages.append({"role": "developer" if cache_fixed_prompt else "system", "content": system_prompt})
-    messages.extend(history_messages)
     # An extraction's source is reference material, not a fabricated current user.
-    messages.append({"role": "developer" if cache_fixed_prompt else "user", "content": prompt})
+    inputs.append({"role": "developer" if cache_fixed_prompt else "user",
+                   "content": [{"type": "input_text", "text": prompt}]})
 
     if model == "gpt-6-luna":
         # 正式调用默认使用完整推理预算；启动探针可显式指定独立 completion 上限。
-        kwargs.setdefault("reasoning_effort", CONFIG.llm_reasoning_effort)
-        kwargs.pop("max_tokens", None)
-        kwargs.setdefault("max_completion_tokens", 32768)
+        kwargs.setdefault("reasoning", {"effort": CONFIG.llm_reasoning_effort})
+        kwargs.setdefault("max_output_tokens", 32768)
         for name in ("temperature", "top_p", "top_logprobs", "logprobs"):
             kwargs.pop(name, None)
 
@@ -45,8 +44,8 @@ async def openai_complete(
             return
         def value(obj, name):
             return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
-        details = value(usage, "prompt_tokens_details")
-        await on_usage(value(usage, "prompt_tokens"), value(usage, "completion_tokens"),
+        details = value(usage, "input_tokens_details")
+        await on_usage(value(usage, "input_tokens"), value(usage, "output_tokens"),
                        (time.monotonic() - started) * 1000,
                        cached_tokens=value(details, "cached_tokens"),
                        cache_write_tokens=value(details, "cache_write_tokens"),
@@ -54,8 +53,8 @@ async def openai_complete(
                        requested_service_tier=kwargs.get("service_tier", "auto"))
 
     try:
-        response = await openai_async_client.chat.completions.create(
-            model=model, messages=messages, timeout=120, **kwargs
+        response = await openai_async_client.responses.create(
+            model=model, input=inputs, store=False, truncation="disabled", timeout=120, **kwargs
         )
     except APIError as error:
         await report_usage(get_error_usage(error))
@@ -63,16 +62,21 @@ async def openai_complete(
     usage = response.usage
     await report_usage(usage, actual_model=response.model,
                        service_tier=getattr(response, "service_tier", None))
-    if not response.choices:
-        raise ValueError("LLM returned no completion choices")
-    choice = response.choices[0]
-    if choice.message.refusal is not None:
-        raise ValueError("LLM refused the completion")
-    if choice.finish_reason != "stop":
-        raise ValueError(f"LLM completion did not finish: {choice.finish_reason}")
-    content = choice.message.content
-    # 协议完整的空文本由业务层判断；None 不代表合法的空摘要。
-    if not isinstance(content, str):
-        raise ValueError("LLM returned no text content")
-
-    return content
+    # Observe provider usage before protocol and business/schema validation.
+    if response.status != "completed" or response.error is not None:
+        raise ValueError("LLM response did not complete")
+    texts = []
+    for item in response.output:
+        if item.type == "reasoning":
+            continue
+        # One-shot callers have no tools. Never silently drop refusal/tool output.
+        if item.type != "message" or item.role != "assistant" or item.status != "completed":
+            raise ValueError("LLM returned unexpected output")
+        for part in item.content:
+            if part.type != "output_text" or not isinstance(part.text, str):
+                raise ValueError("LLM returned no valid text content")
+            texts.append(part.text)
+    if not texts:
+        raise ValueError("LLM returned no text output")
+    # Explicit empty text remains for business callers to validate, as before.
+    return "".join(texts)

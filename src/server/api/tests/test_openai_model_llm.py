@@ -22,47 +22,43 @@ def openai_transport(monkeypatch):
     state = {
         "requests": [],
         "status": 200,
-        "finish_reason": "stop",
+        "response_status": "completed",
         "content": "answer",
         "refusal": None,
-        "choices": True,
+        "output": True,
         "usage": True,
         "cache_details": None,
         "service_tier": "default",
     }
 
     def respond(request):
+        assert request.url.path == "/v1/responses"
         state["requests"].append(json.loads(request.content))
         if state["status"] != 200:
             return httpx.Response(
                 state["status"],
                 json={"error": {"message": "mock error", "type": "invalid_request_error"}},
             )
-        choice = {
-            "index": 0,
-            "finish_reason": state["finish_reason"],
-            "message": {
-                "role": "assistant",
-                "content": state["content"],
-                "refusal": state["refusal"],
-            },
-        }
+        content = ([{"type": "refusal", "refusal": state["refusal"]}] if state["refusal"] is not None else
+                   [{"type": "output_text", "text": state["content"], "annotations": []}])
         result = {
-            "id": "chatcmpl-test",
-            "object": "chat.completion",
-            "created": 0,
+            "id": "resp-test",
+            "object": "response",
+            "created_at": 0,
             "model": "gpt-6-luna",
+            "status": state["response_status"], "error": None, "incomplete_details": None,
             "service_tier": state["service_tier"],
-            "choices": [choice] if state["choices"] else [],
+            "output": [{"id": "msg-test", "type": "message", "status": "completed",
+                        "role": "assistant", "content": content}] if state["output"] else [],
         }
         if state["usage"]:
             result["usage"] = {
-                "prompt_tokens": 10,
-                "completion_tokens": 5,
+                "input_tokens": 10,
+                "output_tokens": 5,
                 "total_tokens": 15,
             }
             if state["cache_details"] is not None:
-                result["usage"]["prompt_tokens_details"] = state["cache_details"]
+                result["usage"]["input_tokens_details"] = state["cache_details"]
         return httpx.Response(200, json=result)
 
     client = AsyncOpenAI(
@@ -106,13 +102,13 @@ async def test_one_shot_explicit_cache_excludes_changing_source_input(openai_tra
         assert first == replay
         assert first["prompt_cache_options"] == second["prompt_cache_options"] == {
             "mode": "explicit", "ttl": "30m"}
-        assert first["messages"][0] == second["messages"][0] == {
-            "role": "developer", "content": [{"type": "text", "text": "fixed instructions",
+        assert first["input"][0] == second["input"][0] == {
+            "role": "developer", "content": [{"type": "input_text", "text": "fixed instructions",
                                                    "prompt_cache_breakpoint": {"mode": "explicit"}}]}
-        assert first["messages"][1] == {"role": "developer", "content": "private first source"}
-        assert second["messages"][1] == {"role": "developer", "content": "private second source"}
+        assert first["input"][1] == {"role": "developer", "content": [{"type": "input_text", "text": "private first source"}]}
+        assert second["input"][1] == {"role": "developer", "content": [{"type": "input_text", "text": "private second source"}]}
         assert "prompt_cache_key" not in first
-        assert json.dumps(first["messages"]).count("prompt_cache_breakpoint") == 1
+        assert json.dumps(first["input"]).count("prompt_cache_breakpoint") == 1
     finally:
         await client.close()
 
@@ -152,16 +148,16 @@ async def test_fixed_cache_respects_model_capability(openai_transport, model, su
     state, client = openai_transport
     try:
         await openai_complete(model, "changing input", system_prompt="fixed instructions",
-                              cache_fixed_prompt=True, reasoning_effort="high")
+                              cache_fixed_prompt=True, reasoning={"effort": "high"})
         body = state["requests"][0]
-        assert body["model"] == model and body["reasoning_effort"] == "high"
-        assert body["messages"][-1] == {"role": "developer", "content": "changing input"}
+        assert body["model"] == model and body["reasoning"] == {"effort": "high"}
+        assert body["input"][-1] == {"role": "developer", "content": [{"type": "input_text", "text": "changing input"}]}
         if supported:
             assert body["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
-            assert body["messages"][0]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
+            assert body["input"][0]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
         else:
             assert "prompt_cache_options" not in body
-            assert body["messages"][0] == {"role": "developer", "content": "fixed instructions"}
+            assert body["input"][0] == {"role": "developer", "content": [{"type": "input_text", "text": "fixed instructions"}]}
             assert "prompt_cache_breakpoint" not in json.dumps(body)
     finally:
         await client.close()
@@ -177,8 +173,8 @@ async def test_fact_client_does_not_hide_retries_and_observes_failed_usage(monke
         if failure == "timeout":
             raise httpx.ReadTimeout("synthetic timeout", request=request)
         return httpx.Response(503, json={"error": {"message": "synthetic failure"},
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5,
-                      "prompt_tokens_details": {"cached_tokens": 3, "cache_write_tokens": 2}}})
+            "usage": {"input_tokens": 10, "output_tokens": 5,
+                      "input_tokens_details": {"cached_tokens": 3, "cache_write_tokens": 2}}})
 
     def new_client(**kwargs):
         return AsyncOpenAI(**kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)))
@@ -335,30 +331,25 @@ async def test_missing_usage_is_unknown_and_does_not_debit(openai_transport, mon
 @pytest.mark.asyncio
 async def test_luna_uses_default_reasoning_and_total_budget(openai_transport):
     state, client = openai_transport
-    history = [{"role": "assistant", "content": "prior answer"}]
     try:
         result = await openai_complete(
             "gpt-6-luna",
             "input",
             system_prompt="system",
-            history_messages=history,
             temperature=0.2,
-            max_tokens=1024,
-            response_format={"type": "json_object"},
+            text={"format": {"type": "json_object"}},
         )
         assert result == "answer"
         body = state["requests"][0]
-        assert body["reasoning_effort"] == "high"
+        assert body["reasoning"] == {"effort": "high"}
         assert "temperature" not in body
-        assert body["max_completion_tokens"] == 32768
-        assert body["response_format"] == {"type": "json_object"}
-        assert body["messages"] == [
-            {"role": "system", "content": "system"},
-            *history,
-            {"role": "user", "content": "input"},
+        assert body["max_output_tokens"] == 32768
+        assert body["text"] == {"format": {"type": "json_object"}}
+        assert body["input"] == [
+            {"role": "developer", "content": [{"type": "input_text", "text": "system"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "input"}]},
         ]
         assert "max_tokens" not in body
-        assert history == [{"role": "assistant", "content": "prior answer"}]
     finally:
         await client.close()
 
@@ -376,8 +367,8 @@ async def test_luna_removes_all_unsupported_sampling_parameters(openai_transport
             top_logprobs=2,
         )
         body = state["requests"][0]
-        assert body["reasoning_effort"] == "high"
-        assert body["max_completion_tokens"] == 32768
+        assert body["reasoning"] == {"effort": "high"}
+        assert body["max_output_tokens"] == 32768
         assert not {
             "temperature", "top_p", "logprobs", "top_logprobs", "max_tokens"
         }.intersection(body)
@@ -387,23 +378,20 @@ async def test_luna_removes_all_unsupported_sampling_parameters(openai_transport
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "caller_options",
+    "effort",
     [
-        {"max_tokens": 16},
-        {"max_tokens": 1024},
-        {"reasoning_effort": "none", "max_tokens": 1024},
-        {"reasoning_effort": "max", "max_tokens": 1024},
+        "none", "low", "high", "max",
     ],
 )
-async def test_luna_default_budget_ignores_old_limits_and_preserves_reasoning(
-    openai_transport, caller_options
+async def test_default_output_budget_preserves_requested_reasoning(
+    openai_transport, effort
 ):
     state, client = openai_transport
     try:
-        await openai_complete("gpt-6-luna", "input", **caller_options)
+        await openai_complete("gpt-6-luna", "input", reasoning={"effort": effort})
         body = state["requests"][0]
-        assert body["reasoning_effort"] == caller_options.get("reasoning_effort", "high")
-        assert body["max_completion_tokens"] == 32768
+        assert body["reasoning"] == {"effort": effort}
+        assert body["max_output_tokens"] == 32768
         assert "max_tokens" not in body
     finally:
         await client.close()
@@ -415,11 +403,11 @@ async def test_explicit_completion_budget_is_preserved(openai_transport, budget)
     state, client = openai_transport
     try:
         await openai_complete(
-            "gpt-6-luna", "input", max_tokens=16, max_completion_tokens=budget
+            "gpt-6-luna", "input", max_output_tokens=budget
         )
         body = state["requests"][0]
-        assert body["max_completion_tokens"] == budget
-        assert body["reasoning_effort"] == "high"
+        assert body["max_output_tokens"] == budget
+        assert body["reasoning"] == {"effort": "high"}
         assert "max_tokens" not in body
     finally:
         await client.close()
@@ -476,7 +464,7 @@ async def test_complete_structured_empty_facts_flush_succeeds_without_event(open
         assert inserted.json()["result"]["event_ids"] == []
         assert (await client.get(f"/api/users/{uid}/events")).json()["events"] == []
         assert len(state["requests"]) == 1
-        assert state["requests"][0]["response_format"]["json_schema"]["strict"]
+        assert state["requests"][0]["text"]["format"]["strict"]
     finally:
         (await client.delete(f"/api/users/{uid}"))
         (await client.aclose())
@@ -487,14 +475,14 @@ async def test_complete_structured_empty_facts_flush_succeeds_without_event(open
 @pytest.mark.parametrize(
     "changes",
     [
-        {"finish_reason": "length", "content": '{"facts": []}'},
-        {"finish_reason": "content_filter"},
-        {"finish_reason": "unknown_reason"},
-        {"finish_reason": None},
-        {"finish_reason": "tool_calls"},
+        {"response_status": "incomplete", "content": '{"facts": []}'},
+        {"response_status": "failed"},
+        {"response_status": "unknown_status"},
+        {"response_status": None},
+        {"response_status": "in_progress"},
         {"content": None},
         {"refusal": "refused"},
-        {"choices": False},
+        {"output": False},
         {"status": 400},
     ],
 )
@@ -521,14 +509,14 @@ async def test_startup_sanity_uses_dedicated_completion_budget(openai_transport,
         await llms.llm_sanity_check()
         await asyncio.sleep(0)
         body = state["requests"][0]
-        assert body["reasoning_effort"] == "high"
-        assert body["max_completion_tokens"] == 4096
+        assert body["reasoning"] == {"effort": "high"}
+        assert body["max_output_tokens"] == 4096
         assert "temperature" not in body and "max_tokens" not in body
-        assert "OK" in body["messages"][-1]["content"]
+        assert "OK" in body["input"][-1]["content"][0]["text"]
         # 探针预算只属于当前请求，不污染后续正式业务调用。
         await llms.llm_complete("__root__", "business input")
         await asyncio.sleep(0)
-        assert state["requests"][1]["max_completion_tokens"] == 32768
+        assert state["requests"][1]["max_output_tokens"] == 32768
     finally:
         await client.close()
 
@@ -536,7 +524,7 @@ async def test_startup_sanity_uses_dedicated_completion_budget(openai_transport,
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "changes",
-    [{"content": ""}, {"content": "unexpected"}, {"content": "OK", "finish_reason": "length"}],
+    [{"content": ""}, {"content": "unexpected"}, {"content": "OK", "response_status": "incomplete"}],
 )
 async def test_startup_probe_does_not_accept_empty_wrong_or_truncated_output(
     openai_transport, monkeypatch, changes
@@ -568,7 +556,7 @@ async def test_luna_service_default_is_used_only_without_explicit_effort(openai_
     monkeypatch.setattr(CONFIG, "llm_reasoning_effort", "low")
     try:
         await openai_complete("gpt-6-luna", "default")
-        await openai_complete("gpt-6-luna", "project override", reasoning_effort="high")
-        assert [body["reasoning_effort"] for body in state["requests"]] == ["low", "high"]
+        await openai_complete("gpt-6-luna", "project override", reasoning={"effort": "high"})
+        assert [body["reasoning"]["effort"] for body in state["requests"]] == ["low", "high"]
     finally:
         await client.close()

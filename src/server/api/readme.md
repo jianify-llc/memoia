@@ -128,21 +128,21 @@ Key configuration options in `config.yaml`:
 
 ### GPT-6 Luna compatibility
 
-The OpenAI Chat Completions adapter recognizes the exact model ID `gpt-6-luna`.
-It defaults to `reasoning_effort=high` and `max_completion_tokens=32768`
+The one-shot OpenAI Responses adapter recognizes the exact model ID `gpt-6-luna`.
+It defaults to `reasoning.effort=high` and `max_output_tokens=32768`
 for business calls through the configured best/thinking model. An explicit native
-`max_completion_tokens` overrides that default for the current request only.
+`max_output_tokens` overrides that default for the current request only.
 Startup uses a separate 4096-token completion budget and asks for exactly `OK`;
 empty, unexpected or incomplete probe results prevent startup. This shared request
-boundary ignores historical `max_tokens` limits such as 16/1024; it removes `max_tokens`,
-`temperature`, `top_p`, `logprobs` and `top_logprobs`. Keeping the old tiny limit
+boundary no longer accepts historical Chat Completions parameters or history;
+it removes Luna's unsupported `temperature`, `top_p`, `logprobs` and `top_logprobs`. Keeping a tiny output limit
 with reasoning enabled can truncate the completion before usable text is produced.
 
 Projects can independently override `llm_model` and `reasoning_effort` in their
 configuration YAML; omitted fields inherit service defaults `gpt-6-luna / high`.
 This applies to Fact extraction and the unified Profile/Event AgentLoop. The maintenance
-tool loop uses Responses with `store=false`, since Luna Chat Completions only supports
-tool calling at `none`; it never silently lowers a project's reasoning setting.
+tool loop and one-shot calls both use Responses with `store=false`; neither silently
+lowers a project's reasoning setting. Embeddings keep their separate API.
 The optional Inspector Playground has its own runtime model configuration.
 
 ### Prompt caching and numerical usage
@@ -151,7 +151,7 @@ The two business generation paths use different cache policies, without an appli
 
 The [company Prompt/cache contract](https://github.com/jianify-llc/Jianify-LLC/blob/main/docs/engineering/llm-prompt-cache.md) owns the shared rules. Memoia maps its two paths as follows:
 
-- Fact extraction (Chat Completions): fixed developer instructions followed by escaped XML source material in a separate developer message, not a fabricated User turn. Its only explicit breakpoint is on fixed instructions; no cache key. Project/model/reasoning configuration remains authoritative.
+- Fact extraction (Responses): fixed developer instructions followed by escaped XML source material in a separate developer message, not a fabricated User turn. Its only explicit breakpoint is on fixed instructions; explicit mode, no cache key or top-level instructions. Strict output schema uses native `text.format`, then existing Pydantic business validation. Project/model/reasoning configuration remains authoritative.
 - Unified AgentLoop (Responses through Agents SDK): fixed behavior remains in top-level instructions. The first Developer has two `input_text` blocks: trusted fixed XML-format definitions (breakpoint A), then escaped initial project data (breakpoint B). Batch XML follows separately. Dynamic XML values are reference data; the fixed explanation is trusted. Implicit mode keeps native tool/model history append-only until compaction. The key is SHA-256 of compact UTF-8 JSON `[project_id,user_id]`, never a batch/time value. The pinned SDK forwards it through its formal `extra_args` extension. No remote conversations or external tracing.
 - Startup completion probes are classified separately; embeddings are not generation calls. Inspector's optional Playground is a separate caller and is not configured by these policies.
 
@@ -160,6 +160,8 @@ Prefixes shorter than the provider's minimum cacheable length may not be cached;
 New cache options and breakpoints require both a known GPT-5.6/GPT-6/GPT-6.1 model (including dated names) and endpoint support. Native HTTPS `api.openai.com/v1` enables the contract automatically; custom gateways require strict boolean `llm_prompt_cache_options: true`. `false` disables it everywhere. Unknown/older models never opt in, even when declared true. Undeclared gateways use compatibility mode: no options, breakpoint or key is sent, and their implicit caching defaults cannot be claimed disabled. Safe capability diagnostics report only the path and enabled boolean; no endpoint, key or material is logged. Do not change a deployed configuration without separate approval.
 
 Both generation clients disable SDK retries: Fact failures return to Operation recovery; AgentLoop alone owns its bounded Flex-to-Standard fallback. Reported failed usage is observed, while absent usage stays unknown. Shared model initialization suppresses OpenAI transport request-body DEBUG logs independently of AgentLoop imports. The retired generic JSON parser is removed; Fact extraction still uses its strict Pydantic contract and AgentLoop its validated tools.
+
+One-shot Responses observes actual input/output/cache usage before output and schema validation. Refused, failed, incomplete or missing text output is not success; valid JSON with no facts remains legal. Startup keeps its isolated budget and exact-OK check. One-shot requests use `truncation=disabled` and the existing 120-second timeout; cancellation propagates without replay. The unused legacy history branch and Chat Completions production endpoint are removed, not retained as a fallback. Configured gateways must support Responses independently of the optional new cache fields. See [official migration guidance](https://developers.openai.com/api/docs/guides/migrate-to-responses).
 
 Numerical logs and existing Prometheus counters distinguish `kind=fact_extraction`, `agent_loop`, `startup_probe` and other completions, with model, requested tier and provider-reported actual tier (`unknown` if absent). `llm_cache_read_tokens_total` and `llm_cache_write_tokens_total` use raw `cached_tokens`/`cache_write_tokens` before SDK usage normalization. Missing, invalid or inconsistent cache counters increment `llm_cache_usage_unknown_total`; they are not substituted with zero. Unknown-cache responses are excluded from both cache-token counters, so aggregate cache ratios are incomplete when this counter is nonzero. Existing input/output quota accounting is unchanged. Failed Loop responses and tier-switch attempts are included; unreported usage remains unknown. Telemetry failure does not reject a valid completion or replay a model call. No source text, tool payloads or model output are logged.
 

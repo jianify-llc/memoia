@@ -16,20 +16,21 @@ async def llm_complete(
     project_id,
     prompt,
     system_prompt=None,
-    history_messages=[],
     model=None,
-    max_tokens=1024,
+    max_output_tokens=None,
     usage_kind="completion",
     **kwargs,
 ) -> Promise[str]:
     use_model = model or CONFIG.best_llm_model
+    if max_output_tokens is not None:
+        kwargs["max_output_tokens"] = max_output_tokens
+    elif use_model != "gpt-6-luna":
+        kwargs.setdefault("max_output_tokens", 1024)
     try:
         results = await openai_complete(
             use_model,
             prompt,
             system_prompt=system_prompt,
-            history_messages=history_messages,
-            max_tokens=max_tokens,
             on_usage=partial(record_completion_usage, project_id, kind=usage_kind),
             **kwargs,
         )
@@ -89,7 +90,7 @@ async def llm_sanity_check():
     r = await llm_complete(
         DEFAULT_PROJECT_ID,
         "Reply with exactly OK, without punctuation or any other text.",
-        max_completion_tokens=4096,
+        max_output_tokens=4096,
         usage_kind="startup_probe",
     )
     if not r.ok():

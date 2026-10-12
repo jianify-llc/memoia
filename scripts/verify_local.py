@@ -17,7 +17,7 @@ from test_push import ROOT, local_env, run
 
 # 这些测试只使用纯计算、MockTransport 和内存 mock；不得靠不存在的标签筛选集成测试。
 QUICK_TESTS = (
-    "test_llm_logging.py", "test_embedding_validation.py", "test_source_quality.py",
+    "test_llm_logging.py", "test_embedding_validation.py", "test_source_quality.py", "test_responses_contract.py",
     "test_maintenance_agent.py", "test_maintenance_worker.py", "test_project_model_config.py",
     *["test_redis_boundaries.py::" + name for name in (
         "test_shared_client_lifecycle_and_explicit_initialization",
@@ -44,7 +44,7 @@ QUICK_TESTS = (
     )],
     *["test_openai_model_llm.py::" + name for name in (
         "test_luna_uses_default_reasoning_and_total_budget", "test_luna_removes_all_unsupported_sampling_parameters",
-        "test_luna_default_budget_ignores_old_limits_and_preserves_reasoning", "test_explicit_completion_budget_is_preserved",
+        "test_default_output_budget_preserves_requested_reasoning", "test_explicit_completion_budget_is_preserved",
         "test_luna_service_default_is_used_only_without_explicit_effort",
         "test_completed_empty_text_is_returned_unchanged",
         "test_fixed_cache_respects_model_capability",

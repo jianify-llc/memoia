@@ -91,6 +91,9 @@ async def run_quality(settings, *, cases=CASES, client=None):
         with ExitStack() as stack:
             stack.enter_context(patch.object(source, "EXTRACT_SYSTEM", system))
             stack.enter_context(patch.object(CONFIG, "best_llm_model", settings["model"]))
+            # Capability detection must use this probe's actual endpoint, not the
+            # deliberately unreachable service URL used for compute-only isolation.
+            stack.enter_context(patch.object(CONFIG, "llm_base_url", settings["base_url"]))
             stack.enter_context(patch.object(source, "record_completion_usage", no_accounting))
             stack.enter_context(patch("memoia_server.llms.openai_model_llm.get_openai_async_client_instance", return_value=client))
             stack.enter_context(patch.object(source, "Session", side_effect=RuntimeError("Compute-only SQL is forbidden")))

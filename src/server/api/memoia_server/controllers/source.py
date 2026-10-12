@@ -236,14 +236,12 @@ async def _structured(model, prompt, system, *, project_id=DEFAULT_PROJECT_ID,
     try:
         raw = await openai_complete(
             llm_model or CONFIG.best_llm_model, prompt, system_prompt=system,
-            reasoning_effort=reasoning_effort or CONFIG.llm_reasoning_effort,
+            reasoning={"effort": reasoning_effort or CONFIG.llm_reasoning_effort},
             service_tier="default",
             cache_fixed_prompt=True,
             on_usage=partial(record_completion_usage, project_id, kind="fact_extraction"),
-            max_completion_tokens=CONFIG.source_output_reserve_tokens,
-            response_format={"type": "json_schema", "json_schema": {
-                "name": model.__name__, "strict": True, "schema": schema,
-            }},
+            max_output_tokens=CONFIG.source_output_reserve_tokens,
+            text={"format": {"type": "json_schema", "name": model.__name__, "strict": True, "schema": schema}},
         )
         return model.model_validate_json(raw)
     except (BadRequestError, AuthenticationError, PermissionDeniedError, NotFoundError) as error:

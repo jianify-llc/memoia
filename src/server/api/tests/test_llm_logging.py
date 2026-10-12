@@ -38,9 +38,11 @@ def test_standalone_api_debug_never_logs_model_body_before_loop_import(tmp_path)
         def respond(request):
             requests.append(request)
             assert marker.encode() in request.content
-            return httpx.Response(200, json={"id": "chatcmpl-local", "object": "chat.completion",
-                "created": 0, "model": "gpt-6-luna", "choices": [{"index": 0, "finish_reason": "stop",
-                "message": {"role": "assistant", "content": marker}}]})
+            assert request.url.path == "/v1/responses"
+            return httpx.Response(200, json={"id": "resp-local", "object": "response",
+                "created_at": 0, "model": "gpt-6-luna", "status": "completed", "error": None,
+                "output": [{"id": "msg-local", "type": "message", "status": "completed",
+                    "role": "assistant", "content": [{"type": "output_text", "text": marker, "annotations": []}]}]})
         async def run():
             client = AsyncOpenAI(api_key="fixture-only", base_url="https://example.invalid/v1",
                 max_retries=0, http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)))

@@ -44,10 +44,12 @@ def model_transport(contents):
     bodies = []
 
     def respond(request):
+        assert request.url.path == "/v1/responses"
         bodies.append(json.loads(request.content))
-        return httpx.Response(200, json={"id": "quality-completion", "object": "chat.completion", "created": 0,
-            "model": "gpt-6-luna", "choices": [{"index": 0, "finish_reason": "stop", "message": {
-                "role": "assistant", "content": contents[len(bodies) - 1], "refusal": None}}]})
+        return httpx.Response(200, json={"id": "resp-quality", "object": "response", "created_at": 0,
+            "model": "gpt-6-luna", "status": "completed", "error": None,
+            "output": [{"id": "msg-quality", "type": "message", "status": "completed", "role": "assistant",
+                        "content": [{"type": "output_text", "text": contents[len(bodies) - 1], "annotations": []}]}]})
 
     client = AsyncOpenAI(api_key=SETTINGS["api_key"], base_url=SETTINGS["base_url"], max_retries=0,
                          http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)))
@@ -92,8 +94,8 @@ async def test_fact_extraction_uses_project_model_and_reasoning_on_wire(monkeypa
             rules={"language": "en", "event_tag_definitions": [],
                    "llm_model": model, "reasoning_effort": effort})
         assert result.facts == [] and len(bodies) == 1
-        assert bodies[0]["model"] == model and bodies[0]["reasoning_effort"] == effort
-        assert set(source_material(bodies[0]["messages"][1]["content"])["configuration"]) == {
+        assert bodies[0]["model"] == model and bodies[0]["reasoning"] == {"effort": effort}
+        assert set(source_material(bodies[0]["input"][1]["content"][0]["text"])["configuration"]) == {
             "language"}
     finally:
         await client.close()
@@ -114,18 +116,18 @@ async def test_actual_extract_preserves_full_roles_ids_times_and_joint_support(m
         result = await source.extract_source(request, rules=rules)
         wire = bodies[0]
         assert wire["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
-        assert wire["messages"][0] == {"role": "developer", "content": [{
-            "type": "text", "text": source.EXTRACT_SYSTEM,
+        assert wire["input"][0] == {"role": "developer", "content": [{
+            "type": "input_text", "text": source.EXTRACT_SYSTEM,
             "prompt_cache_breakpoint": {"mode": "explicit"}}]}
-        assert wire["messages"][1]["role"] == "developer"
+        assert wire["input"][1]["role"] == "developer"
         assert "prompt_cache_key" not in wire
-        assert source_material(wire["messages"][1]["content"]) == {
+        assert source_material(wire["input"][1]["content"][0]["text"]) == {
             "configuration": {"language": "en"},
             "related_facts": [],
             "messages": [{**message.model_dump(mode="json"), "local_recorded_date": None}
                          for message in request.messages]}
-        assert wire["response_format"]["json_schema"]["schema"] == source.Extraction.model_json_schema()
-        assert wire["response_format"]["json_schema"]["strict"] is True
+        assert wire["text"]["format"]["schema"] == source.Extraction.model_json_schema()
+        assert wire["text"]["format"]["strict"] is True
         assert result.facts[0]["support_groups"] == [["u-preference", "a-option"]]
         assert result.facts[0]["occurred_at"] == request.messages[1].occurred_at
         assert result.facts[0]["event_time"] is None
@@ -161,9 +163,9 @@ async def test_compute_only_allows_empty_without_retry_and_no_db_redis_or_accoun
         assert report["passed"] is True and report["cases"][0]["facts"] == []
         assert len(bodies) == 1 and original_accounting.await_count == 0
         assert source.record_completion_usage is original_accounting
-        assert bodies[0]["model"] == "gpt-6-luna" and bodies[0]["reasoning_effort"] == "high"
+        assert bodies[0]["model"] == "gpt-6-luna" and bodies[0]["reasoning"] == {"effort": "high"}
         assert bodies[0]["service_tier"] == "default"
-        assert bodies[0]["max_completion_tokens"] == CONFIG.source_output_reserve_tokens
+        assert bodies[0]["max_output_tokens"] == CONFIG.source_output_reserve_tokens
     finally:
         await client.close()
 
@@ -188,7 +190,7 @@ async def test_past_relationship_empty_extraction_is_a_quality_failure_without_r
         assert report["passed"] is False and "error" not in report["cases"][0]
         assert report["cases"][0]["checks"]["expected_concepts"] is False
         assert len(bodies) == 1
-        messages = source_material(bodies[0]["messages"][1]["content"])["messages"]
+        messages = source_material(bodies[0]["input"][1]["content"][0]["text"])["messages"]
         assert messages[0]["content"] == case.messages[0][2] and messages[0]["message_id"] == "M3"
     finally:
         await client.close()
@@ -249,10 +251,10 @@ async def test_baseline_override_restores_single_prompt_truth_and_strict_evidenc
     try:
         report = await run_quality(read_settings({**SETTINGS, "extract_system": "public baseline system"}), cases=(case,), client=client)
         assert report["passed"] and source.EXTRACT_SYSTEM == original
-        assert bodies[0]["messages"][0] == {"role": "developer", "content": [{
-            "type": "text", "text": "public baseline system",
-            "prompt_cache_breakpoint": {"mode": "explicit"}}]}
-        configuration = source_material(bodies[0]["messages"][1]["content"])["configuration"]
+        assert bodies[0]["input"][0] == {"role": "developer", "content": [{
+            "type": "input_text", "text": "public baseline system"}]}
+        assert "prompt_cache_options" not in bodies[0]
+        configuration = source_material(bodies[0]["input"][1]["content"][0]["text"])["configuration"]
         assert set(configuration) == {"language"}
     finally:
         await client.close()
@@ -274,9 +276,9 @@ async def test_extraction_preserves_out_of_profile_evidence_without_duplicate_cl
     try:
         extracted = await source.extract_source(request_body(case.messages), rules=rules)
         assert len(extracted.facts) == 1 and extracted.facts[0]["support_groups"] == [["u-outside"]]
-        extracted_configuration = source_material(bodies[0]["messages"][1]["content"])["configuration"]
+        extracted_configuration = source_material(bodies[0]["input"][1]["content"][0]["text"])["configuration"]
         assert extracted_configuration == {"language": "en"}
-        assert len(bodies) == 1 and "event_tags" not in bodies[0]["response_format"]["json_schema"]["schema"]["properties"]
+        assert len(bodies) == 1 and "event_tags" not in bodies[0]["text"]["format"]["schema"]["properties"]
         assert rules["strict_mode"] is True and rules["event_theme_requirement"] == "Employment only"
     finally:
         await client.close()
