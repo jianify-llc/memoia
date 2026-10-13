@@ -2,7 +2,7 @@
 import asyncio
 from uuid import UUID
 from sqlalchemy import select, func, literal_column, or_, exists, and_
-from ..connectors import Session
+from ..connectors import Session, run_sql
 from ..env import CONFIG
 from ..models.database import UserEvent, UserProfile
 from ..models.source import memory_facts as facts, memory_blobs as blobs, memory_event_facts as edges, SearchFact, SearchProfile
@@ -35,7 +35,7 @@ async def _rank(statement, identifier, content, timestamp, embedding_column, pro
         with Session() as session:
             return list(session.scalars(query))
     if body.query is None:
-        ids = await asyncio.to_thread(read_ids, statement.order_by(timestamp.desc(), identifier).limit(candidates))
+        ids = await run_sql(read_ids, statement.order_by(timestamp.desc(), identifier).limit(candidates))
         return [(ident, 0.0) for ident in ids]
     vector = func.to_tsvector(literal_column("'simple'"), content)
     terms = func.websearch_to_tsquery(literal_column("'simple'"), body.query)
@@ -60,11 +60,11 @@ async def _rank(statement, identifier, content, timestamp, embedding_column, pro
             raise SourceError("query_configuration", "Query provider configuration rejected", 422)
         return None
 
-    lexical_ids, query_vector = await asyncio.gather(asyncio.to_thread(read_lexical), read_vector())
+    lexical_ids, query_vector = await asyncio.gather(run_sql(read_lexical), read_vector())
     semantic = []
     if query_vector is not None:
         similarity = 1 - embedding_column.cosine_distance(query_vector)
-        semantic = await asyncio.to_thread(read_ids, statement.where(embedding_column.isnot(None), similarity > .2)
+        semantic = await run_sql(read_ids, statement.where(embedding_column.isnot(None), similarity > .2)
                 .order_by(similarity.desc(), identifier).limit(candidates))
     scores = {}
     for ranking in [lexical_ids, semantic]:
@@ -89,7 +89,7 @@ def _complete_response(model, field, candidates, body):
 
 async def query_facts(user_id, project_id, body):
     pool = select(facts.c.id).join(blobs, facts.c.blob_id == blobs.c.id).where(facts.c.user_id == user_id,
-        facts.c.project_id == project_id, facts.c.active, *_identity(facts.c.id, body), *_period(facts.c.event_time, body))
+        facts.c.project_id == project_id, *_identity(facts.c.id, body), *_period(facts.c.event_time, body))
     if body.source_ids:
         pool = pool.where(blobs.c.source_id.in_(body.source_ids))
     if body.recorded_after is not None:
@@ -98,15 +98,21 @@ async def query_facts(user_id, project_id, body):
         pool = pool.where(facts.c.occurred_at <= body.recorded_before)
     ranking = await _rank(pool, facts.c.id, func.coalesce(facts.c.search_text, facts.c.content),
                           facts.c.occurred_at, facts.c.embedding, project_id, body)
-    with Session() as session:
-        rows = {row["id"]: row for row in session.execute(select(facts, blobs.c.source_id)
-            .join(blobs, facts.c.blob_id == blobs.c.id).where(facts.c.id.in_(pool.where(facts.c.id.in_([ident for ident, _ in ranking]))),
-                facts.c.user_id == user_id, facts.c.project_id == project_id, facts.c.active)).mappings()}
-        evidence = facts_evidence(session, rows.values())
-        candidates = [SearchFact(id=ident, content=rows[ident]["content"], source_id=rows[ident]["source_id"],
-            blob_id=rows[ident]["blob_id"], score=score, occurred_at=rows[ident]["occurred_at"], evidence=evidence[ident])
-            for ident, score in ranking if ident in rows]
-    return _complete_response(QueriedFacts, "facts", candidates, body)
+    def read():
+        with Session() as session:
+            def candidates():
+                for start in range(0, len(ranking), 20):
+                    page = ranking[start:start + 20]
+                    rows = {row["id"]: row for row in session.execute(select(facts, blobs.c.source_id)
+                        .join(blobs, facts.c.blob_id == blobs.c.id).where(facts.c.id.in_(pool.where(facts.c.id.in_([ident for ident, _ in page]))),
+                            facts.c.user_id == user_id, facts.c.project_id == project_id)).mappings()}
+                    evidence = facts_evidence(session, rows.values())
+                    for ident, score in page:
+                        if ident in rows:
+                            yield SearchFact(id=ident, content=rows[ident]["content"], source_id=rows[ident]["source_id"],
+                                blob_id=rows[ident]["blob_id"], score=score, occurred_at=rows[ident]["occurred_at"], evidence=evidence[ident])
+            return _complete_response(QueriedFacts, "facts", candidates(), body)
+    return await run_sql(read)
 
 
 async def query_events(user_id, project_id, body):
@@ -120,7 +126,7 @@ async def query_events(user_id, project_id, body):
         related = select(edges.c.fact_id).join(facts, and_(edges.c.fact_id == facts.c.id,
             edges.c.user_id == facts.c.user_id, edges.c.project_id == facts.c.project_id)).where(
             edges.c.event_id == UserEvent.id, edges.c.user_id == user_id, edges.c.project_id == project_id,
-            facts.c.active, *_period(facts.c.event_time, body))
+            *_period(facts.c.event_time, body))
         if body.fact_ids:
             related = related.where(facts.c.id.in_(body.fact_ids))
         pool = pool.where(exists(related))
@@ -144,7 +150,7 @@ async def query_events(user_id, project_id, body):
                             yield QueriedEvent(id=ident, score=score, created_at=row.created_at,
                                 updated_at=row.updated_at, event_data=views[ident])
             return _complete_response(QueriedEvents, "events", candidates(), body)
-    return await asyncio.to_thread(read)
+    return await run_sql(read)
 
 
 async def query_profiles(user_id, project_id, body):
@@ -174,7 +180,7 @@ async def query_profiles(user_id, project_id, body):
                                 continue
                     all_refs = set().union(*refs.values())
                     valid = dict(session.execute(select(facts.c.id, blobs.c.source_id).join(blobs, facts.c.blob_id == blobs.c.id)
-                        .where(facts.c.id.in_(all_refs), facts.c.active, facts.c.user_id == user_id,
+                        .where(facts.c.id.in_(all_refs), facts.c.user_id == user_id,
                                facts.c.project_id == project_id)).all()) if all_refs else {}
                     for ident, score in page:
                         if ident not in rows:
@@ -187,4 +193,4 @@ async def query_profiles(user_id, project_id, body):
                             source_ids=sorted({valid[fid] for fid in fact_ids}), score=score,
                             created_at=row.created_at, updated_at=row.updated_at)
             return _complete_response(QueriedProfiles, "profiles", candidates(), body)
-    return await asyncio.to_thread(read)
+    return await run_sql(read)

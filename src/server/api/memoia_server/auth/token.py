@@ -2,7 +2,6 @@
 from hashlib import sha256
 from ..models.utils import Promise
 from ..models.response import CODE
-from ..controllers import project
 
 
 def parse_project_id(secret_key: str) -> Promise[str]:
@@ -15,17 +14,21 @@ def parse_project_id(secret_key: str) -> Promise[str]:
     return Promise.resolve(project_id)
 
 
-async def check_project_secret(project_id: str, secret_key: str) -> Promise[bool]:
+def authenticate_legacy_token(secret_key: str) -> Promise[str]:
     from hmac import compare_digest
-    p = await project.get_project_secret(project_id)
-    if not p.ok():
-        return Promise.reject(CODE.UNAUTHORIZED, "Project unavailable")
-    return Promise.resolve(compare_digest(p.data(), secret_key))
-
-
-async def get_project_status(project_id: str) -> Promise[str]:
-    # Revocation and suspension must affect the very next request.
-    return await project.get_project_status(project_id)
+    from sqlalchemy import select
+    from ..connectors import Session
+    from ..models.database import Project
+    identity = parse_project_id(secret_key)
+    if not identity.ok():
+        return identity
+    with Session() as session:
+        # Secret and suspension are checked in one fresh read, without an auth cache.
+        row = session.execute(select(Project.project_secret, Project.status).where(
+            Project.project_id == identity.data())).one_or_none()
+        if row is None or row.status == "suspended" or not compare_digest(row.project_secret, secret_key):
+            return Promise.reject(CODE.UNAUTHORIZED, "Project unavailable")
+        return identity
 
 
 def authenticate_scoped_key(token: str):

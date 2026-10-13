@@ -1,5 +1,6 @@
 """Typed HTTP boundary; no database access is required to export OpenAPI."""
 from uuid import UUID
+from ..connectors import run_sql
 
 from fastapi import APIRouter, Request, Query, HTTPException, Response
 from ..models.management import SearchInput
@@ -63,7 +64,7 @@ def translate(error):
 async def forget_user(user_id: UUID, request: Request):
     from ..controllers import source
     try:
-        return source.forget_user(user_id, project_id(request))
+        return await run_sql(source.forget_user, user_id, project_id(request))
     except source.SourceError as error:
         translate(error)
 
@@ -84,7 +85,7 @@ async def import_source(user_id: UUID, body: ImportSource, request: Request, res
 async def get_operation_by_key(user_id: UUID, idempotency_key: str, request: Request):
     from ..controllers import source
     try:
-        return source.get_operation(user_id, project_id(request), key=idempotency_key)
+        return await run_sql(source.get_operation, user_id, project_id(request), key=idempotency_key)
     except source.SourceError as error:
         translate(error)
 
@@ -95,18 +96,21 @@ async def list_operations(user_id: UUID, request: Request, limit: int = Query(50
     from ..connectors import Session
     from ..controllers.source import _operation
     from ..models.source import memory_operations as operations
-    with Session() as session:
-        rows = session.execute(select(operations).where(operations.c.user_id == user_id,
-             operations.c.project_id == project_id(request)).order_by(operations.c.created_at.desc(), operations.c.id)
-             .limit(limit).offset(offset)).mappings()
-        return Operations(operations=[_operation(row) for row in rows])
+    pid = project_id(request)
+    def read():
+        with Session() as session:
+            rows = session.execute(select(operations).where(operations.c.user_id == user_id,
+                 operations.c.project_id == pid).order_by(operations.c.created_at.desc(), operations.c.id)
+                 .limit(limit).offset(offset)).mappings()
+            return Operations(operations=[_operation(row) for row in rows])
+    return await run_sql(read)
 
 
 @router.get("/users/{user_id}/operations/{operation_id}", response_model=Operation, operation_id="getOperation")
 async def get_operation(user_id: UUID, operation_id: UUID, request: Request):
     from ..controllers import source
     try:
-        return source.get_operation(user_id, project_id(request), operation_id=operation_id)
+        return await run_sql(source.get_operation, user_id, project_id(request), operation_id=operation_id)
     except source.SourceError as error:
         translate(error)
 
@@ -114,7 +118,7 @@ async def get_operation(user_id: UUID, operation_id: UUID, request: Request):
 @router.get("/users/{user_id}/sources", response_model=Sources, operation_id="listSources")
 async def list_sources(user_id: UUID, request: Request, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
     from ..controllers import source
-    return Sources(sources=source.list_sources(user_id, project_id(request), limit, offset))
+    return Sources(sources=await run_sql(source.list_sources, user_id, project_id(request), limit, offset))
 
 
 @router.post("/users/{user_id}/operations/{operation_id}/retry", response_model=Operation, operation_id="retryOperation")
@@ -134,7 +138,7 @@ async def get_maintenance(user_id: UUID, request: Request):
     from ..controllers.maintenance import get_status
     from ..controllers.source import SourceError
     try:
-        return get_status(user_id, project_id(request))
+        return await run_sql(get_status, user_id, project_id(request))
     except SourceError as error:
         translate(error)
 
@@ -144,7 +148,7 @@ async def flush_user(user_id: UUID, body: FlushInput, request: Request, response
     from ..controllers.maintenance import flush
     from ..controllers.source import SourceError
     try:
-        result = flush(user_id, project_id(request), body.idempotency_key)
+        result = await run_sql(flush, user_id, project_id(request), body.idempotency_key)
         if result.status == "processing":
             response.status_code = 202
         return result
@@ -156,7 +160,7 @@ async def flush_user(user_id: UUID, body: FlushInput, request: Request, response
 async def get_blob(user_id: UUID, blob_id: UUID, request: Request):
     from ..controllers import source
     try:
-        return source.get_blob(user_id, project_id(request), blob_id)
+        return await run_sql(source.get_blob, user_id, project_id(request), blob_id)
     except source.SourceError as error:
         translate(error)
 
@@ -169,7 +173,7 @@ async def get_source(user_id: UUID, source_id: str, request: Request,
                      evidence_offset: int = Query(0, ge=0)):
     from ..controllers import source
     try:
-        return source.get_source(user_id, project_id(request), source_id=source_id, limit=limit,
+        return await run_sql(source.get_source, user_id, project_id(request), source_id=source_id, limit=limit,
                                  message_offset=message_offset, blob_offset=blob_offset,
                                  evidence_offset=evidence_offset)
     except source.SourceError as error:
@@ -217,4 +221,4 @@ async def search(user_id: UUID, body: SearchInput, request: Request):
 @router.get("/users/{user_id}/history", response_model=History, operation_id="getHistory", tags=["profiles"])
 async def history(user_id: UUID, request: Request, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
     from ..controllers import source
-    return History(entries=source.get_history(user_id, project_id(request), limit, offset))
+    return History(entries=await run_sql(source.get_history, user_id, project_id(request), limit, offset))

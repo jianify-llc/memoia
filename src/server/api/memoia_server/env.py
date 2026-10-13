@@ -20,6 +20,7 @@ from openai.types.shared import ReasoningEffort
 import structlog
 from .types import UserProfileTopic
 from .struct_logger import ProjectStructLogger, configure_logger
+from pydantic import ValidationError
 
 load_dotenv()
 
@@ -55,8 +56,6 @@ class ContanstTable:
     memo = "memo"
     update_hits = "update_hits"
 
-    roleplay_plot_status = "roleplay_plot_status"
-
 
 class BufferStatus:
     idle = "idle"
@@ -83,6 +82,32 @@ def _validate_llm_configuration(model: str | None, effort: ReasoningEffort) -> N
         raise ValueError("reasoning_effort must match the OpenAI SDK ReasoningEffort values") from None
 
 
+def _supported_config(cls, value):
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise ValueError("Configuration must be a YAML mapping with field names")
+    unknown = set(value) - {item.name for item in dataclasses.fields(cls)}
+    if unknown:
+        raise ValueError("Unsupported configuration fields: " + ", ".join(sorted(unknown)))
+    return dict(value)
+
+
+def _validate_topics(topics):
+    if topics is None:
+        return
+    if not isinstance(topics, list):
+        raise ValueError("Topic configuration must be a list")
+    try:
+        for topic in topics:
+            UserProfileTopic(**topic)
+    except ValidationError as error:
+        fields = sorted({".".join(map(str, item["loc"])) for item in error.errors(include_input=False)})
+        raise ValueError("Invalid topic configuration fields: " + ", ".join(fields)) from None
+    except (TypeError, AttributeError):
+        raise ValueError("Invalid topic configuration fields") from None
+
+
 @dataclass
 class Config:
     # IMPORTANT!
@@ -93,13 +118,7 @@ class Config:
         ]
     ] = None
 
-    system_prompt: str = None
-    buffer_flush_interval: int = 60 * 60  # 1 hour
     max_chat_blob_buffer_token_size: int = 1024
-    max_chat_blob_buffer_process_token_size: int = 16384
-    max_profile_subtopics: int = 15
-    max_pre_profile_token_size: int = 128
-    llm_tab_separator: str = "::"
 
     # LLM
     language: Literal["en", "zh"] = "en"
@@ -112,8 +131,6 @@ class Config:
     llm_openai_default_header: dict[str, str] = None
     best_llm_model: str = "gpt-6-luna"
     llm_reasoning_effort: ReasoningEffort = "high"
-    thinking_llm_model: str = "o4-mini"
-    summary_llm_model: str = None
 
     enable_event_embedding: bool = True
     embedding_provider: Literal["openai", "jina", "ollama"] = "openai"
@@ -130,32 +147,17 @@ class Config:
 
     additional_user_profiles: list[dict] = field(default_factory=list)
     overwrite_user_profiles: Optional[list[dict]] = None
-    event_theme_requirement: Optional[str] = (
-        "Focus on the user's infos, not its instructions."
-    )
-    profile_strict_mode: bool = False
-    profile_validate_mode: bool = True
-
-    minimum_chats_token_size_for_event_summary: int = 256
     event_tags: list[dict] = field(default_factory=list)
     # Telemetry
     telemetry_deployment_environment: str = "local"
 
     @classmethod
     def _process_env_vars(cls, config_dict):
-        """
-        Process all environment variables for the config class.
-
-        Args:
-            cls: The config class
-            config_dict: The current configuration dictionary
-
-        Returns:
-            Updated configuration dictionary with environment variables applied
-        """
-        # Ensure we have a dictionary to work with
-        if not isinstance(config_dict, dict):
-            config_dict = {}
+        config_dict = _supported_config(cls, config_dict)
+        names = {f"MEMOBASE_{item.name.upper()}" for item in dataclasses.fields(cls)}
+        unknown = {key for key in os.environ if key.startswith("MEMOBASE_")} - names
+        if unknown:
+            raise ValueError("Unsupported configuration fields: " + ", ".join(sorted(unknown)))
 
         for field in dataclasses.fields(cls):
             field_name = field.name
@@ -174,7 +176,7 @@ class Config:
                         check_type(parsed_value, field_type)
                         config_dict[field_name] = parsed_value
                         continue
-                    except TypeError:
+                    except (TypeError, TypeCheckError):
                         # Parsed value doesn't match type, fall through to try raw string
                         pass
                 except json.JSONDecodeError:
@@ -185,10 +187,8 @@ class Config:
                 try:
                     check_type(env_value, field_type)
                     config_dict[field_name] = env_value
-                except TypeError as e:
-                    LOG.warning(
-                        f"Value for {env_var_name} is not compatible with field type {field_type}. Ignoring."
-                    )
+                except (TypeError, TypeCheckError):
+                    raise ValueError(f"Invalid configuration field: {env_var_name}") from None
 
         return config_dict
 
@@ -198,16 +198,16 @@ class Config:
             overwrite_config = {}
         else:
             with open("config.yaml") as f:
-                overwrite_config = yaml.safe_load(f)
+                try:
+                    overwrite_config = yaml.safe_load(f)
+                except yaml.YAMLError:
+                    raise ValueError("Invalid service configuration YAML") from None
                 LOG.info(f"Load ./config.yaml")
 
         # Process environment variables
         overwrite_config = cls._process_env_vars(overwrite_config)
 
-        # Filter out any keys from overwrite_config that aren't in the dataclass
-        fields = {field.name for field in dataclasses.fields(cls)}
-        filtered_config = {k: v for k, v in overwrite_config.items() if k in fields}
-        overwrite_config = cls(**filtered_config)
+        overwrite_config = cls(**overwrite_config)
         LOG.info("Memoia configuration loaded")
         return overwrite_config
 
@@ -241,10 +241,8 @@ class Config:
                     "jina-embeddings-v3",
                 }, "embedding_model must be one of the following: jina-embeddings-v3"
 
-        if self.additional_user_profiles:
-            [UserProfileTopic(**up) for up in self.additional_user_profiles]
-        if self.overwrite_user_profiles:
-            [UserProfileTopic(**up) for up in self.overwrite_user_profiles]
+        _validate_topics(self.additional_user_profiles)
+        _validate_topics(self.overwrite_user_profiles)
 
     @property
     def timezone(self) -> timezone:
@@ -260,11 +258,8 @@ class ProfileConfig:
     language: Literal["en", "zh"] = None
     llm_model: str | None = None
     reasoning_effort: ReasoningEffort = None
-    profile_strict_mode: bool | None = None
-    profile_validate_mode: bool | None = None
     additional_user_profiles: list[dict] = field(default_factory=list)
     overwrite_user_profiles: Optional[list[dict]] = None
-    event_theme_requirement: Optional[str] = None
 
     event_tags: list[dict] = None
 
@@ -272,24 +267,16 @@ class ProfileConfig:
         _validate_llm_configuration(self.llm_model, self.reasoning_effort)
         if self.language not in ["en", "zh"]:
             self.language = None
-        if self.additional_user_profiles:
-            [UserProfileTopic(**up) for up in self.additional_user_profiles]
-        if self.overwrite_user_profiles:
-            [UserProfileTopic(**up) for up in self.overwrite_user_profiles]
+        _validate_topics(self.additional_user_profiles)
+        _validate_topics(self.overwrite_user_profiles)
 
     @classmethod
     def load_config_string(cls, config_string: str) -> "ProfileConfig":
-        overwrite_config = yaml.safe_load(config_string)
-        if overwrite_config is None:
-            return cls()
-        if not isinstance(overwrite_config, dict):
-            raise ValueError("Project configuration must be a YAML mapping")
-        # Get all field names from the dataclass
-        fields = {field.name for field in dataclasses.fields(cls)}
-        # Filter out any keys from overwrite_config that aren't in the dataclass
-        filtered_config = {k: v for k, v in overwrite_config.items() if k in fields}
-        overwrite_config = cls(**filtered_config)
-        return overwrite_config
+        try:
+            value = yaml.safe_load(config_string)
+        except yaml.YAMLError:
+            raise ValueError("Invalid project configuration YAML") from None
+        return cls(**_supported_config(cls, value))
 
 
 class Colors:

@@ -1,4 +1,5 @@
 """Permanent identity forgetting across real SQL transactions and in-flight models."""
+from tests.legacy_fixtures import delete_user
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from contextlib import contextmanager
@@ -114,7 +115,7 @@ async def test_forget_cascades_and_permanently_blocks_both_protocols(identity, b
 @pytest.mark.asyncio
 async def test_v1_delete_still_allows_same_uuid_creation(identity):
     assert (await user.create_user(UserData(id=identity), "__root__")).ok()
-    assert (await user.delete_user(identity, "__root__")).ok()
+    assert (await delete_user(identity, "__root__")).ok()
     assert (await user.create_user(UserData(id=identity), "__root__")).ok()
     assert forgotten_row(identity) is None
 
@@ -129,7 +130,7 @@ async def test_v1_create_materializes_default_uuid_before_identity_guard(db_env)
             assert session.get(User, (uid, "__root__")) is not None
         assert forgotten_row(uid) is None
     finally:
-        await user.delete_user(uid, "__root__")
+        await delete_user(uid, "__root__")
 
 
 @pytest.mark.asyncio

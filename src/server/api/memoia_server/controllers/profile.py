@@ -1,10 +1,9 @@
 # Modified for Memoia: relocated from the upstream memobase_server package.
 from pydantic import ValidationError
 from ..models.utils import Promise
-from ..models.database import GeneralBlob, UserProfile
-from ..models.response import CODE, IdData, IdsData, UserProfilesData, ProfileAttributes
-from ..connectors import Session
-from ..utils import get_encoded_tokens
+from ..models.database import UserProfile
+from ..models.response import CODE, IdsData, UserProfilesData, ProfileAttributes
+from ..connectors import Session, run_sql
 from ..env import TRACE_LOG
 
 
@@ -16,100 +15,47 @@ def _profile_attributes(supplied, previous=None):
     return attributes
 
 
-async def truncate_profiles(
-    profiles: UserProfilesData,
-    prefer_topics: list[str] = None,
-    topk: int = None,
-    max_token_size: int = None,
-    only_topics: list[str] = None,
-    max_subtopic_size: int = None,
-    topic_limits: dict[str, int] = None,
-) -> Promise[UserProfilesData]:
-    if not len(profiles.profiles):
-        return Promise.resolve(profiles)
-    profiles.profiles.sort(key=lambda p: p.updated_at, reverse=True)
-    if prefer_topics:
-        prefer_topics = [t.strip() for t in prefer_topics]
-        priority_weights = {t: i for i, t in enumerate(prefer_topics)}
-        priority_profiles = []
-        non_priority_profiles = []
-        for p in profiles.profiles:
-            if p.attributes.get("topic") in priority_weights:
-                priority_profiles.append(p)
-            else:
-                non_priority_profiles.append(p)
-        priority_profiles.sort(
-            key=lambda p: priority_weights[p.attributes.get("topic")]
-        )
-        profiles.profiles = priority_profiles + non_priority_profiles
-    if only_topics:
-        only_topics = [t.strip() for t in only_topics]
-        s_only_topics = set(only_topics)
-        profiles.profiles = [
-            p
-            for p in profiles.profiles
-            if p.attributes.get("topic").strip() in s_only_topics
-        ]
-    if max_subtopic_size or topic_limits:
-        use_topic_limits = topic_limits or {}
-        max_subtopic_size = max_subtopic_size or -1
-        _count_subtopics = {}
-        filtered_profiles = []
-        for p in profiles.profiles:
-            name_key = p.attributes.get("topic")
-            this_topic_limit = use_topic_limits.get(name_key, max_subtopic_size)
-            if name_key not in _count_subtopics:
-                _count_subtopics[name_key] = 0
-            _count_subtopics[name_key] += 1
-            if this_topic_limit >= 0 and _count_subtopics[name_key] > this_topic_limit:
-                continue
-            filtered_profiles.append(p)
-        profiles.profiles = filtered_profiles
-
-    if topk:
-        profiles.profiles = profiles.profiles[:topk]
-    if max_token_size:
-        current_length = 0
-        use_index = 0
-        for max_i, p in enumerate(profiles.profiles):
-            single_p = f"{p.attributes.get('topic')}::{p.attributes.get('sub_topic')}: {p.content}"
-            current_length += len(get_encoded_tokens(single_p))
-            if current_length > max_token_size:
-                break
-            use_index = max_i
-        profiles.profiles = profiles.profiles[: use_index + 1]
-    return Promise.resolve(profiles)
-
-
 async def get_user_profiles(user_id: str, project_id: str) -> Promise[UserProfilesData]:
-    from sqlalchemy import select
-    from ..models.source import memory_facts
-    with Session() as session:
-        valid_facts = {str(fid) for fid in session.scalars(select(memory_facts.c.id).where(
-            memory_facts.c.user_id == user_id, memory_facts.c.project_id == project_id, memory_facts.c.active))}
-        user_profiles = (
-            session.query(UserProfile)
-            .filter_by(user_id=user_id, project_id=project_id)
-            .order_by(UserProfile.updated_at.desc(), UserProfile.id)
-            .all()
-        )
-        results = []
-        for up in user_profiles:
-            attributes = dict(up.attributes or {})
-            if attributes.get("memoia_v2"):
-                # Pending derived text remains visible by contract; invalid Fact
-                # references are not returned as evidence for that old text.
-                attributes["fact_ids"] = [fid for fid in attributes.get("fact_ids", []) if fid in valid_facts]
-            results.append(
-                {
-                    "id": up.id,
-                    "content": up.content,
-                    "attributes": attributes,
-                    "created_at": up.created_at,
-                    "updated_at": up.updated_at,
-                }
+    def execute():
+        from sqlalchemy import select
+        from ..models.source import memory_facts
+        with Session() as session:
+            user_profiles = (
+                session.query(UserProfile)
+                .filter_by(user_id=user_id, project_id=project_id)
+                .order_by(UserProfile.updated_at.desc(), UserProfile.id)
+                .all()
             )
-    return Promise.resolve(UserProfilesData(profiles=results))
+            # Validate only evidence referenced by these profiles, not all user facts.
+            from uuid import UUID
+            referenced = set()
+            for row in user_profiles:
+                for value in (row.attributes or {}).get("fact_ids", []):
+                    try:
+                        referenced.add(UUID(value))
+                    except (ValueError, TypeError, AttributeError):
+                        continue
+            valid_facts = {str(fid) for fid in session.scalars(select(memory_facts.c.id).where(
+                memory_facts.c.id.in_(referenced), memory_facts.c.user_id == user_id,
+                memory_facts.c.project_id == project_id))} if referenced else set()
+            results = []
+            for up in user_profiles:
+                attributes = dict(up.attributes or {})
+                if attributes.get("memoia_v2"):
+                    # Pending derived text remains visible by contract; invalid Fact
+                    # references are not returned as evidence for that old text.
+                    attributes["fact_ids"] = [fid for fid in attributes.get("fact_ids", []) if fid in valid_facts]
+                results.append(
+                    {
+                        "id": up.id,
+                        "content": up.content,
+                        "attributes": attributes,
+                        "created_at": up.created_at,
+                        "updated_at": up.updated_at,
+                    }
+                )
+        return Promise.resolve(UserProfilesData(profiles=results))
+    return await run_sql(execute)
 
 
 async def add_user_profiles(
@@ -118,27 +64,29 @@ async def add_user_profiles(
     profiles: list[str],
     attributes: list[dict],
 ) -> Promise[IdsData]:
-    assert len(profiles) == len(
-        attributes
-    ), "Length of profiles, attributes must be equal"
-    for attr in attributes:
-        try:
-            ProfileAttributes.model_validate(attr)
-        except ValidationError as e:
-            return Promise.reject(
-                CODE.SERVER_PARSE_ERROR, f"Invalid profile attributes: {e}"
-            )
-    with Session() as session:
-        db_profiles = [
-            UserProfile(
-                user_id=user_id, project_id=project_id, content=content, attributes=_profile_attributes(attr)
-            )
-            for content, attr in zip(profiles, attributes)
-        ]
-        session.add_all(db_profiles)
-        session.commit()
-        profile_ids = [profile.id for profile in db_profiles]
-    return Promise.resolve(IdsData(ids=profile_ids))
+    def execute():
+        assert len(profiles) == len(
+            attributes
+        ), "Length of profiles, attributes must be equal"
+        for attr in attributes:
+            try:
+                ProfileAttributes.model_validate(attr)
+            except ValidationError as e:
+                return Promise.reject(
+                    CODE.SERVER_PARSE_ERROR, f"Invalid profile attributes: {e}"
+                )
+        with Session() as session:
+            db_profiles = [
+                UserProfile(
+                    user_id=user_id, project_id=project_id, content=content, attributes=_profile_attributes(attr)
+                )
+                for content, attr in zip(profiles, attributes)
+            ]
+            session.add_all(db_profiles)
+            session.commit()
+            profile_ids = [profile.id for profile in db_profiles]
+        return Promise.resolve(IdsData(ids=profile_ids))
+    return await run_sql(execute)
 
 
 async def update_user_profiles(
@@ -148,126 +96,20 @@ async def update_user_profiles(
     contents: list[str],
     attributes: list[dict | None],
 ) -> Promise[IdsData]:
-    assert len(profile_ids) == len(
-        contents
-    ), "Length of profile_ids, contents must be equal"
-    assert len(profile_ids) == len(
-        attributes
-    ), "Length of profile_ids, attributes must be equal"
-    with Session() as session:
-        db_profiles = []
-        for profile_id, content, attribute in zip(profile_ids, contents, attributes):
-            db_profile = (
-                session.query(UserProfile)
-                .filter_by(id=profile_id, user_id=user_id, project_id=project_id)
-                .one_or_none()
-            )
-            if db_profile is None:
-                TRACE_LOG.error(
-                    project_id,
-                    user_id,
-                    f"Profile {profile_id} not found",
-                )
-                continue
-            db_profile.content = content
-            db_profile.revision += 1
-            if attribute is not None:
-                # Client edits cannot strip the evidence needed by a later withdrawal.
-                db_profile.attributes = _profile_attributes(attribute, db_profile.attributes)
-            db_profiles.append(profile_id)
-        session.commit()
-    return Promise.resolve(IdsData(ids=db_profiles))
-
-
-async def delete_user_profile(
-    user_id: str, project_id: str, profile_id: str
-) -> Promise[None]:
-    with Session() as session:
-        db_profile = (
-            session.query(UserProfile)
-            .filter_by(id=profile_id, user_id=user_id, project_id=project_id)
-            .one_or_none()
-        )
-        if db_profile is None:
-            return Promise.reject(
-                CODE.NOT_FOUND, f"Profile {profile_id} not found for user {user_id}"
-            )
-        session.delete(db_profile)
-        session.commit()
-    return Promise.resolve(None)
-
-
-async def delete_user_profiles(
-    user_id: str, project_id: str, profile_ids: list[str]
-) -> Promise[IdsData]:
-    with Session() as session:
-        session.query(UserProfile).filter(
-            UserProfile.id.in_(profile_ids),
-            UserProfile.user_id == user_id,
-            UserProfile.project_id == project_id,
-        ).delete(synchronize_session=False)
-        session.commit()
-    return Promise.resolve(IdsData(ids=profile_ids))
-
-
-async def add_update_delete_user_profiles(
-    user_id: str,
-    project_id: str,
-    add_profiles: list[str],
-    add_attributes: list[dict],
-    update_profile_ids: list[str],
-    update_contents: list[str],
-    update_attributes: list[dict | None],
-    delete_profile_ids: list[str],
-) -> Promise[IdsData]:
-    assert len(add_profiles) == len(
-        add_attributes
-    ), "Length of add_profiles, add_attributes must be equal"
-    assert len(update_profile_ids) == len(
-        update_contents
-    ), "Length of update_profile_ids, update_contents must be equal"
-    assert len(update_profile_ids) == len(
-        update_attributes
-    ), "Length of update_profile_ids, update_attributes must be equal"
-
-    for attr in add_attributes + update_attributes:
-        if attr is None:
-            continue
-        try:
-            ProfileAttributes.model_validate(attr)
-        except ValidationError as e:
-            return Promise.reject(
-                CODE.SERVER_PARSE_ERROR, f"Invalid profile attributes: {e}"
-            )
-    # Sanity Check done
-
-    with Session() as session:
-        try:
-            # 1. add new profiles
-            if len(add_profiles):
-                add_db_profiles = [
-                    UserProfile(
-                        user_id=user_id,
-                        project_id=project_id,
-                        content=content,
-                        attributes=_profile_attributes(attr),
-                    )
-                    for content, attr in zip(add_profiles, add_attributes)
-                ]
-                session.add_all(add_db_profiles)
-                add_profile_ids = [p.id for p in add_db_profiles]
-            else:
-                add_profile_ids = []
-            # 2. update existing profiles
-            update_db_profiles = []
-            for profile_id, content, attribute in zip(
-                update_profile_ids, update_contents, update_attributes
-            ):
-                db_profile = (
-                    session.query(UserProfile)
-                    .filter_by(id=profile_id, user_id=user_id, project_id=project_id)
-                    .one_or_none()
-                )
+    def execute():
+        assert len(profile_ids) == len(
+            contents
+        ), "Length of profile_ids, contents must be equal"
+        assert len(profile_ids) == len(
+            attributes
+        ), "Length of profile_ids, attributes must be equal"
+        with Session() as session:
+            db_profiles = []
+            existing = {str(row.id): row for row in session.query(UserProfile).filter(
+                UserProfile.id.in_(profile_ids), UserProfile.user_id == user_id,
+                UserProfile.project_id == project_id)}
+            for profile_id, content, attribute in zip(profile_ids, contents, attributes):
+                db_profile = existing.get(str(profile_id))
                 if db_profile is None:
                     TRACE_LOG.error(
                         project_id,
@@ -276,27 +118,31 @@ async def add_update_delete_user_profiles(
                     )
                     continue
                 db_profile.content = content
+                db_profile.revision += 1
                 if attribute is not None:
+                    # Client edits cannot strip the evidence needed by a later withdrawal.
                     db_profile.attributes = _profile_attributes(attribute, db_profile.attributes)
-                update_db_profiles.append(profile_id)
-
-            # 3. delete profiles
-            session.query(UserProfile).filter(
-                UserProfile.id.in_(delete_profile_ids),
-                UserProfile.user_id == user_id,
-                UserProfile.project_id == project_id,
-            ).delete(synchronize_session=False)
-
+                db_profiles.append(profile_id)
             session.commit()
-        except Exception as e:
-            TRACE_LOG.error(
-                project_id,
-                user_id,
-                f"Error merging user profiles: {e}",
-            )
-            session.rollback()
-            return Promise.reject(
-                CODE.SERVER_PARSE_ERROR, f"Error merging user profiles: {e}"
-            )
+        return Promise.resolve(IdsData(ids=db_profiles))
+    return await run_sql(execute)
 
-    return Promise.resolve(IdsData(ids=add_profile_ids))
+
+async def delete_user_profile(
+    user_id: str, project_id: str, profile_id: str
+) -> Promise[None]:
+    def execute():
+        with Session() as session:
+            db_profile = (
+                session.query(UserProfile)
+                .filter_by(id=profile_id, user_id=user_id, project_id=project_id)
+                .one_or_none()
+            )
+            if db_profile is None:
+                return Promise.reject(
+                    CODE.NOT_FOUND, f"Profile {profile_id} not found for user {user_id}"
+                )
+            session.delete(db_profile)
+            session.commit()
+        return Promise.resolve(None)
+    return await run_sql(execute)

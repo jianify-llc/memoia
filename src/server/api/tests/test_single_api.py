@@ -116,20 +116,20 @@ async def test_read_only_posts_obey_read_scope(client, monkeypatch):
 @pytest.mark.asyncio
 async def test_context_counts_complete_fact_evidence_and_preserves_rank(client, monkeypatch):
     from memoia_server.models.source import SearchEvent, Evidence, EventTime
-    from memoia_server.models.response import EventGistData
-    from memoia_server.temporal import render_gist
+    from memoia_server.models.response import RetrievedContent
+    from memoia_server.temporal import render_memory_content
     from memoia_server.utils import get_encoded_tokens
     uid, fid, blob = str(uuid4()), uuid4(), uuid4()
     fact = Evidence(fact_id=fid, blob_id=blob, content="Kyoto hotel", topic="life_event", sub_topic="travel",
         support_groups=[["1"]], event_time=EventTime(start="2026-04-01", end="2026-04-30", precision="month",
         evidence=[{"message_id": "1", "expression": "April 2026"}]), source_messages=[])
-    rendered = render_gist(EventGistData(content=fact.content, event_time=fact.event_time, source_id="dialog", blob_id=blob, fact_id=fid))
+    rendered = render_memory_content(RetrievedContent(content=fact.content, event_time=fact.event_time, source_id="dialog", blob_id=blob, fact_id=fid))
     budget = len(get_encoded_tokens(rendered))
-    gist = EventGistData(content=fact.content, event_time=fact.event_time, source_id="dialog", blob_id=blob, fact_id=fid)
+    content = RetrievedContent(content=fact.content, event_time=fact.event_time, source_id="dialog", blob_id=blob, fact_id=fid)
     result = [event.RetrievedFact(uuid4(), datetime(2026, 10, 6, tzinfo=timezone.utc), .1,
-        gist.model_copy(update={"content": "oversized " * 1000})),
-        event.RetrievedFact(uuid4(), datetime(2026, 10, 6, tzinfo=timezone.utc), .09, gist),
-        event.RetrievedFact(uuid4(), datetime(2026, 10, 6, tzinfo=timezone.utc), .08, EventGistData(content="legacy hotel"))]
+        content.model_copy(update={"content": "oversized " * 1000})),
+        event.RetrievedFact(uuid4(), datetime(2026, 10, 6, tzinfo=timezone.utc), .09, content),
+        event.RetrievedFact(uuid4(), datetime(2026, 10, 6, tzinfo=timezone.utc), .08, RetrievedContent(content="legacy hotel"))]
     search = AsyncMock(return_value=Promise.resolve(result))
     monkeypatch.setattr(event, "retrieve_user_facts", search)
     response = (await client.post(f"/api/users/{uid}/context", json={"query": "Kyoto April 2026", "max_token_size": budget}))
@@ -141,19 +141,19 @@ async def test_context_counts_complete_fact_evidence_and_preserves_rank(client, 
 
 @pytest.mark.asyncio
 async def test_context_recent_records_keep_evidence_and_query_none_avoids_embedding(client, monkeypatch):
-    from memoia_server.models.response import EventGistData
-    from memoia_server.temporal import render_gist
+    from memoia_server.models.response import RetrievedContent
+    from memoia_server.temporal import render_memory_content
     search = AsyncMock()
     embedding = AsyncMock()
-    gist = EventGistData(content="Sakura fact", fact_id=uuid4(), blob_id=uuid4(), source_id="dialog",
+    content = RetrievedContent(content="Sakura fact", fact_id=uuid4(), blob_id=uuid4(), source_id="dialog",
         source_messages=[{"message_id": "1", "recorded_at": "2026-10-06T00:00:00Z", "time_zone": "Asia/Shanghai"}])
-    recent = Mock(return_value=[gist])
+    recent = Mock(return_value=[content])
     monkeypatch.setattr(event, "retrieve_user_facts", search)
     monkeypatch.setattr(event, "recent_user_facts", recent)
     monkeypatch.setattr(event, "get_embedding", embedding)
     uid = str(uuid4())
     response = (await client.post(f"/api/users/{uid}/context", json={"query": None}))
-    rendered = render_gist(gist)
+    rendered = render_memory_content(content)
     assert response.json() == {"context": rendered, "entries": [rendered]}
     assert "recorded_at" in rendered and "Asia/Shanghai" in rendered
     recent.assert_called_once_with(uid, "__root__")

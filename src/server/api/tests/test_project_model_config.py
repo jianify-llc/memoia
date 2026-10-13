@@ -53,3 +53,38 @@ def test_project_model_and_effort_can_override_independently():
     assert project.llm_model == "project-model" and project.reasoning_effort is None
     project = ProfileConfig.load_config_string("reasoning_effort: none")
     assert project.llm_model is None and project.reasoning_effort == "none"
+
+
+@pytest.mark.parametrize("field", ["profile_strict_mode", "profile_validate_mode", "event_theme_requirement", "unknown_field"])
+def test_retired_and_unknown_project_fields_are_rejected_without_values(field):
+    with pytest.raises(ValueError) as error:
+        ProfileConfig.load_config_string(f"{field}: private-configuration-value")
+    assert field in str(error.value)
+    assert "private-configuration-value" not in str(error.value)
+    assert not is_valid_profile_config(f"{field}: private-configuration-value").ok()
+
+
+@pytest.mark.parametrize("field", ["summary_llm_model", "buffer_flush_interval", "thinking_llm_model", "unknown_field"])
+def test_service_fields_are_checked_in_yaml_and_environment(monkeypatch, field):
+    with pytest.raises(ValueError, match=field):
+        Config._process_env_vars({field: "not-to-be-logged"})
+    monkeypatch.setenv("MEMOBASE_" + field.upper(), "not-to-be-logged")
+    with pytest.raises(ValueError) as error:
+        Config._process_env_vars({})
+    assert field.upper() in str(error.value) and "not-to-be-logged" not in str(error.value)
+
+
+def test_malformed_project_config_does_not_echo_body():
+    result = is_valid_profile_config('language: [private-configuration-value')
+    assert not result.ok()
+    assert "private-configuration-value" not in str(result)
+
+
+@pytest.mark.parametrize("value", [False, 0, "private-value", {"topic": "private-value"}])
+@pytest.mark.parametrize("field", ["overwrite_user_profiles", "additional_user_profiles"])
+def test_invalid_topic_containers_rejected_at_load(value, field):
+    import json
+    with pytest.raises(ValueError, match="must be a list"):
+        ProfileConfig.load_config_string(json.dumps({field: value}))
+    with pytest.raises(ValueError, match="must be a list"):
+        Config(llm_api_key="local-test-key", enable_event_embedding=False, **{field: value})

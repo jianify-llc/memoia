@@ -140,7 +140,7 @@ config.yaml
 ├── best_llm_model
 ├── llm_reasoning_effort
 ├── language
-└── profile_strict_mode
+└── additional_user_profiles / overwrite_user_profiles
 ```
 
 默认模型与思考等级为 `best_llm_model: gpt-6-luna`、
@@ -153,6 +153,21 @@ reasoning_effort: high
 
 Fact 抽取和后台统一 AgentLoop 均使用该项目配置；工具循环使用 Responses，
 不为适配协议静默降低思考等级。项目密钥与可选 Playground 的模型配置仍独立。
+
+配置只接受当前支持字段；未知或退役键明确拒绝，不静默过滤。旧严格模式、值校验、
+Event 主题、摘要模型与 Buffer 调度参数均退出。发布前只检查退役字段名，另行授权处理
+共享配置，不能打印配置正文或密钥。同步 SQL 单元用 `connectors.run_sql`，Session
+在线程内完整关闭；取消需等 SQL 结束，不能提前释放用户写租约。
+运行连接默认 connect_timeout=5s、lock_timeout=5s、statement_timeout=30s；
+通过 DATABASE_CONNECT_TIMEOUT_SECONDS、DATABASE_LOCK_TIMEOUT_MS、
+DATABASE_STATEMENT_TIMEOUT_MS 调整，必须为正数。TCP keepalive/user timeout
+辅助识别断连，不将这些单连接／单 SQL 超时宣称为整个请求的硬截止。Alembic 使用
+独立维护连接，不继承运行时短 SQL 上限。
+
+Gist ORM、检索分支、返回类型及无调用方的旧 Event 编辑函数已删除。Fact 直接承担
+细粒度索引；历史 Event 正文仍可检索，不生成没有消息证据的 Fact。0011 前向迁移
+删除旧 Gist 表（仅存于该表的细节不可恢复），并为 Blob 消息成员查询建立 GIN 索引。
+flush 封批至多读取 100 个候选 Blob 的 Fact 投影一次，不逐 Blob 发送 SQL。
 
 ## Development Flow
 

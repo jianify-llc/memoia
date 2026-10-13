@@ -15,8 +15,22 @@ memoia_server.schema.check_schema() 校验 revision 和 embedding 维度、初�
   0007_event_time_evidence 可空事件时间证据 JSONB 与原消息 IANA 时区，不回填旧事件日期。
   0008_serial_maintenance 用户串行合并任务、Fact 版本/纠正证据/直接检索、派生关联与条目版本。
   0009_blob_flush        固定 Blob 变更、flush Operation 租约/恢复；转移历史维护记录后移除任务表。
+  0010_historical_facts  只删除旧隐藏 Fact，退出纠正图/active；保留其他历史与固定回执。
+  0011_retire_gists      删除旧 Gist 索引表，保留 Event/Fact；为 Blob message_ids 添加 jsonb_ops GIN。
 
-当前 0009 与 SDK 0.9 配套：completed 只表示 Fact 原子提交；画像与 Event 由同镜像独立
+0011 不改 Event 正文，不将缺少消息证据的 Gist 转成 Fact。仅存在于旧 Gist 表的细节
+随表删除、不可通过 downgrade 恢复；共享库执行仍须单独确认。历史基线和已执行迁移
+中的 Gist 定义保持冻结，供旧库正常升级，不能随运行代码一起删除。
+
+0010 按用户／项目保留受影响 Event 的原 Fact 关联导航，定点移除引用旧隐藏 Fact 的画像
+历史条目，再删除这些 Fact 及级联关联。其余 Fact、消息处理状态、删除墓碑、固定 Blob
+和原 Operation 不变。删除变更按最多 1,000 个 UUID 分组登记普通 flush Operation
+（blob_ids=[]、legacy_changes），不修改已封闭 Blob、不调用模型；未完成变更也参与历史
+过滤。之后删除纠正表、专用触发器及 active，重建词法索引、补 Fact→Event 反向索引。
+该迁移不可恢复已删除 Fact，不重新抽取已清除原文。服务与项目退役配置须在发布前单独
+检查并确认处理，迁移不重写共享配置。当前 SDK 请求／回执结构不变。
+
+当前 schema 与 SDK 0.9 配套：completed 只表示 Fact 原子提交；画像与 Event 由同镜像独立
 Worker 运行一个用户级 AgentLoop，Profile/Event 与 flush 回执原子提交。0008 旧任务的
 完成区间、变更引用、原身份和失败次数保留为 flush；运行中的旧租约不延续，恢复读取当前
 有效 Fact，不恢复已清除原文。未封闭的新 Blob 留到下一次，未关联 Blob 的旧变更引用

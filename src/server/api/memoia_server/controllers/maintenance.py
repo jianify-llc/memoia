@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import JSON, and_, delete, func, or_, select, update, exists
 from sqlalchemy.dialects.postgresql import insert
 
-from ..connectors import Session
+from ..connectors import Session, run_sql
 from ..models.source import memory_operations as operations, memory_blobs as blobs
 from ..models.database import User
 from ..utils import json_size as payload_size
@@ -43,16 +43,21 @@ def _unassigned(user_id, project_id):
                 blobs.c.flush_operation_id.is_(None))
 
 
-def _change_size(session, user_id, project_id, changes):
+def _change_facts(session, user_id, project_id, changes):
     from ..models.source import memory_facts
     fact_ids = {_uuid(change["fact_id"]) for change in changes if change.get("fact_id")}
-    facts = [dict(row) for row in session.execute(select(
+    if not fact_ids:
+        return {}
+    return {row.id: dict(row) for row in session.execute(select(
         memory_facts.c.id, memory_facts.c.content, memory_facts.c.subject,
         memory_facts.c.reporter, memory_facts.c.certainty, memory_facts.c.support_groups,
         memory_facts.c.occurred_at, memory_facts.c.event_time,
-    ).where(_scope(memory_facts, user_id, project_id), memory_facts.c.id.in_(fact_ids),
-            memory_facts.c.active.is_(True))).mappings()]
-    return payload_size({"changes": changes, "facts": facts})
+    ).where(_scope(memory_facts, user_id, project_id), memory_facts.c.id.in_(fact_ids))).mappings()}
+
+
+def _change_size(changes, facts):
+    ids = {_uuid(change["fact_id"]) for change in changes if change.get("fact_id")}
+    return payload_size({"changes": changes, "facts": [facts[ident] for ident in ids if ident in facts]})
 
 
 def _seal(session, user_id, project_id, key):
@@ -67,9 +72,10 @@ def _seal(session, user_id, project_id, key):
         return previous
     candidates = session.execute(select(blobs.c.id, blobs.c.fact_changes).where(_unassigned(user_id, project_id))
         .order_by(blobs.c.fact_completed_at, blobs.c.id).limit(MAX_FLUSH_SCAN).with_for_update()).all()
+    facts = _change_facts(session, user_id, project_id, [change for _, changes in candidates for change in changes])
     batch_ids, used, oversized = [], 0, False
     for bid, changes in candidates:
-        cost = _change_size(session, user_id, project_id, changes)
+        cost = _change_size(changes, facts)
         if batch_ids and used + cost > MAX_FLUSH_BYTES:
             break
         batch_ids.append(bid)
@@ -337,7 +343,7 @@ class TaskLease:
         self._heartbeat = None
 
     async def __aenter__(self):
-        if not await asyncio.to_thread(renew_claim, self.claim, lease_seconds=self.ttl):
+        if not await run_sql(renew_claim, self.claim, lease_seconds=self.ttl):
             self.lost.set()
             raise SourceError("maintenance_lease_lost", "Maintenance claim expired before execution", 409, True)
         self._valid_until = time.monotonic() + self.ttl
@@ -358,7 +364,7 @@ class TaskLease:
             while True:
                 await asyncio.sleep(self.ttl / 3)
                 async with asyncio.timeout(self.ttl / 3):
-                    owned = await asyncio.to_thread(renew_claim, self.claim, lease_seconds=self.ttl)
+                    owned = await run_sql(renew_claim, self.claim, lease_seconds=self.ttl)
                 if not owned:
                     self.lost.set()
                     return
@@ -396,7 +402,7 @@ class DBMaintenanceContext:
         with Session() as session:
             # Recovery reads current Facts, so a formerly small batch may have
             # grown. Keep the sealed identity, but reject unbounded model work.
-            if _change_size(session, self.user_id, self.project_id, self.changes) > MAX_FLUSH_BYTES:
+            if _change_size(self.changes, _change_facts(session, self.user_id, self.project_id, self.changes)) > MAX_FLUSH_BYTES:
                 raise SourceError("maintenance_capacity", "Fixed Blob changes exceed the flush budget", 413)
             rules = _project_rules(session, self.project_id)
         self.profile_topics = rules["profile_topics"]
@@ -439,14 +445,13 @@ class DBMaintenanceContext:
                     {proof["fact_id"] for proof in (row["evidence"] or [])
                      if isinstance(proof, dict) and proof.get("fact_id")} for row in rows}
                 ids = {_uuid(ident) for values in supported.values() for ident in values}
-                active = set(map(str, session.scalars(select(memory_facts.c.id).where(
-                    _scope(memory_facts, self.user_id, self.project_id), memory_facts.c.id.in_(ids),
-                    memory_facts.c.active.is_(True)))))
+                surviving = set(map(str, session.scalars(select(memory_facts.c.id).where(
+                    _scope(memory_facts, self.user_id, self.project_id), memory_facts.c.id.in_(ids)))))
                 for row in rows:
                     proof_ids = supported[row["id"]]
                     # An empty legacy/manual association proves nothing. Only a
                     # known Fact-backed entry with no surviving support is mechanical.
-                    if not proof_ids or proof_ids & active:
+                    if not proof_ids or proof_ids & surviving:
                         continue
                     ident = str(row["id"])
                     self.readset[collection][ident] = row["revision"]
@@ -459,37 +464,41 @@ class DBMaintenanceContext:
     def _read(self, collection, ids, cursor, query, limit):
         from ..models.database import UserProfile, UserEvent
         from ..models.source import memory_facts, memory_blobs, memory_event_facts
-        from .source import assert_user_active
+        from ..maintenance_agent import MAX_PAGE_SIZE, MAX_TOOL_BYTES
+
         tables = {"facts": memory_facts, "profiles": UserProfile.__table__, "events": UserEvent.__table__}
         if collection not in tables:
             raise SourceError("invalid_model_output", "Unsupported memory collection", 502)
-        from ..maintenance_agent import MAX_PAGE_SIZE, MAX_TOOL_BYTES
-        original_reads = {key: dict(value) for key, value in self.readset.items()}
         if not 1 <= limit <= MAX_PAGE_SIZE or (ids is not None and len(ids) > MAX_PAGE_SIZE):
             raise SourceError("invalid_model_output", "Memory page limit exceeded", 502)
         try:
-            offset = int(cursor or "0")
-        except (ValueError, TypeError):
+            after = UUID(cursor) if cursor is not None else None
+        except (ValueError, TypeError, AttributeError):
             raise SourceError("invalid_model_output", "Memory page cursor is invalid", 502) from None
-        if offset < 0 or offset > 10000 or (query and len(query) > 500):
-            raise SourceError("invalid_model_output", "Memory page cursor or query exceeds limit", 502)
+        if query and len(query) > 500:
+            raise SourceError("invalid_model_output", "Memory query exceeds limit", 502)
+        requested = {_uuid(value) for value in ids} if ids is not None else None
         staged = self._staged.get(collection, {})
+        staged_page = {ident: change for ident, change in staged.items()
+                       if (after is None or _uuid(ident) > after)
+                       and (requested is None or _uuid(ident) in requested)}
         table = tables[collection]
         statement = select(table).where(_scope(table, self.user_id, self.project_id))
-        removed = [ident for ident, change in staged.items() if change.action == "remove"]
-        if removed:
-            statement = statement.where(table.c.id.not_in([_uuid(ident) for ident in removed]))
+        # Staged entries replace their DB rows before filtering and paging. A
+        # stable ID boundary cannot shift when an earlier entry is updated/removed.
+        if staged:
+            statement = statement.where(table.c.id.not_in([_uuid(ident) for ident in staged]))
+        if after is not None:
+            statement = statement.where(table.c.id > after)
         changed_ids = [_uuid(change["fact_id"]) for change in self.changes if change.get("fact_id")]
-        if collection == "facts":
-            statement = statement.where(table.c.active.is_(True))
         if ids is None and not query:
             if collection == "facts":
                 statement = statement.where(table.c.id.in_(changed_ids))
             else:
                 statement = statement.where(_associated_entries(
                     table, collection, self.user_id, self.project_id, changed_ids))
-        if ids is not None:
-            statement = statement.where(table.c.id.in_([_uuid(value) for value in ids]))
+        if requested is not None:
+            statement = statement.where(table.c.id.in_(requested))
         if query:
             pattern = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
             columns = [table.c.content] if collection != "events" else [
@@ -500,32 +509,24 @@ class DBMaintenanceContext:
         with Session() as session:
             assert_user_active(session, self.user_id, self.project_id)
             rows = [dict(row) for row in session.execute(statement.order_by(table.c.id)
-                    .offset(offset).limit(limit + 1)).mappings()]
-            more = len(rows) > limit
-            rows = rows[:limit]
-            staged_offset = 0
-            if collection != "facts" and not more:
-                count = session.scalar(select(func.count()).select_from(statement.subquery()))
-                staged_offset = max(0, offset - count)
-            found = {str(row["id"]) for row in rows}
-            if ids is not None:
+                    .limit(limit + 1)).mappings()]
+            staged_rows = {str(row["id"]): dict(row) for row in session.execute(select(table).where(
+                _scope(table, self.user_id, self.project_id),
+                table.c.id.in_([_uuid(ident) for ident in staged_page]))).mappings()} if staged_page else {}
+            if requested is not None:
                 present = set(map(str, session.scalars(select(table.c.id).where(
-                    _scope(table, self.user_id, self.project_id), table.c.id.in_([_uuid(value) for value in ids]),
-                    table.c.active.is_(True) if collection == "facts" else True))))
-                for ident in ids:
-                    if str(_uuid(ident)) not in present:
-                        self.readset[collection][str(_uuid(ident))] = None
-            items = []
-            for row in rows:
+                    _scope(table, self.user_id, self.project_id), table.c.id.in_(requested)))))
+                for value in requested:
+                    ident = str(value)
+                    if ident not in present:
+                        if self.readset[collection].get(ident) is not None:
+                            raise SourceError("maintenance_read_conflict", "Memory disappeared during the Loop", 409, True)
+                        self.readset[collection][ident] = None
+
+            def entry(row):
                 ident = str(row["id"])
-                previous = self.readset[collection].get(ident, row["revision"])
-                if previous != row["revision"]:
-                    raise SourceError("maintenance_read_conflict", "Memory changed during the maintenance read", 409, True)
-                self.readset[collection][ident] = row["revision"]
                 if collection == "facts":
-                    source_id = session.scalar(select(memory_blobs.c.source_id).where(
-                        memory_blobs.c.id == row["blob_id"], _scope(memory_blobs, self.user_id, self.project_id)))
-                    item = {**row, "source_id": source_id}
+                    item = dict(row)
                     for key in ("embedding", "search_text", "included"):
                         item.pop(key, None)
                 elif collection == "profiles":
@@ -533,87 +534,99 @@ class DBMaintenanceContext:
                     item = {"id": ident, "content": row["content"], "revision": row["revision"],
                             "topic": attributes.get("topic", ""), "sub_topic": attributes.get("sub_topic", ""),
                             "fact_ids": attributes.get("fact_ids", [])}
-                    if ids is None:
-                        item["content_preview"] = item.pop("content")[:500]
                 else:
-                    linked = list(session.scalars(select(memory_event_facts.c.fact_id).where(
-                        memory_event_facts.c.event_id == row["id"],
-                        _scope(memory_event_facts, self.user_id, self.project_id))))
                     # Legacy JSON retains identity only. Its old evidence text is
                     # never reintroduced as valid Fact support after withdrawal.
-                    legacy_ids = [value["fact_id"] for value in (row["event_data"].get("evidence") or [])
+                    data = row["event_data"] or {}
+                    legacy_ids = [value["fact_id"] for value in (data.get("evidence") or [])
                                   if isinstance(value, dict) and value.get("fact_id")]
-                    item = {**row["event_data"], "id": ident, "revision": row["revision"],
-                            "fact_ids": list({*map(str, linked), *row["event_data"].get("fact_ids", []), *legacy_ids})}
+                    item = {**data, "id": ident, "revision": row["revision"],
+                            "fact_ids": sorted({*data.get("fact_ids", []), *legacy_ids})}
                     item.pop("evidence", None)
-                    if ids is None:
-                        for key in ("content", "event_tip", "interpretation"):
-                            item.pop(key, None)
-                if collection != "facts":
-                    mentioned = [_uuid(value) for value in item["fact_ids"]]
-                    valid = set(map(str, session.scalars(select(memory_facts.c.id).where(
-                        _scope(memory_facts, self.user_id, self.project_id), memory_facts.c.id.in_(mentioned),
-                        memory_facts.c.active.is_(True)))))
-                    item["invalid_fact_ids"] = sorted(set(item["fact_ids"]) - valid)
-                    item["fact_ids"] = sorted(valid)
-                    if collection == "events" and ids is not None:
-                        evidence = []
-                        for fact in session.execute(select(memory_facts).where(
-                            _scope(memory_facts, self.user_id, self.project_id),
-                            memory_facts.c.id.in_([_uuid(value) for value in valid]))).mappings():
-                            fact_id = str(fact["id"])
-                            expected = self.readset["facts"].get(fact_id, fact["revision"])
-                            if expected != fact["revision"]:
-                                raise SourceError("maintenance_read_conflict", "Fact changed while reading the event", 409, True)
-                            self.readset["facts"][fact_id] = fact["revision"]
-                            evidence.append({key: fact[key] for key in (
-                                "id", "blob_id", "content", "subject", "reporter", "certainty",
-                                "support_groups", "occurred_at", "event_time")})
-                        item["evidence"] = evidence
-                # Every returned identity is server-scoped; model arguments cannot
-                # switch user/project even when a guessed id exists elsewhere.
                 item.pop("user_id", None)
                 item.pop("project_id", None)
-                if ident in staged and staged[ident].action == "remove":
+                return item
+
+            items = [entry(row) for row in rows]
+            for ident, change in staged_page.items():
+                row = staged_rows.get(ident)
+                actual = row["revision"] if row else None
+                if self.readset[collection].get(ident) != actual:
+                    raise SourceError("maintenance_read_conflict", "Staged memory changed during the Loop", 409, True)
+                item = entry(row) if row else {"id": ident, "revision": None, "fact_ids": []}
+                if change.action == "remove":
+                    if row is None:
+                        continue
+                    # Keep its identity/text visible for navigation and rewrite,
+                    # but only current Fact rows can supply positive evidence.
+                    item["pending_delete"] = True
+                else:
+                    item = {"id": ident, "revision": actual, **change.model_dump(exclude={"action", "id"})}
+                    if collection == "events":
+                        item["event_tip"] = change.content
+                fields = ("content", "topic", "sub_topic") if collection == "profiles" else (
+                    "content", "event_tip", "title", "summary", "keywords")
+                if query and not any(query.casefold() in str(item.get(key) or "").casefold() for key in fields):
                     continue
-                if ident in staged:
-                    item.update(staged[ident].model_dump())
                 items.append(item)
-        if collection != "facts" and not more:
-            additions = []
-            for ident, change in sorted(staged.items()):
-                if change.action == "remove" or ident in found or self.readset[collection].get(ident) is not None:
-                    continue
-                if ids is not None and ident not in ids:
-                    continue
-                if query and query.casefold() not in (change.content or "").casefold():
-                    continue
-                additions.append(change.model_dump())
-            tail = additions[staged_offset:]
-            more = len(items) + len(tail) > limit
-            items.extend(tail[:limit - len(items)])
-        accepted, size = [], 64
+            items.sort(key=lambda item: str(item["id"]))
+            more = len(items) > limit
+            items = items[:limit]
+
+            # Hydrate one bounded page with set queries, not per-entry round trips.
+            if collection == "facts":
+                sources = dict(session.execute(select(memory_blobs.c.id, memory_blobs.c.source_id).where(
+                    _scope(memory_blobs, self.user_id, self.project_id),
+                    memory_blobs.c.id.in_({item["blob_id"] for item in items}))).all())
+                for item in items:
+                    item["source_id"] = sources[item["blob_id"]]
+            else:
+                if collection == "events":
+                    links = {}
+                    for eid, fid in session.execute(select(memory_event_facts.c.event_id, memory_event_facts.c.fact_id)
+                        .where(_scope(memory_event_facts, self.user_id, self.project_id),
+                               memory_event_facts.c.event_id.in_([_uuid(item["id"]) for item in items]))):
+                        links.setdefault(str(eid), set()).add(str(fid))
+                    for item in items:
+                        change = staged.get(item["id"])
+                        if change is None or change.action == "remove":
+                            item["fact_ids"] = sorted(set(item["fact_ids"]) | links.get(item["id"], set()))
+                mentioned = {_uuid(fid) for item in items for fid in item["fact_ids"]}
+                facts = {str(row["id"]): dict(row) for row in session.execute(select(
+                    memory_facts.c.id, memory_facts.c.blob_id, memory_facts.c.content, memory_facts.c.subject,
+                    memory_facts.c.reporter, memory_facts.c.certainty, memory_facts.c.support_groups,
+                    memory_facts.c.occurred_at, memory_facts.c.event_time, memory_facts.c.revision,
+                ).where(_scope(memory_facts, self.user_id, self.project_id), memory_facts.c.id.in_(mentioned))).mappings()}
+                for item in items:
+                    item["invalid_fact_ids"] = sorted(set(item["fact_ids"]) - facts.keys())
+                    item["fact_ids"] = sorted(set(item["fact_ids"]) & facts.keys())
+                    if collection == "events" and ids is not None:
+                        item["evidence"] = [facts[fid] for fid in item["fact_ids"]]
+
+        accepted, size = [], 96
         for item in items:
             cost = payload_size(item) + 2
             if size + cost > MAX_TOOL_BYTES:
                 if not accepted:
                     raise SourceError("maintenance_capacity", "A complete memory entry exceeds the tool budget", 413)
                 break
+            ident = str(item["id"])
+            if self.readset[collection].get(ident, item["revision"]) != item["revision"]:
+                raise SourceError("maintenance_read_conflict", "Memory changed during the maintenance read", 409, True)
+            self.readset[collection][ident] = item["revision"]
+            for fact in item.get("evidence", []):
+                fid = str(fact["id"])
+                if self.readset["facts"].get(fid, fact["revision"]) != fact["revision"]:
+                    raise SourceError("maintenance_read_conflict", "Fact changed while reading the event", 409, True)
+                self.readset["facts"][fid] = fact["revision"]
             accepted.append(item)
             size += cost
-        visible = {"facts": set(), "profiles": set(), "events": set()}
-        visible[collection] = {str(item["id"]) for item in accepted}
-        if collection == "events":
-            visible["facts"].update(str(fact["id"]) for item in accepted for fact in item.get("evidence", []))
-        for kind, reads in self.readset.items():
-            self.readset[kind] = {ident: revision for ident, revision in reads.items()
-                                 if ident in original_reads[kind] or ident in visible[kind] or revision is None}
-        next_cursor = str(offset + len(accepted)) if more or len(accepted) < len(items) else None
+        next_cursor = str(accepted[-1]["id"]) if accepted and (more or len(accepted) < len(items)) else None
         return json.loads(json.dumps({"items": accepted, "next_cursor": next_cursor}, default=str))
 
     async def read(self, collection, *, ids=None, cursor=None, query=None, limit=100):
         await self.assert_active()
-        result = await asyncio.to_thread(self._read, collection, ids, cursor, query, limit)
+        result = await run_sql(self._read, collection, ids, cursor, query, limit)
         await self.assert_active()
         return result
 
@@ -684,8 +697,7 @@ class DBMaintenanceContext:
                 memory_facts.c.id, memory_facts.c.blob_id, memory_facts.c.content, memory_facts.c.subject,
                 memory_facts.c.reporter, memory_facts.c.certainty, memory_facts.c.revision,
                 memory_facts.c.support_groups, memory_facts.c.occurred_at, memory_facts.c.event_time,
-            ).where(_scope(memory_facts, self.user_id, self.project_id), memory_facts.c.id.in_(ids),
-                    memory_facts.c.active.is_(True))).mappings()}
+            ).where(_scope(memory_facts, self.user_id, self.project_id), memory_facts.c.id.in_(ids))).mappings()}
         items, size = [], 64
         for change in candidates:
             ident = str(_uuid(change["fact_id"])) if change.get("fact_id") else None
@@ -716,7 +728,7 @@ class DBMaintenanceContext:
             raise SourceError("invalid_model_output", "Invalid change cursor", 502) from None
         if offset < 0 or offset > len(self.changes):
             raise SourceError("invalid_model_output", "Invalid change page", 502)
-        result = await asyncio.to_thread(self._read_changes, offset, limit)
+        result = await run_sql(self._read_changes, offset, limit)
         await self.assert_active()
         return result
 
@@ -734,14 +746,14 @@ def _verify_readset(session, claim, readset):
     from ..models.source import memory_facts
     tables = {"facts": memory_facts, "profiles": UserProfile.__table__, "events": UserEvent.__table__}
     for collection, reads in readset.items():
+        if not reads:
+            continue
         table = tables[collection]
+        current = {str(ident): revision for ident, revision in session.execute(select(table.c.id, table.c.revision)
+            .where(_scope(table, claim.user_id, claim.project_id), table.c.id.in_([_uuid(ident) for ident in reads]))
+            .order_by(table.c.id).with_for_update())}
         for ident, revision in reads.items():
-            statement = select(table.c.revision).where(
-                _scope(table, claim.user_id, claim.project_id), table.c.id == _uuid(ident))
-            if collection == "facts":
-                statement = statement.where(table.c.active.is_(True))
-            actual = session.scalar(statement.with_for_update())
-            if actual != revision:
+            if current.get(ident) != revision:
                 raise SourceError("maintenance_read_conflict", "Related memory changed while the Loop was computed", 409, True)
 
 
@@ -780,7 +792,7 @@ def _apply_plan(session, claim, plan, kind, event_embeddings):
     changes = plan.profiles if kind == "profile" else plan.events
     if not changes:
         return
-    from ..models.database import UserProfile, UserEvent, UserEventGist
+    from ..models.database import UserProfile, UserEvent
     from ..models.source import (memory_facts, memory_blobs, memory_event_facts,
                                 memory_deleted_events, memory_profile_revisions)
     from .source import _profile_snapshot, _project_rules, _history_profiles
@@ -792,6 +804,12 @@ def _apply_plan(session, claim, plan, kind, event_embeddings):
             _scope(blobs, claim.user_id, claim.project_id), blobs.c.fact_completed_at.is_not(None),
             or_(blobs.c.flush_operation_id.is_(None), blobs.c.flush_operation_id.in_(unfinished))))
             for change in batch]
+        # Migration-owned changes have no new Blob; until their flush succeeds
+        # they must protect history just like ordinary pending message changes.
+        pending.extend((op_id, change) for op_id, request in session.execute(select(
+            operations.c.id, operations.c.request).where(
+            _scope(operations, claim.user_id, claim.project_id), operations.c.kind == "flush",
+            operations.c.status != "completed")) for change in request.get("legacy_changes", []))
         # Stale delayed text can be read, but cannot re-enter historical snapshots.
         invalid = {change["fact_id"] for _, change in pending
                    if change.get("fact_id") and change["kind"] != "added"}
@@ -801,6 +819,17 @@ def _apply_plan(session, claim, plan, kind, event_embeddings):
     rules = _project_rules(session, claim.project_id)
     topics = {topic["topic"] for topic in rules["profile_topics"]}
     tags = {definition["name"] for definition in (rules["event_tag_definitions"] or [])}
+    table = UserProfile.__table__ if kind == "profile" else UserEvent.__table__
+    target_ids = [_uuid(change.id) for change in changes]
+    existing_rows = {row["id"]: dict(row) for row in session.execute(select(table).where(
+        _scope(table, claim.user_id, claim.project_id), table.c.id.in_(target_ids))).mappings()}
+    support_ids = {_uuid(fid) for change in changes for fid in change.fact_ids}
+    support_rows = {str(row["id"]): dict(row) for row in session.execute(select(memory_facts, memory_blobs.c.source_id)
+        .join(memory_blobs, memory_facts.c.blob_id == memory_blobs.c.id)
+        .where(_scope(memory_facts, claim.user_id, claim.project_id), memory_facts.c.id.in_(support_ids))).mappings()}
+    deleted_events = set(session.scalars(select(memory_deleted_events.c.id).where(
+        _scope(memory_deleted_events, claim.user_id, claim.project_id),
+        memory_deleted_events.c.id.in_(target_ids)))) if kind == "event" else set()
     for change in changes:
         ident = _uuid(change.id)
         collection = "profiles" if kind == "profile" else "events"
@@ -808,18 +837,10 @@ def _apply_plan(session, claim, plan, kind, event_embeddings):
             raise SourceError("maintenance_target_unread", "Maintenance target was not registered in the read set", 502)
         if any(plan.readset["facts"].get(str(_uuid(value))) is None for value in change.fact_ids):
             raise SourceError("maintenance_support_unread", "Maintenance support was not read as valid Fact evidence", 502)
-        table = UserProfile.__table__ if kind == "profile" else UserEvent.__table__
-        existing = session.execute(select(table).where(_scope(table, claim.user_id, claim.project_id),
-                                                       table.c.id == ident)).mappings().one_or_none()
-        if kind == "event":
-            deleted = session.scalar(select(memory_deleted_events.c.id).where(
-                _scope(memory_deleted_events, claim.user_id, claim.project_id), memory_deleted_events.c.id == ident))
-            if deleted is not None:
-                raise SourceError("maintenance_read_conflict", "Event was explicitly deleted", 409, True)
+        existing = existing_rows.get(ident)
+        if ident in deleted_events:
+            raise SourceError("maintenance_read_conflict", "Event was explicitly deleted", 409, True)
         if change.action == "remove":
-            if kind == "event":
-                session.execute(delete(UserEventGist).where(UserEventGist.user_id == claim.user_id,
-                    UserEventGist.project_id == claim.project_id, UserEventGist.event_id == ident))
             session.execute(delete(table).where(_scope(table, claim.user_id, claim.project_id), table.c.id == ident))
             continue
         # Configuration may have changed while the model was running. Validate
@@ -828,10 +849,7 @@ def _apply_plan(session, claim, plan, kind, event_embeddings):
             raise SourceError("maintenance_read_conflict", "Configured profile topics changed", 409, True)
         if kind == "event" and any(tag.tag not in tags for tag in change.event_tags):
             raise SourceError("maintenance_read_conflict", "Configured event tags changed", 409, True)
-        supported = [dict(row) for row in session.execute(select(memory_facts, memory_blobs.c.source_id).join(
-            memory_blobs, memory_facts.c.blob_id == memory_blobs.c.id).where(
-            _scope(memory_facts, claim.user_id, claim.project_id), memory_facts.c.active.is_(True),
-            memory_facts.c.id.in_([_uuid(value) for value in change.fact_ids]))).mappings()]
+        supported = [support_rows[str(_uuid(value))] for value in change.fact_ids if str(_uuid(value)) in support_rows]
         if len(supported) != len(change.fact_ids):
             raise SourceError("maintenance_read_conflict", "Supporting facts are no longer valid", 409, True)
         sources = sorted({fact["source_id"] for fact in supported})
@@ -848,8 +866,6 @@ def _apply_plan(session, claim, plan, kind, event_embeddings):
                        "blob_ids": blob_ids, "source_id": sources[0] if len(sources) == 1 else None,
                        "blob_id": blob_ids[0] if len(blob_ids) == 1 else None},
                       "embedding": event_embeddings[ident], "revision": revision}
-            session.execute(delete(UserEventGist).where(UserEventGist.user_id == claim.user_id,
-                UserEventGist.project_id == claim.project_id, UserEventGist.event_id == ident))
         if existing is None:
             session.execute(table.insert().values(id=ident, user_id=claim.user_id,
                 project_id=claim.project_id, **values))
@@ -895,7 +911,7 @@ async def _prepare_event_embeddings(claim, plan):
                         UserEvent.user_id == claim.user_id, UserEvent.project_id == claim.project_id,
                         UserEvent.id.in_([_uuid(change.id) for change in changes])))}
 
-    existing = await asyncio.to_thread(read_existing)
+    existing = await run_sql(read_existing)
     prepared, pending = {}, {}
     for change in changes:
         ident = _uuid(change.id)
@@ -937,17 +953,6 @@ def _commit_plan(claim, plan, lease, task_lease, model_config, event_embeddings)
         complete_flush(session, claim, plan)
 
 
-async def _finish_sql(function, *args):
-    # SQL runs in a thread. Cancellation must await that transaction's outcome
-    # before releasing its Redis lease or closing pooled connections.
-    execution = asyncio.create_task(asyncio.to_thread(function, *args))
-    try:
-        return await asyncio.shield(execution)
-    except asyncio.CancelledError:
-        await execution
-        raise
-
-
 async def execute_claim(claim: Claim, *, runner=None):
     from ..env import LOG
     from ..maintenance_agent import run_loop, LoopUsage
@@ -955,7 +960,7 @@ async def execute_claim(claim: Claim, *, runner=None):
     runner = runner or run_loop
     async with TaskLease(claim) as task_lease:
         try:
-            context = await asyncio.to_thread(DBMaintenanceContext, claim, task_lease)
+            context = await run_sql(DBMaintenanceContext, claim, task_lease)
             plan = context.get_plan(LoopUsage()) if all(
                 change.get("kind") == "noop" for change in claim.changes) else await runner(context)
             await task_lease.assert_active()
@@ -967,7 +972,7 @@ async def execute_claim(claim: Claim, *, runner=None):
             while True:
                 try:
                     async with UserLease(claim.user_id, claim.project_id) as lease:
-                        await _finish_sql(_commit_plan, claim, plan, lease, task_lease,
+                        await run_sql(_commit_plan, claim, plan, lease, task_lease,
                                           (context.llm_model, context.reasoning_effort), event_embeddings)
                     break
                 except LeaseUnavailable:
@@ -979,11 +984,11 @@ async def execute_claim(claim: Claim, *, runner=None):
                      claim.operation_id, plan.usage.turns, plan.usage.input_tokens,
                      plan.usage.output_tokens, plan.usage.usage_complete, plan.usage.elapsed_seconds)
         except asyncio.CancelledError:
-            await _finish_sql(fail_claim, claim, SourceError("maintenance_cancelled", "Flush was interrupted", 503, True))
+            await run_sql(fail_claim, claim, SourceError("maintenance_cancelled", "Flush was interrupted", 503, True))
             raise
         except Exception as error:
             if isinstance(error, LeaseLost):
                 error = SourceError("lease_lost", "Memory write ownership was lost", 409, True)
-            await _finish_sql(fail_claim, claim, error)
+            await run_sql(fail_claim, claim, error)
             return False
     return True

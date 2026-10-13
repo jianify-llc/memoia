@@ -79,14 +79,12 @@ async def test_new_topic_leaves_unrelated_profile_id_content_and_update_time_unc
 
 
 @pytest.mark.asyncio
-async def test_withdraw_correction_restores_previously_invalid_fact(source_user, models, monkeypatch):
+async def test_later_statement_does_not_hide_old_fact_and_delete_only_removes_own_support(source_user, models, monkeypatch):
     monkeypatch.setattr(CONFIG, "enable_event_embedding", False)
     async def extract(body, *, rules, **kwargs):
         item = {**fact("basic", "Shanghai" if body.idempotency_key == "new" else "Beijing"), "sub_topic": "city",
                 "support_groups": [[body.messages[0].message_id]], "occurred_at": body.messages[0].occurred_at}
-        if body.idempotency_key == "new":
-            assert rules["related_facts"][0]["content"] == "Beijing"
-            item["corrects"] = [{"fact_id": rules["related_facts"][0]["id"], "support_groups": [["city"]]}]
+        assert "related_facts" not in rules
         return source.ExtractedSource([item])
     monkeypatch.setattr(source, "extract_source", extract)
     await source.import_source(source_user, "__root__", request("old", "cities", messages=[
@@ -96,14 +94,14 @@ async def test_withdraw_correction_restores_previously_invalid_fact(source_user,
     newer = await source.import_source(source_user, "__root__", request("new", "cities", messages=[
         {"message_id": "city", "role": "user", "content": "Beijing corrected to Shanghai", "occurred_at": day(2)}]))
     with Session() as session:
-        assert session.execute(select(memory_facts.c.active).where(memory_facts.c.content == "Beijing",
-            memory_facts.c.user_id == source_user)).scalar_one() is False
+        assert set(session.scalars(select(memory_facts.c.content).where(
+            memory_facts.c.user_id == source_user))) == {"Beijing", "Shanghai"}
     assert await maintain(source_user, runner)
     await source.delete_messages(source_user, "__root__", newer.source_id,
         DeleteMessages(idempotency_key="withdraw-correction", message_ids=["city"]))
     with Session() as session:
-        assert session.execute(select(memory_facts.c.active).where(memory_facts.c.content == "Beijing",
-            memory_facts.c.user_id == source_user)).scalar_one() is True
+        assert set(session.scalars(select(memory_facts.c.content).where(
+            memory_facts.c.user_id == source_user))) == {"Beijing"}
     assert await maintain(source_user, runner)
     assert [p.content for p in (await profile.get_user_profiles(source_user, "__root__")).data().profiles] == ["Beijing"]
 
@@ -129,7 +127,8 @@ async def test_withdraw_latest_support_restores_correct_order_against_other_sour
     assert await maintain(source_user, runner)
     assert [p.content for p in (await profile.get_user_profiles(source_user, "__root__")).data().profiles] == ["Shanghai"]
     with Session() as session:
-        assert all(session.scalars(select(memory_facts.c.active).where(memory_facts.c.user_id == source_user)))
+        assert set(session.scalars(select(memory_facts.c.content).where(
+            memory_facts.c.user_id == source_user))) == {"Beijing", "Shanghai"}
 
 
 @pytest.mark.asyncio
@@ -198,26 +197,49 @@ async def test_out_of_scope_model_profile_cannot_commit_but_fact_receipt_remains
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("boundary", ["input", "history"])
-async def test_input_and_related_history_capacity_reject_before_model_with_distinct_errors(source_user, models, monkeypatch, boundary):
+async def test_input_capacity_rejects_before_model_without_changing_prior_receipt(source_user, models, monkeypatch):
     prior = await source.import_source(source_user, "__root__", request())
-    if boundary == "history":
-        with Session.begin() as session:
-            session.execute(memory_facts.insert(), [{**fact("work", f"historical evidence {index}"),
-                "support_groups": [["1"]], "blob_id": prior.blob_id, "user_id": source_user,
-                "project_id": "__root__"} for index in range(201)])
-    else:
-        monkeypatch.setattr(CONFIG, "source_context_window_tokens", 1)
+    monkeypatch.setattr(CONFIG, "source_context_window_tokens", 1)
     model = AsyncMock()
     monkeypatch.setattr(source, "extract_source", model)
     with pytest.raises(source.SourceError) as error:
         await source.import_source(source_user, "__root__", request("capacity", messages=[
             {"message_id": "3", "role": "user", "content": "a small new assertion", "occurred_at": day(3)}]))
-    assert error.value.code == ("input_too_long" if boundary == "input" else "related_facts_too_large")
+    assert error.value.code == "input_too_long"
     assert not error.value.retryable
     model.assert_not_awaited()
     assert source.get_operation(source_user, "__root__", operation_id=prior.operation_id) == prior
     assert source.get_operation(source_user, "__root__", key="capacity").result is None
+
+
+@pytest.mark.asyncio
+async def test_large_source_history_does_not_enter_extraction_or_block_new_batch(source_user, models, monkeypatch):
+    prior = await source.import_source(source_user, "__root__", request())
+    with Session.begin() as session:
+        session.execute(memory_facts.insert(), [{**fact("work", f"historical evidence {index}"),
+            "support_groups": [["1"]], "blob_id": prior.blob_id, "user_id": source_user,
+            "project_id": "__root__"} for index in range(10_000)])
+    original = source.extract_source
+    async def extract(body, *, rules, **kwargs):
+        assert "related_facts" not in rules
+        assert [m.message_id for m in body.messages] == ["3"]
+        return await original(body, rules=rules, **kwargs)
+    monkeypatch.setattr(source, "extract_source", extract)
+    from sqlalchemy import event as sql_event
+    from memoia_server.connectors import DB_ENGINE
+    historical_reads = []
+    def capture(connection, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT") and "memory_facts" in statement:
+            historical_reads.append(statement)
+    sql_event.listen(DB_ENGINE, "before_cursor_execute", capture)
+    try:
+        result = await source.import_source(source_user, "__root__", request("new", messages=[
+            {"message_id": "3", "role": "user", "content": "small new statement", "occurred_at": day(3)}]))
+    finally:
+        sql_event.remove(DB_ENGINE, "before_cursor_execute", capture)
+    assert result.status == "completed" and len(result.result.fact_ids) == 1
+    assert historical_reads == []
+    assert source.get_operation(source_user, "__root__", operation_id=prior.operation_id) == prior
 
 
 @pytest.mark.asyncio

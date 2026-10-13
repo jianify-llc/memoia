@@ -172,11 +172,13 @@ async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(so
     claim = claim_for(source_user)
     maintenance.fail_claim(claim, SourceError("invalid_model_output", "safe", 502, False))
     assert row(old.operation_id)["attempts"] == 1
-    # A newer operation changes the same Fact; old recovery must not resurrect v1.
+    # A newer deletion changes surviving evidence time, not the stored statement.
+    # Old recovery must use that current Fact metadata rather than its old batch.
+    current_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
     with Session.begin() as session:
         session.execute(update(memory_facts).where(memory_facts.c.id == fid).values(
-            content="Current corrected conclusion", revision=2))
-    newer, _ = batch(source_user, 2, fact=False, changes=[{"kind": "corrected", "fact_id": str(fid)}])
+            occurred_at=current_time, revision=2))
+    newer, _ = batch(source_user, 2, fact=False, changes=[{"kind": "evidence", "fact_id": str(fid)}])
     new = maintenance.flush(source_user, "__root__", "new")
     assert await maintenance.execute_claim(claim_for(source_user), runner=derive())
     assert row(new.operation_id)["status"] == "completed"
@@ -186,8 +188,9 @@ async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(so
     assert recovered.operation_id == old.operation_id
     assert await maintenance.execute_claim(recovered, runner=derive())
     with Session() as session:
-        assert list(session.scalars(select(UserProfile.content).where(UserProfile.user_id == source_user))) == ["Current corrected conclusion"]
+        assert list(session.scalars(select(UserProfile.content).where(UserProfile.user_id == source_user))) == ["Supported fact 1"]
         assert session.query(UserEvent).filter_by(user_id=source_user).count() == 1
+        assert session.scalar(select(UserEvent.event_data).where(UserEvent.user_id == source_user))["time"] == current_time.isoformat()
 
 
 @pytest.mark.asyncio

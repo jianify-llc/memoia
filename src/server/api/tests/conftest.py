@@ -6,8 +6,6 @@ from memoia_server.env import CONFIG
 from memoia_server import connectors
 
 PREFIX = "/api"
-CONFIG.profile_strict_mode = False
-CONFIG.minimum_chats_token_size_for_event_summary = 5
 CONFIG.event_tags = [
     {"name": "emotion", "description": "Record the current emotion of user"},
     {"name": "goal", "description": "Record the current goal of user"},

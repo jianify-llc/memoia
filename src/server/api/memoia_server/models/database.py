@@ -257,9 +257,6 @@ class User(Base):
     related_user_events: Mapped[list["UserEvent"]] = relationship(
         "UserEvent", back_populates="user", cascade="all, delete-orphan", init=False
     )
-    related_user_event_gists: Mapped[list["UserEventGist"]] = relationship(
-        "UserEventGist", back_populates="user", cascade="all, delete-orphan", init=False
-    )
     related_user_statuses: Mapped[list["UserStatus"]] = relationship(
         "UserStatus", back_populates="user", cascade="all, delete-orphan", init=False
     )
@@ -490,13 +487,6 @@ class UserEvent(Base):
     )
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default="1")
 
-    related_user_event_gists: Mapped[list["UserEventGist"]] = relationship(
-        "UserEventGist",
-        back_populates="event",
-        cascade="all, delete-orphan",
-        init=False,
-        overlaps="related_user_event_gists",
-    )
 
     __table_args__ = (
         PrimaryKeyConstraint("id", "project_id"),
@@ -515,81 +505,6 @@ class UserEvent(Base):
     def check_legal_embedding_dim(cls, session):
         check_legal_embedding_dim(cls, session)
         LOG.info("UserEvent embedding dimension checked")
-
-
-@REG.mapped_as_dataclass
-class UserEventGist(Base):
-    __tablename__ = "user_event_gists"
-
-    # Specific columns
-    gist_data: Mapped[dict] = mapped_column(JSONB)
-
-    # Relationships
-    event_id: Mapped[UUID] = mapped_column(
-        UUID(as_uuid=True),
-        nullable=False,
-    )
-
-    user_id: Mapped[UUID] = mapped_column(
-        UUID(as_uuid=True),
-        nullable=False,
-    )
-
-    project_id: Mapped[str] = mapped_column(
-        VARCHAR(64),
-        default=DEFAULT_PROJECT_ID,
-    )
-
-    event: Mapped[UserEvent] = relationship(
-        "UserEvent",
-        back_populates="related_user_event_gists",
-        init=False,
-        foreign_keys=[event_id, project_id],
-        overlaps="related_user_event_gists",
-    )
-
-    user: Mapped[User] = relationship(
-        "User",
-        back_populates="related_user_event_gists",
-        init=False,
-        foreign_keys=[user_id, project_id],
-        overlaps="event,related_user_event_gists",
-    )
-
-    embedding: Mapped[Vector] = mapped_column(
-        Vector(dim=CONFIG.embedding_dim), nullable=True, default=None
-    )
-
-    __table_args__ = (
-        PrimaryKeyConstraint("id", "project_id"),
-        Index("idx_user_event_gists_user_id_project_id", "user_id", "project_id"),
-        Index(
-            "idx_user_event_gists_user_id_project_id_id", "user_id", "project_id", "id"
-        ),
-        Index(
-            "idx_user_event_gists_user_id_id_project_id",
-            "user_id",
-            "project_id",
-            "event_id",
-        ),
-        ForeignKeyConstraint(
-            ["user_id", "project_id"],
-            ["users.id", "users.project_id"],
-            ondelete="CASCADE",
-            onupdate="CASCADE",
-        ),
-        ForeignKeyConstraint(
-            ["event_id", "project_id"],
-            ["user_events.id", "user_events.project_id"],
-            ondelete="CASCADE",
-            onupdate="CASCADE",
-        ),
-    )
-
-    @classmethod
-    def check_legal_embedding_dim(cls, session):
-        check_legal_embedding_dim(cls, session)
-        LOG.info("UserEventGist embedding dimension checked")
 
 
 @REG.mapped_as_dataclass

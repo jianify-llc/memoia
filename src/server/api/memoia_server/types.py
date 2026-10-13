@@ -1,5 +1,5 @@
 # Modified for Memoia: relocated from the upstream memobase_server package.
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -9,10 +9,10 @@ def attribute_unify(attr: str):
 
 
 class SubTopic(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str
     description: Optional[str] = None
     update_description: Optional[str] = None
-    validate_value: Optional[bool] = None
 
     @field_validator("name")
     def validate_name(cls, v):

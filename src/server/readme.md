@@ -35,7 +35,7 @@ Memobase uses a single  `config.yaml` to initialize the server. It contains the 
 
 - LLM: `llm_base_url`, `llm_api_key`, `best_llm_model`,...
 - Embedding: `enable_event_embedding`, `embedding_api_key`...
-- Memory: `max_pre_profile_token_size`, `max_profile_subtopics`, `additional_user_profiles`...
+- Memory: bounded source input/token settings and `additional_user_profiles` / `overwrite_user_profiles`; retired truncation and strict-mode fields are rejected.
 
 By default, Memobase enables user profile and event memory with filter ability. That means running a Memobase server requires you to have below things:
 
@@ -46,7 +46,7 @@ We have some example `config.yaml` in `examplel_config`:
 
 - [`profile_for_assistant`](./api/example_config/profile_for_education),  [`profile_for_education`](./api/example_config/profile_for_education),  [`profile_for_companion`](./api/example_config/profile_for_companion)  are three similar configs in term of structure, but for different user cases.
 - [`event_tag`](./api/example_config/event_tag) is a feature to tracking temporal attributes of users. [doc](https://docs.memobase.io/features/event/event_tag)
-- [`only_strict_profile`](./api/example_config/only_strict_profile): disable all other features, only collect the profiles you design.
+- [`custom_profile_topics`](./api/example_config/custom_profile_topics): customize the allowed Profile Topics without filtering Fact extraction.
 - [`jina_embedding`](./api/example_config/jina_embedding) uses Jina exmbedding for event search.
 - [`ollama_embedding`](./api/example_config/ollama_embedding) uses Ollama exmbedding for event search.
 

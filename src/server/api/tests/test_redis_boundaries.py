@@ -1,5 +1,6 @@
 """Redis coordinates writes and approximate counters, never durable memory state."""
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -71,7 +72,9 @@ async def test_api_shutdown_waits_for_sweep_and_closes_even_if_it_fails(monkeypa
     monkeypatch.setattr(api, "llm_sanity_check", AsyncMock())
     close = AsyncMock(wraps=connectors.close_connection)
     monkeypatch.setattr(api, "close_connection", close)
-    entered, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    cancelled = asyncio.Event()
+    event_loop_thread = threading.get_ident()
     shield = asyncio.shield
 
     async def observe_cancellation(task):
@@ -83,18 +86,21 @@ async def test_api_shutdown_waits_for_sweep_and_closes_even_if_it_fails(monkeypa
 
     monkeypatch.setattr(asyncio, "shield", observe_cancellation)
 
-    async def finish_sweep(callback):
-        assert callback is source.purge_expired_inputs
+    def finish_sweep():
+        assert threading.get_ident() != event_loop_thread
         entered.set()
-        await release.wait()
-        if failure is not None:
-            raise failure
+        try:
+            assert release.wait(timeout=3), "Test did not release the SQL workunit"
+            if failure is not None:
+                raise failure
+        finally:
+            finished.set()
 
-    sweep = AsyncMock(side_effect=finish_sweep)
-    monkeypatch.setattr(asyncio, "to_thread", sweep)
+    sweep = MagicMock(side_effect=finish_sweep)
+    monkeypatch.setattr(source, "purge_expired_inputs", sweep)
     runtime = api.lifespan(api.app)
     await runtime.__aenter__()
-    await asyncio.wait_for(entered.wait(), .5)
+    assert await asyncio.to_thread(entered.wait, 1)
     client = connectors.get_redis_client()
     disconnect = AsyncMock(wraps=client.connection_pool.disconnect)
     monkeypatch.setattr(client.connection_pool, "disconnect", disconnect)
@@ -102,6 +108,7 @@ async def test_api_shutdown_waits_for_sweep_and_closes_even_if_it_fails(monkeypa
     try:
         await asyncio.wait_for(cancelled.wait(), .5)
         assert not stopping.done()
+        assert not finished.is_set()
         close.assert_not_awaited()
         disconnect.assert_not_awaited()
         release.set()
@@ -109,7 +116,8 @@ async def test_api_shutdown_waits_for_sweep_and_closes_even_if_it_fails(monkeypa
         done, _ = await asyncio.wait({stopping}, timeout=.5)
         assert stopping in done
         await stopping
-        sweep.assert_awaited_once()
+        assert finished.is_set()
+        sweep.assert_called_once_with()
         close.assert_awaited_once()
         disconnect.assert_awaited_once()
         assert connectors.REDIS_CLIENT is None

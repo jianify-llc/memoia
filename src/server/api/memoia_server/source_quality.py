@@ -107,11 +107,7 @@ async def run_quality(settings, *, cases=CASES, client=None):
                         {"message_id": mid, "role": role, "content": content, "occurred_at": f"2026-01-01T00:00:{index:02d}Z"}
                         for index, (mid, role, content) in enumerate(case.messages)
                     ])
-                    rules = {"language": "en", "strict_mode": case.strict, "profile_topics": [],
-                             "validate_values": True, "event_tag_definitions": [], "event_theme_requirement": "Only supported facts"}
-                    if case.strict:
-                        rules["profile_topics"] = [{"topic": "work", "description": "Employment only", "sub_topics": [
-                            {"name": "occupation", "description": "User's real occupation"}]}]
+                    rules = {"language": "en"}
                     remaining = settings["deadline_seconds"] - (time.monotonic() - started)
                     if remaining <= 0:
                         row.update(passed=False, error={"code": "quality_deadline"})
@@ -119,7 +115,7 @@ async def run_quality(settings, *, cases=CASES, client=None):
                     try:
                         extracted = await asyncio.wait_for(source.extract_source(request, rules=rules, project_id="quality-only"), remaining)
                         row["facts"] = [{key: fact[key] for key in (
-                            "content", "subject", "reporter", "certainty", "support_groups", "event_time", "corrects")}
+                            "content", "subject", "reporter", "certainty", "support_groups", "event_time")}
                             for fact in extracted.facts]
                         row["checks"] = grade(case, row["facts"])
                         row["passed"] = all(row["checks"].values())

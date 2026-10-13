@@ -69,19 +69,21 @@ def test_topic_defaults_follow_project_language_or_service_fallback(
     assert required_topics <= {topic["topic"] for topic in rules["profile_topics"]}
 
 
-@pytest.mark.parametrize("strict_mode", [None, False, True])
-def test_project_strict_mode_preserves_explicit_false_and_global_fallback(projects, monkeypatch, strict_mode):
+@pytest.mark.parametrize("field,value", [
+    ("profile_strict_mode", None), ("profile_strict_mode", False), ("profile_strict_mode", True),
+    ("profile_validate_mode", False), ("event_theme_requirement", "Only life events"),
+])
+def test_retired_project_configuration_is_rejected(projects, field, value):
     _, ids = projects
-    monkeypatch.setattr(CONFIG, "profile_strict_mode", True)
     with Session.begin() as session:
         session.execute(update(Project).where(Project.project_id == ids[0]).values(
-            profile_config=json.dumps({"profile_strict_mode": strict_mode})))
-        rules = source._project_rules(session, ids[0])
-    assert rules["strict_mode"] is (True if strict_mode is None else strict_mode)
+            profile_config=json.dumps({field: value})))
+        with pytest.raises(ValueError, match=field):
+            source._project_rules(session, ids[0])
 
 
 @pytest.mark.parametrize("overwrite", [None, [], [{"topic": "Custom Topic", "description": "Project scope",
-    "sub_topics": [{"name": "Custom Field", "description": "Keep this description", "validate_value": False}]}]])
+    "sub_topics": [{"name": "Custom Field", "description": "Keep this description"}]}]])
 def test_project_topic_overrides_and_additions_preserve_descriptions(projects, overwrite):
     _, ids = projects
     config = {"language": "en", "overwrite_user_profiles": overwrite,
@@ -93,10 +95,31 @@ def test_project_topic_overrides_and_additions_preserve_descriptions(projects, o
     topics = {topic["topic"]: topic for topic in rules["profile_topics"]}
     if overwrite:
         assert topics == {"custom_topic": {"topic": "custom_topic", "description": "Project scope", "sub_topics": [
-            {"name": "custom_field", "description": "Keep this description", "update_description": None, "validate_value": False}]}}
+            {"name": "custom_field", "description": "Keep this description", "update_description": None}]}}
     else:
         assert "personal_background" in topics
         assert topics["extra_topic"] == {"topic": "extra_topic", "description": "Additional scope", "sub_topics": []}
+
+
+@pytest.mark.parametrize("value", [None, False, True, ["allowed"]])
+def test_retired_subtopic_value_validation_is_rejected(projects, value):
+    _, ids = projects
+    with Session.begin() as session:
+        session.execute(update(Project).where(Project.project_id == ids[0]).values(profile_config=json.dumps({
+            "overwrite_user_profiles": [{"topic": "Custom", "sub_topics": [
+                {"name": "Field", "validate_value": value}]}]})))
+        with pytest.raises(ValueError, match="validate_value"):
+            source._project_rules(session, ids[0])
+
+
+@pytest.mark.parametrize("field", ["overwrite_user_profiles", "additional_user_profiles"])
+def test_project_topic_without_subtopics_resolves(projects, field):
+    _, ids = projects
+    with Session.begin() as session:
+        session.execute(update(Project).where(Project.project_id == ids[0]).values(
+            profile_config=json.dumps({field: [{"topic": "Custom"}]})))
+        rules = source._project_rules(session, ids[0])
+    assert {"topic": "custom", "description": None, "sub_topics": []} in rules["profile_topics"]
 
 
 @pytest.mark.asyncio

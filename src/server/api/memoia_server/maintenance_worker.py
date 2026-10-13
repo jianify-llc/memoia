@@ -33,7 +33,7 @@ def healthy(path=HEARTBEAT_PATH):
 
 
 async def serve(*, concurrency=None, stop=None):
-    from .connectors import close_connection, init_redis_client
+    from .connectors import close_connection, init_redis_client, run_sql
     from .controllers.maintenance import claim_next, execute_claim, seal_due, reap_expired
     from .env import LOG
     from .schema import check_schema
@@ -47,7 +47,7 @@ async def serve(*, concurrency=None, stop=None):
             loop.add_signal_handler(sig, stop.set)
         except (NotImplementedError, RuntimeError):
             pass
-    check_schema()
+    await run_sql(check_schema)
     init_redis_client()
     active = set()
     try:
@@ -62,10 +62,10 @@ async def serve(*, concurrency=None, stop=None):
                     LOG.error("Maintenance execution failed; inspect sanitized task status")
             active.difference_update(finished)
             try:
-                await asyncio.to_thread(reap_expired)
-                await asyncio.to_thread(seal_due)
+                await run_sql(reap_expired)
+                await run_sql(seal_due)
                 while len(active) < concurrency and not stop.is_set():
-                    claim = await asyncio.to_thread(claim_next)
+                    claim = await run_sql(claim_next)
                     if claim is None:
                         break
                     active.add(asyncio.create_task(execute_claim(claim)))

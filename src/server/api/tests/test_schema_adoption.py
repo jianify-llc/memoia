@@ -172,7 +172,7 @@ def test_event_time_extension_preserves_old_facts_without_invented_backfill(lega
         connection.execute(text("UPDATE memory_facts SET event_time=CAST(:value AS jsonb) WHERE id=:id"), {"value": json.dumps(value), "id": fact})
     refused = subprocess.run([sys.executable, "-m", "alembic", "downgrade", "0006_source_blob_messages"],
         cwd=ROOT, env={**os.environ, "DATABASE_URL": url}, capture_output=True, text=True)
-    assert refused.returncode != 0 and "persistent business data" in refused.stderr
+    assert refused.returncode != 0 and "use a forward migration" in refused.stderr
     with engine.connect() as connection:
         assert connection.execute(text("SELECT event_time FROM memory_facts WHERE id=:id"), {"id": fact}).scalar_one() == value
 

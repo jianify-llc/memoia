@@ -12,7 +12,7 @@ from sqlalchemy import select, update, delete, func
 from memoia_server.controllers import source, user, profile, event
 from memoia_server.controllers.user_lease import UserLease, LeaseUnavailable, CURRENT_LEASE
 from memoia_server.connectors import Session, get_redis_client, DB_ENGINE
-from memoia_server.models.database import User, UserProfile, UserEvent, UserEventGist, Project, Billing, ProjectBilling
+from memoia_server.models.database import User, UserProfile, UserEvent, Project, Billing, ProjectBilling
 from memoia_server.models.response import UserData
 from memoia_server.models.source import ImportSource, DeleteMessages, memory_blobs, memory_operations, memory_facts, user_memory_states
 from memoia_server.env import CONFIG
@@ -377,28 +377,6 @@ async def test_event_delete_keeps_source_and_profiles_and_never_resurrects(sourc
     assert retracted.result.event_ids == []
     assert await maintain(source_user)
     assert all(row.id != eid for row in (await event.get_user_events(source_user, "__root__")).data().events)
-    with Session() as session:
-        assert session.scalar(select(func.count()).select_from(UserEventGist).where(UserEventGist.user_id == source_user)) == 0
-
-
-@pytest.mark.asyncio
-async def test_event_edit_replaces_vector_and_gists_atomically(source_user, models, monkeypatch):
-    inserted = await source.import_source(source_user, "__root__", request())
-    assert await maintain(source_user)
-    eid = source.get_blob(source_user, "__root__", inserted.blob_id).event_ids[0]
-    vector = np.full(CONFIG.embedding_dim, .25)
-    monkeypatch.setattr(event, "get_embedding", AsyncMock(return_value=Promise.resolve(np.array([vector, vector, vector]))))
-    async with UserLease(source_user, "__root__") as lease:
-        with Session.begin() as session:
-            source._fence_snapshot(session, source_user, "__root__", lease)
-        assert (await event.update_user_event(source_user, "__root__", eid, {"event_tip": "- edited one\n- edited two"})).ok()
-    with Session() as session:
-        row = session.get(UserEvent, (eid, "__root__"))
-        assert row.event_data["event_tip"] == "- edited one\n- edited two"
-        assert np.allclose(row.embedding, vector)
-        gists = session.query(UserEventGist).filter_by(event_id=eid, project_id="__root__").all()
-        assert {g.gist_data["content"] for g in gists} == {"edited one", "edited two"}
-        assert all(np.allclose(g.embedding, vector) for g in gists)
 
 
 @pytest.mark.asyncio
@@ -423,12 +401,11 @@ async def test_profile_edit_cannot_strip_provenance_then_escape_withdrawal(sourc
 
 
 @pytest.mark.asyncio
-async def test_project_configuration_reaches_structured_prompts_and_strict_validator(source_user, monkeypatch):
+async def test_project_configuration_reaches_structured_prompts_and_topic_validation(source_user, monkeypatch):
     with Session.begin() as session:
         row = session.query(Project).filter_by(project_id="__root__").one()
         old = row.profile_config
         row.profile_config = """language: zh
-profile_strict_mode: true
 overwrite_user_profiles:
   - topic: custom
     sub_topics: [city]
@@ -444,7 +421,7 @@ event_tags: []
         if model is source.Extraction:
             assert set(data["configuration"]) == {"language"}
             return source.Extraction(facts=[source.ExtractedFact(content="Tokyo", subject="user", reporter="user",
-                certainty="asserted", corrects=[], support_groups=[["1"]], event_time=None)])
+                certainty="asserted", support_groups=[["1"]], event_time=None)])
         raise AssertionError("Fact import must not call a derived model")
     monkeypatch.setattr(source, "_structured", structured)
     monkeypatch.setattr(CONFIG, "enable_event_embedding", False)

@@ -13,7 +13,7 @@ from sqlalchemy import delete, insert, select, update
 from memoia_server.connectors import Session
 from memoia_server.controllers import event
 from memoia_server.env import CONFIG
-from memoia_server.models.database import User, UserEvent, UserEventGist
+from memoia_server.models.database import User, UserEvent
 from memoia_server.models.source import memory_sources, memory_messages, memory_blobs, memory_facts, memory_event_facts
 from memoia_server.models.utils import Promise
 
@@ -130,15 +130,13 @@ async def test_unindexed_old_event_remains_searchable_without_new_dates(fact_use
 
 
 @pytest.mark.asyncio
-async def test_non_source_legacy_gist_remains_searchable(fact_user, monkeypatch):
+async def test_non_source_legacy_event_remains_searchable(fact_user, monkeypatch):
     uid, client = fact_user
     monkeypatch.setattr(CONFIG, "enable_event_embedding", False)
     with Session.begin() as session:
-        legacy = UserEvent(user_id=uid, project_id="__root__", event_data={"event_tip": "Legacy narrative"})
+        legacy = UserEvent(user_id=uid, project_id="__root__", event_data={"event_tip": "Sakura legacy hotel"})
         session.add(legacy)
         session.flush()
-        session.add(UserEventGist(user_id=uid, project_id="__root__", event_id=legacy.id,
-            gist_data={"content": "Sakura legacy hotel"}))
         eid = legacy.id
     result = (await client.post(f"/api/users/{uid}/search", json={"query": "Sakura"})).json()
     assert result["facts"] == []

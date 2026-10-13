@@ -57,7 +57,7 @@ def model_transport(contents):
 
 
 def fact(content, groups):
-    return {"content": content, "subject": "the user", "reporter": "the user", "certainty": "asserted", "corrects": [], "support_groups": groups,
+    return {"content": content, "subject": "the user", "reporter": "the user", "certainty": "asserted", "support_groups": groups,
             "event_time": None}
 
 
@@ -123,7 +123,6 @@ async def test_actual_extract_preserves_full_roles_ids_times_and_joint_support(m
         assert "prompt_cache_key" not in wire
         assert source_material(wire["input"][1]["content"][0]["text"]) == {
             "configuration": {"language": "en"},
-            "related_facts": [],
             "messages": [{**message.model_dump(mode="json"), "local_recorded_date": None}
                          for message in request.messages]}
         assert wire["text"]["format"]["schema"] == source.Extraction.model_json_schema()
@@ -243,8 +242,8 @@ async def test_compute_only_forbids_business_sql_and_redis(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_baseline_override_restores_single_prompt_truth_and_strict_evidence_retained():
-    case = next(case for case in CASES if case.strict)
+async def test_baseline_override_restores_single_prompt_truth_and_evidence_retained():
+    case = next(case for case in CASES if case.name == "hobby_statement")
     payload = {"facts": [fact("Collects model trains as a hobby", [["u-outside"]])]}
     client, bodies = model_transport([json.dumps(payload)])
     original = source.EXTRACT_SYSTEM
@@ -262,12 +261,12 @@ async def test_baseline_override_restores_single_prompt_truth_and_strict_evidenc
 
 @pytest.mark.asyncio
 async def test_extraction_preserves_out_of_profile_evidence_without_duplicate_classification(monkeypatch):
-    case = next(case for case in CASES if case.strict)
+    case = next(case for case in CASES if case.name == "hobby_statement")
     fid = UUID("0162c48f-c526-4264-a1a4-c6e4ec2f9804")
-    rules = {"language": "en", "strict_mode": True, "validate_values": True,
+    rules = {"language": "en",
              "profile_topics": [{"topic": "work", "description": "Employment only", "sub_topics": [
                  {"name": "occupation", "description": "User's real occupation"}]}],
-             "event_tag_definitions": [], "event_theme_requirement": "Employment only"}
+             "event_tag_definitions": []}
     payload = {"facts": [fact("Collects model trains as a hobby", [["u-outside"]])]}
     client, bodies = model_transport([json.dumps(payload)])
     monkeypatch.setattr("memoia_server.llms.openai_model_llm.get_openai_async_client_instance", lambda: client)
@@ -279,7 +278,7 @@ async def test_extraction_preserves_out_of_profile_evidence_without_duplicate_cl
         extracted_configuration = source_material(bodies[0]["input"][1]["content"][0]["text"])["configuration"]
         assert extracted_configuration == {"language": "en"}
         assert len(bodies) == 1 and "event_tags" not in bodies[0]["text"]["format"]["schema"]["properties"]
-        assert rules["strict_mode"] is True and rules["event_theme_requirement"] == "Employment only"
+        assert rules["profile_topics"][0]["topic"] == "work"
     finally:
         await client.close()
 
@@ -365,7 +364,7 @@ def test_joint_reference_does_not_accept_arbitrary_supersets_or_missing_context(
     "The user is not interested in model trains",
 ])
 def test_hobby_keyword_alone_does_not_turn_explicit_negation_into_positive(content):
-    case = next(case for case in CASES if case.name == "strict_slots")
+    case = next(case for case in CASES if case.name == "hobby_statement")
     assert not all(grade(case, [fact(content, [["u-outside"]])]).values())
 
 

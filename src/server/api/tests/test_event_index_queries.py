@@ -87,7 +87,8 @@ async def test_fact_change_during_event_embedding_rejects_both_derived_writes(so
     original = embeddings.get_embedding
     async def race(*args, **kwargs):
         with Session.begin() as session:
-            session.execute(update(memory_facts).where(memory_facts.c.id == fid).values(active=False, revision=2))
+            from sqlalchemy import delete
+            session.execute(delete(memory_facts).where(memory_facts.c.id == fid))
         return await original(*args, **kwargs)
     monkeypatch.setattr(embeddings, "get_embedding", race)
     assert not await maintenance.execute_claim(claim_for(source_user), runner=derive())
@@ -102,25 +103,6 @@ def test_event_index_text_has_one_factual_body_and_no_interpretation():
         location="Kyoto", interpretation="Maybe they reconciled"))
     assert text == "Trip\nKyoto\nSupported story"
     assert event_embedding_str(EventData(event_tip="Legacy story")).strip() == "Legacy story"
-
-
-@pytest.mark.asyncio
-async def test_manual_story_edit_uses_shared_index_text_and_updates_vector(search_users, monkeypatch):
-    uid, _, _, _ = search_users
-    eid, _ = seed_derived(uid, seed_facts(uid, ["Supported memory"]))
-    monkeypatch.setattr(CONFIG, "enable_event_embedding", True)
-    async def embed(_, texts, **kwargs):
-        return Promise.resolve(np.full((len(texts), CONFIG.embedding_dim), .2))
-    mock = AsyncMock(side_effect=embed)
-    monkeypatch.setattr(event, "get_embedding", mock)
-    assert (await event.update_user_event(uid, "__root__", eid,
-        {"content": "Updated factual story", "interpretation": "Unproven thought"})).ok()
-    with Session() as session:
-        story = session.scalar(select(UserEvent).where(UserEvent.id == eid))
-        assert mock.call_args.args[1][0] == event_embedding_str(EventData(**story.event_data))
-        assert "Updated factual story" in mock.call_args.args[1][0]
-        assert "Unproven thought" not in mock.call_args.args[1][0]
-        assert np.allclose(story.embedding, .2)
 
 
 @pytest.mark.asyncio

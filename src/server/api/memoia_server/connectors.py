@@ -2,18 +2,19 @@
 import os
 import asyncio
 import math
+from contextvars import copy_context
+from functools import partial
 import redis.exceptions as redis_exceptions
 import redis.asyncio as redis
 from redis.asyncio.connection import parse_url
 from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy import event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import OperationalError
-from uuid import uuid4
 from .env import LOG
-from .models.database import REG, Project, UserEvent, UserEventGist
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
@@ -26,9 +27,30 @@ if PROJECT_ID is None:
     PROJECT_ID = "default"
 LOG.info(f"Project ID: {PROJECT_ID}")
 
-# Create an engine
+def database_connect_args():
+    # Bound the database work itself: cancelling an asyncio waiter cannot stop
+    # its SQL thread. Alembic owns a separate engine and does not use these limits.
+    limits = {name: int(os.getenv(name, default)) for name, default in (
+        ("DATABASE_CONNECT_TIMEOUT_SECONDS", "5"),
+        ("DATABASE_LOCK_TIMEOUT_MS", "5000"),
+        ("DATABASE_STATEMENT_TIMEOUT_MS", "30000"),
+    )}
+    if any(value <= 0 for value in limits.values()):
+        raise ValueError("Database timeouts must be positive")
+    return {
+        "connect_timeout": limits["DATABASE_CONNECT_TIMEOUT_SECONDS"],
+        "options": (f'{make_url(DATABASE_URL).query.get("options", "")} '
+                    f'-c lock_timeout={limits["DATABASE_LOCK_TIMEOUT_MS"]} '
+                    f'-c statement_timeout={limits["DATABASE_STATEMENT_TIMEOUT_MS"]}'),
+        # A server timeout cannot be delivered over a dead TCP connection.
+        "keepalives": 1, "keepalives_idle": 10, "keepalives_interval": 5,
+        "keepalives_count": 3, "tcp_user_timeout": 15000,
+    }
+
+
 DB_ENGINE = create_engine(
     DATABASE_URL,
+    connect_args=database_connect_args(),
     pool_size=int(os.getenv("DATABASE_POOL_SIZE", "8")),
     max_overflow=int(os.getenv("DATABASE_POOL_OVERFLOW", "4")),
     pool_recycle=300,
@@ -41,6 +63,30 @@ DB_ENGINE = create_engine(
 REDIS_CLIENT: redis.Redis | None = None
 
 Session = sessionmaker(bind=DB_ENGINE)
+
+
+async def run_sql(function, *args, **kwargs):
+    """Run one complete Session unit without blocking the loop or abandoning a commit."""
+    # A Future survives task-wide shutdown cancellation while its SQL thread
+    # finishes; propagate the user lease context just as asyncio.to_thread does.
+    execution = asyncio.get_running_loop().run_in_executor(
+        None, copy_context().run, partial(function, *args, **kwargs)
+    )
+    try:
+        return await asyncio.shield(execution)
+    except asyncio.CancelledError:
+        # Cancellation cannot stop a database thread. Keep its write lease alive
+        # until the outcome is known, including repeated request cancellations.
+        while not execution.done():
+            try:
+                await asyncio.shield(execution)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not execution.cancelled():
+            execution.exception()
+        raise
 
 
 @event.listens_for(Session, "after_begin")
@@ -81,27 +127,6 @@ def fence_legacy_commit(session):
         with session.no_autoflush:
             fence_commit(session, lease.identity[0], lease.identity[1], lease)
         session.info.pop("memoia_fence_done", None)
-
-
-def create_pgvector_extension():
-    try:
-        with Session() as session:
-            session.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
-            session.commit()
-            LOG.info("pgvector extension created or already exists")
-    except Exception as e:
-        LOG.error(f"Failed to create pgvector extension: {e}")
-
-
-def create_tables():
-    create_pgvector_extension()
-
-    REG.metadata.create_all(DB_ENGINE)
-    with Session() as session:
-        Project.initialize_root_project(session)
-        UserEvent.check_legal_embedding_dim(session)
-        UserEventGist.check_legal_embedding_dim(session)
-    LOG.info("Database tables created successfully")
 
 
 # Imports must be usable for OpenAPI and unit tests without touching a database.

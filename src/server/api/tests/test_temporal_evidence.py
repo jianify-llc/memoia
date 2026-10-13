@@ -11,13 +11,13 @@ from pydantic import ValidationError
 from sqlalchemy import select, update
 
 from memoia_server.models.source import EventTime, ImportSource, DeleteMessages, SourceMessage, memory_facts
-from memoia_server.models.response import EventGistData, UserData
-from memoia_server.models.database import User, UserEvent, UserEventGist
+from memoia_server.models.response import RetrievedContent, UserData
+from memoia_server.models.database import User, UserEvent
 from memoia_server.controllers import source, user, event, maintenance
 from memoia_server.connectors import Session
 from memoia_server.models.utils import Promise
 from memoia_server.env import CONFIG
-from memoia_server.temporal import supported_event_time, render_gist, render_search_fact, source_observations
+from memoia_server.temporal import supported_event_time, render_memory_content, render_search_fact, source_observations
 from memoia_server.llms import embeddings
 from memoia_server.maintenance_agent import EventMutation, LoopUsage
 from tests.maintenance_support import derive, maintain, status
@@ -102,7 +102,7 @@ async def test_extraction_contract_keeps_undated_content_support_without_requiri
         {"message_id": "u", "role": "user", "content": "I have visited Bluebird Cafe in Lisbon once",
          "occurred_at": "2026-10-03T00:05:00Z", "time_zone": "Asia/Shanghai"}])
     output = {"facts": [{"content": "Visited Bluebird Cafe in Lisbon", "subject": "user",
-        "reporter": "user", "certainty": "asserted", "corrects": [],
+        "reporter": "user", "certainty": "asserted",
         "support_groups": [["d"], ["u"]],
         "event_time": period("2024-05-01", "2024-05-31", "month", "May 2024", "d")}]}
     monkeypatch.setattr(source, "openai_complete", AsyncMock(return_value=json.dumps(output)))
@@ -117,12 +117,12 @@ async def test_extraction_contract_keeps_undated_content_support_without_requiri
 
 
 def test_render_retains_precision_raw_expression_and_labels_recording_time():
-    gist = EventGistData(content="Sakura Hotel", event_time=period(), source_messages=[
+    content = RetrievedContent(content="Sakura Hotel", event_time=period(), source_messages=[
         {"message_id": "1", "recorded_at": "2026-10-03T00:00:00Z", "time_zone": "Asia/Shanghai"}])
-    rendered = render_gist(gist)
+    rendered = render_memory_content(content)
     assert "2025-04-30" in rendered and "去年四月" in rendered and '"precision":"month"' in rendered
     assert '"recorded_at":"2026-10-03' in rendered
-    assert render_gist(EventGistData(content="legacy undated fact")) == "legacy undated fact"
+    assert render_memory_content(RetrievedContent(content="legacy undated fact")) == "legacy undated fact"
     assert source_observations([["old"]], [{"message_id": "old", "occurred_at": None}]) == []
 
 
@@ -130,7 +130,7 @@ def test_render_retains_precision_raw_expression_and_labels_recording_time():
 @pytest.mark.parametrize("event_time", ["missing", "wrong type", period(end="2025-04-29")])
 async def test_real_structured_validation_rejects_missing_or_invalid_time_without_echoing_content(monkeypatch, event_time):
     fact = {"content": "private temporal validation marker", "subject": "user", "reporter": "user",
-            "certainty": "asserted", "corrects": [], "support_groups": [["1"]]}
+            "certainty": "asserted", "support_groups": [["1"]]}
     if event_time != "missing":
         fact["event_time"] = event_time
     monkeypatch.setattr(source, "openai_complete", AsyncMock(return_value=json.dumps({"facts": [fact]})))
@@ -152,7 +152,7 @@ async def test_extraction_anchors_each_message_in_its_recorded_zone_and_rejects_
         from xml.etree import ElementTree
         seen.append(json.loads(ElementTree.fromstring(prompt).text))
         return source.Extraction(facts=[source.ExtractedFact(content="Kyoto visit", subject="user",
-            reporter="user", certainty="asserted", corrects=[],
+            reporter="user", certainty="asserted",
             support_groups=[["1"]], event_time=period("2025-12-31", "2025-12-31", "day", "昨天"))])
     monkeypatch.setattr(source, "_structured", structured)
     result = await source.extract_source(body)
@@ -160,7 +160,7 @@ async def test_extraction_anchors_each_message_in_its_recorded_zone_and_rejects_
     assert result.facts[0]["occurred_at"].year == 2025
     assert result.facts[0]["event_time"]["start"] == "2025-12-31"
     bad = source.Extraction(facts=[source.ExtractedFact(content="Kyoto", subject="user",
-        reporter="user", certainty="asserted", corrects=[],
+        reporter="user", certainty="asserted",
         support_groups=[["1"]], event_time=period(expression="fabricated quote"))])
     monkeypatch.setattr(source, "_structured", AsyncMock(return_value=bad))
     with pytest.raises(source.SourceError, match="original source"):
@@ -246,7 +246,6 @@ async def test_storage_read_search_and_retraction_keep_separate_time_evidence(te
     with Session.begin() as session:
         derived = session.query(UserEvent).filter_by(user_id=temporal_user, project_id="__root__").one()
         assert derived.event_data["event_tip"] == "Stayed at Sakura Hotel in Kyoto\n[Event time: 2025-04; precision: month]"
-        assert session.query(UserEventGist).filter_by(user_id=temporal_user, project_id="__root__").count() == 0
         # Fact recall remains independent of the associated story's recording time.
         session.execute(update(UserEvent).where(UserEvent.user_id == temporal_user).values(created_at=datetime(2020, 1, 1, tzinfo=timezone.utc)))
     found = await event.hybrid_search_user_events(temporal_user, "__root__", "Kyoto 2025-04")
@@ -267,7 +266,6 @@ async def test_storage_read_search_and_retraction_keep_separate_time_evidence(te
             fact = session.execute(select(memory_facts).where(memory_facts.c.user_id == temporal_user)).mappings().one()
             assert fact["support_groups"] == [["1"], ["2"]] and fact["event_time"] is not None
             assert session.query(UserEvent).filter_by(user_id=temporal_user, project_id="__root__").count() == 1
-            assert session.query(UserEventGist).filter_by(user_id=temporal_user, project_id="__root__").count() == 0
         assert (await event.hybrid_search_user_events(temporal_user, "__root__", "Kyoto")).data().facts[0].evidence.event_time is not None
         deleted = await source.retry_operation(temporal_user, "__root__", failed.operation_id)
         assert deleted.operation_id == failed.operation_id
@@ -303,7 +301,6 @@ async def test_storage_read_search_and_retraction_keep_separate_time_evidence(te
         derived = session.query(UserEvent).filter_by(user_id=temporal_user, project_id="__root__").one()
         assert derived.event_data["event_tip"] == "Stayed at Sakura Hotel in Kyoto" and derived.event_data["time"] is None
         assert event.event_view(session, derived)["evidence"][0]["event_time"] is None
-        assert session.query(UserEventGist).filter_by(event_id=derived.id, project_id="__root__").count() == 0
     assert await source.delete_messages(temporal_user, "__root__", "dialog", deletion) == deleted
     assert len(document_inputs) == (3 if fail_rebuild else 2)
     assert story_embedding.await_count == 2
@@ -361,10 +358,7 @@ async def test_dates_do_not_add_scores_to_content_ranking_or_drop_unknown_old_re
                 event_data={"event_tip": "Kyoto hotel stay", "source_id": sid, "evidence": [evidence]})
             session.add(record)
             session.flush()
-            gist = UserEventGist(user_id=temporal_user, project_id="__root__", event_id=record.id,
-                embedding=vector, gist_data={"content": "Kyoto hotel stay", "source_id": sid, "event_time": event_time})
             record.created_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
-            session.add(gist)
     expected = ["unknown", "other-month", "matching-month", "year-only"]
     hybrid = await event.hybrid_search_user_events(temporal_user, "__root__", query, limit=4)
     assert hybrid.ok()

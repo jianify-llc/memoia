@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from memoia_server.connectors import (
     close_connection,
     init_redis_client,
+    run_sql,
 )
 from memoia_server.api_layer import middleware
 from memoia_server.env import LOG
@@ -25,21 +26,11 @@ async def lifespan(app: FastAPI):
     import asyncio
     from memoia_server.controllers.source import purge_expired_inputs
     from memoia_server.schema import check_schema
-    check_schema()
+    await run_sql(check_schema)
     async def erase_expired():
         while True:
             try:
-                sweep = asyncio.create_task(asyncio.to_thread(purge_expired_inputs))
-                try:
-                    await asyncio.shield(sweep)
-                except asyncio.CancelledError:
-                    # Cancelling a thread await does not stop its SQL transaction.
-                    # Finish this sweep before closing shared connections.
-                    try:
-                        await sweep
-                    except Exception:
-                        LOG.error("Temporary input erasure failed during shutdown")
-                    raise
+                await run_sql(purge_expired_inputs)
             except Exception:
                 LOG.error("Temporary input erasure failed; inspect database connectivity")
             await asyncio.sleep(60)

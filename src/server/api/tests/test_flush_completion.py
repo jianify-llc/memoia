@@ -3,7 +3,7 @@ from uuid import uuid4
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select, update, func
+from sqlalchemy import delete, select, update, func
 
 from tests.test_maintenance import source_user, batch, row
 from tests.test_search_bundle import search_users, seed_facts, seed_derived
@@ -14,6 +14,24 @@ from memoia_server.connectors import Session
 from memoia_server.controllers import maintenance, source
 from memoia_server.models.database import UserProfile, UserEvent
 from memoia_server.models.source import DeleteMessages, memory_facts, memory_blobs, memory_operations
+
+
+def test_flush_reads_candidate_facts_once_not_once_per_blob(source_user):
+    from sqlalchemy import event
+    from memoia_server.connectors import DB_ENGINE
+    for version in range(30):
+        batch(source_user, version + 1)
+    reads = []
+    def record(conn, cursor, statement, parameters, context, many):
+        if statement.lstrip().startswith("SELECT") and "FROM memory_facts" in statement:
+            reads.append(statement)
+    event.listen(DB_ENGINE, "before_cursor_execute", record)
+    try:
+        sealed = maintenance.flush(source_user, "__root__", "batch-read")
+    finally:
+        event.remove(DB_ENGINE, "before_cursor_execute", record)
+    assert len(sealed.flush.blob_ids) == 30
+    assert len(reads) == 1
 
 
 @pytest.mark.asyncio
@@ -82,16 +100,19 @@ async def test_byte_pagination_includes_staged_entries_once_without_cursor_loop(
         for index in range(25):
             await context.stage_profile(maintenance_agent.ProfileMutation(action="upsert",
                 content="K" * 4096, topic="interests_preferences", sub_topic=f"entry-{index}", fact_ids=[str(fid)]))
-        cursor, seen = None, []
+        cursor, seen, pages = None, [], 0
         while True:
             page = await context.read("profiles", cursor=cursor, limit=200)
+            pages += 1
             assert maintenance.payload_size(page) <= maintenance_agent.MAX_TOOL_BYTES
+            assert all(item["content"] == "K" * 4096 and "content_preview" not in item for item in page["items"])
             seen.extend(item["id"] for item in page["items"])
             if page["next_cursor"] is None:
                 break
             assert page["next_cursor"] != cursor
             cursor = page["next_cursor"]
         assert len(seen) == len(set(seen)) == 25
+        assert pages > 1
         return context.get_plan(maintenance_agent.LoopUsage())
     assert await maintenance.execute_claim(claim_for(source_user), runner=runner)
 
@@ -225,9 +246,9 @@ async def test_surviving_support_is_never_mechanically_removed(search_users):
     deleted, surviving = seed_facts(uid, ["First evidence", "Independent evidence"])
     eid, pid = seed_derived(uid, [deleted, surviving])
     with Session.begin() as session:
-        session.execute(update(memory_facts).where(memory_facts.c.id == deleted).values(active=False, revision=2))
         bid = session.scalar(select(memory_facts.c.blob_id).where(memory_facts.c.id == deleted))
-        maintenance.record_changes(session, uid, "__root__", bid, 2, [{"kind": "corrected", "fact_id": str(deleted)}])
+        session.execute(delete(memory_facts).where(memory_facts.c.id == deleted))
+        maintenance.record_changes(session, uid, "__root__", bid, 2, [{"kind": "deleted", "fact_id": str(deleted)}])
     async def runner(context):
         await context.read_changes()
         assert not context._staged["profiles"] and not context._staged["events"]

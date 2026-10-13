@@ -432,7 +432,6 @@ async def test_empty_structured_content_flush_fails_without_event(
     state, client = openai_transport
     state["content"] = content
     monkeypatch.setattr(CONFIG, "best_llm_model", "gpt-6-luna")
-    monkeypatch.setattr(CONFIG, "summary_llm_model", None)
     api_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
     api_client.headers["Authorization"] = f"Bearer {os.environ['ACCESS_TOKEN']}"
     user_id = (await api_client.post("/api/users", json={})).json()["id"]

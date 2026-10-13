@@ -1,5 +1,11 @@
 # Memoia TypeScript SDK
 
+Facts are supported historical statements. Imports do not search, correct or hide
+older Facts; contradictions may coexist, while Profile/Event organize the current
+understanding asynchronously. Source scopes message identity and deletion, without
+a cumulative Fact limit. The import, delete, operation and query wire contracts
+are unchanged. Project configuration rejects retired and unknown fields explicitly.
+
 `@jianify/memoia@0.10.1` supports Node.js and Cloudflare Workers. Protocol types and standalone runtime validators come from `src/server/api/openapi.json`. Every capability uses one unversioned `/api` contract; deploy server and consumers together. No legacy SDK or version alias is supported.
 
 `queryFacts(userId, input)`, `queryEvents(userId, input)` and `queryProfiles(userId, input)` query independent pre-filtered pools; they do not slice `search` results. Query text stays in private read-only POST bodies, using the existing read timeout/retry policy. OpenAPI-derived `FactQuery`/`EventQuery`/`ProfileQuery` and result types are exported. Supported filters and the distinct recording/creation/calendar times are documented in [API-DESIGN](../../src/server/api/API-DESIGN.md#独立只读查询). `getProjectIdentity()` returns the authenticated `project_id` for server-owned cache scope; client input cannot override it. Existing methods retain their contracts; schema remains 0009.

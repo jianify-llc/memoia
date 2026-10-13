@@ -1,61 +1,31 @@
 ---
-title: Searching Events
+title: Searching Facts and Events
 ---
 
-User events in Memobase are stored as a sequence of experiences, each enriched with [tags](/features/event/event_tag). By default, events are retrieved in chronological order, but Memobase also provides a powerful search function to find events based on a query.
-## Semantic Search
+Memoia searches evidence-backed Facts directly. A Fact remains searchable before
+its Event is generated and after an Event is deleted.
 
-A user event is a group of user infos happened in a period of time.
-So when you need to search for specific facts or infos, you may need a more fine-grained search.
+Send `POST /api/users/{user_id}/search` with a JSON body:
 
-In Memobase, we call it `event_gist`. `event_gist` is a fraction of `user_event` that only contains one fact, schedule, or reminder of user.
-
-So if you want to search particular things of user, without the context of other infos, you can use `search_event_gist` to conduct a search:
-<CodeGroup>
-```python Python
-# To use the Python SDK, install the package:
-# pip install memobase
-from memobase import MemoBaseClient
-from memobase.core.blob import ChatBlob
-
-client = MemoBaseClient(project_url='PROJECT_URL', api_key='PROJECT_TOKEN')
-u = client.get_user(UID)
-
-events = u.search_event_gist('Car')
-print(events)
-```
-```txt Output
-- user bought a car [mentioned at 2025-01]
-- user drove to the car dealership [mentioned at 2025-06]
-- user likes BMW [mentioned at 2024-08]
-...
-```
-</CodeGroup>
-
-For detail API, please refer to [Search Event Gists](/api-reference/events/search_event_gists).
-
-## Search Packed Events with Tags
-
-You can perform a semantic search to find events related to a specific topic or concept.
-
-Different from `search_event_gist`, the return elements of `search_event` are packed gists of user events(happened in a period of time).
-
-We recommend more to use `search_event_gist` to retrieve fine-grained events.
-
-```python
-# To use the Python SDK, first install the package:
-# pip install memobase
-
-from memobase import MemoBaseClient
-
-client = MemoBaseClient(project_url='YOUR_PROJECT_URL', api_key='YOUR_API_KEY')
-user = client.get_user('some_user_id')
-
-# Search for events related to the user's emotions
-events = user.search_event("Anything about my emotions")
-print(events)
+```json
+{
+  "query": "Why was the hiking trip cancelled?",
+  "max_token_size": 4000,
+  "exclude_fact_ids": [],
+  "exclude_event_ids": [],
+  "exclude_profile_ids": []
+}
 ```
 
-This query will return events where the user discussed their emotions, events that were automatically [tagged](/features/event/event_tag) with an `emotion` tag, or events that updated profile slots related to emotion.
+The response has three independent arrays: `facts`, `events`, and `profiles`.
+Vector and text matches rank Facts; associated stories and profiles share the
+remaining response budget. Entries are returned whole, including their evidence.
+Set `include_events: false` to omit stories. ID exclusions remain strict even
+when an item's content has changed.
 
-For a detailed list of search parameters, please refer to the [API documentation](/api-reference/events/search_events).
+For independent searches, use `facts/query`, `events/query`, or `profiles/query`
+under the same user path. Their contracts come from the server OpenAPI document
+and the maintained `@jianify/memoia` TypeScript SDK.
+
+The old Gist API, storage and indexing paths have been removed. Legacy Event
+bodies remain readable; unsupported Gist-only details are not converted to Facts.

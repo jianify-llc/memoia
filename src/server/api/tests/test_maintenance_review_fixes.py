@@ -17,6 +17,7 @@ from memoia_server.env import CONFIG
 from memoia_server.models.database import UserProfile, UserEvent
 from memoia_server.models.source import (
     DeleteMessages, memory_facts, memory_blobs, memory_messages, memory_profile_revisions,
+    memory_operations,
 )
 from memoia_server.models.utils import Promise
 
@@ -112,7 +113,7 @@ async def test_surviving_fact_loses_time_in_history_before_and_after_maintenance
     assert await maintain(uid, derive())
     with Session() as session:
         fact = session.execute(select(memory_facts).where(memory_facts.c.id == fid)).mappings().one()
-        assert fact["active"] and fact["event_time"] is None
+        assert fact["event_time"] is None
     assert history_text(uid) and not any("April 2025" in text for text in history_text(uid))
 
 
@@ -135,3 +136,28 @@ async def test_new_evidence_deletion_during_loop_cannot_reintroduce_stale_histor
     assert maintenance.get_status(uid, "__root__")["pending_blob_count"] == 1
     assert await maintain(uid, derive())
     assert not any("April 2025" in text for text in history_text(uid))
+
+
+@pytest.mark.asyncio
+async def test_unfinished_migration_flush_keeps_legacy_changes_out_of_new_history(search_users):
+    uid, _, _, _ = search_users
+    sid, _, _ = timed_profile(uid, "Sakura Hotel")
+    _, legacy_fact, legacy_profile = timed_profile(uid, "Bluebird Cafe")
+    legacy_operation = uuid4()
+    with Session.begin() as session:
+        session.execute(update(memory_facts).where(memory_facts.c.id == legacy_fact).values(event_time=None, revision=2))
+        session.execute(memory_operations.insert().values(id=legacy_operation, user_id=uid, project_id="__root__",
+            kind="flush", idempotency_key="legacy-migration", request_hash="fixture", status="failed",
+            request={"blob_ids": [], "legacy_changes": [{"kind": "evidence", "fact_id": str(legacy_fact)}]},
+            error={"code": "model_unavailable", "retryable": True}, generation=0, attempts=4))
+    await source.delete_messages(uid, "__root__", sid,
+        DeleteMessages(message_ids=["m2"], idempotency_key="other-time"))
+    assert await maintain(uid, derive())
+    with Session() as session:
+        snapshots = session.scalars(select(memory_profile_revisions.c.profiles).where(
+            memory_profile_revisions.c.user_id == uid,
+            memory_profile_revisions.c.operation_id.is_not(None))).all()
+        assert snapshots
+        assert all(str(legacy_profile) not in {profile["id"] for profile in snapshot} for snapshot in snapshots)
+        # The permitted delayed current view is untouched by another batch.
+        assert "April 2025" in session.scalar(select(UserProfile.content).where(UserProfile.id == legacy_profile))

@@ -103,12 +103,6 @@ def get_decoded_tokens(tokens: list[int]) -> str:
     return ENCODER.decode(tokens)
 
 
-def truncate_string(content: str, max_tokens: int) -> str:
-    tokens = get_encoded_tokens(content)
-    tailing = "" if len(tokens) <= max_tokens else "..."
-    return get_decoded_tokens(tokens[:max_tokens]) + tailing
-
-
 def pack_blob_from_db(blob: GeneralBlob, blob_type: BlobType) -> Blob:
     blob_data = blob.blob_data
     match blob_type:
@@ -178,9 +172,5 @@ def is_valid_profile_config(profile_config: str | None) -> Promise[None]:
             return Promise.reject(CODE.BAD_REQUEST, "Profile config is too long")
         ProfileConfig.load_config_string(profile_config)
         return Promise.resolve(None)
-    except yaml.YAMLError as e:
-        return Promise.reject(CODE.BAD_REQUEST, f"Invalid profile config: {e}")
-    except ValidationError as e:
-        return Promise.reject(CODE.BAD_REQUEST, f"Invalid profile config: {e}")
-    except ValueError:
-        return Promise.reject(CODE.BAD_REQUEST, "Invalid project model configuration")
+    except (yaml.YAMLError, ValidationError, ValueError):
+        return Promise.reject(CODE.BAD_REQUEST, "Invalid project configuration")

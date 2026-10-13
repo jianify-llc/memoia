@@ -1,7 +1,7 @@
 # Modified for Memoia: relocated from the upstream memobase_server package.
 from datetime import datetime
 from enum import IntEnum
-from typing import Optional, Literal
+from typing import Optional
 from pydantic import BaseModel, UUID4, UUID5, Field
 from .blob import BlobData, OpenAICompatibleMessage
 from .claim import ClaimData
@@ -98,8 +98,8 @@ class EventTag(BaseModel):
     value: str = Field(..., description="The event tag value")
 
 
-class EventGistData(BaseModel):
-    content: str = Field(..., description="The event gist content")
+class RetrievedContent(BaseModel):
+    content: str = Field(..., description="Retrieved memory content")
     event_time: "EventTime | None" = None
     source_messages: list["SourceObservation"] = Field(default_factory=list)
     source_id: str | None = None
@@ -123,18 +123,6 @@ class EventData(BaseModel):
     )
     event_tip: Optional[str] = Field(None, description="Event tip")
     event_tags: Optional[list[EventTag]] = Field(None, description="List of event tags")
-
-
-class UserEventGistData(BaseModel):
-    id: UUID = Field(..., description="The event gist's unique identifier")
-    gist_data: EventGistData = Field(None, description="User event gist data")
-    created_at: datetime = Field(
-        None, description="Timestamp when the event gist was created"
-    )
-    updated_at: datetime = Field(
-        None, description="Timestamp when the event gist was last updated"
-    )
-    similarity: Optional[float] = Field(None, description="Similarity score")
 
 
 class UserEventData(BaseModel):
@@ -170,16 +158,6 @@ class UserProfilesData(BaseModel):
 
 class UserEventsData(BaseModel):
     events: list[UserEventData] = Field(..., description="List of user events")
-    gists: list[UserEventGistData] = Field(
-        default_factory=list, description="List of user event gists"
-    )
-
-
-class UserEventGistsData(BaseModel):
-    gists: list[UserEventGistData] = Field(..., description="List of user event gists")
-    events: list[UserEventData] = Field(
-        default_factory=list, description="List of user events"
-    )
 
 
 class StrIntData(BaseModel):
@@ -205,43 +183,6 @@ class BillingData(BaseModel):
     next_refill_at: Optional[datetime] = Field(None, description="Next refill time")
     project_token_cost_month: int = Field(
         ..., description="Token cost of this project for this month"
-    )
-
-
-class UserStatusData(BaseModel):
-    id: UUID = Field(..., description="User status id")
-
-    type: str = Field(..., description="User status type")
-    attributes: dict = Field(..., description="User status attributes")
-
-    created_at: Optional[datetime] = Field(
-        None, description="Timestamp when the user was created"
-    )
-    updated_at: Optional[datetime] = Field(
-        None, description="Timestamp when the user was last updated"
-    )
-
-
-class UserStatusesData(BaseModel):
-    statuses: list[UserStatusData] = Field(..., description="List of user statuses")
-
-
-class ProactiveTopicData(BaseModel):
-    action: Literal["new_topic", "continue"] = Field(
-        ..., description="The action to take"
-    )
-    topic_prompt: Optional[str] = Field(
-        None,
-        description="The topic prompt, insert it to your latest user message or system prompt",
-    )
-
-
-class ProactiveTopicRequest(BaseModel):
-    messages: list[OpenAICompatibleMessage] = Field(
-        ..., description="The latest messages between user/assistant"
-    )
-    agent_context: Optional[str] = Field(
-        None, description="The agent's roleplay prompt"
     )
 
 
@@ -314,12 +255,6 @@ class UserEventsDataResponse(BaseResponse):
     )
 
 
-class UserEventGistsDataResponse(BaseResponse):
-    data: Optional[UserEventGistsData] = Field(
-        None, description="Response containing user event gists"
-    )
-
-
 class UserContextDataResponse(BaseResponse):
     data: Optional[ContextData] = Field(
         None, description="Response containing user context"
@@ -347,12 +282,6 @@ class BlobInsertData(IdData):
 class BlobInsertResponse(BaseResponse):
     data: Optional[BlobInsertData] = Field(
         None, description="Response containing blob insert data"
-    )
-
-
-class ProactiveTopicResponse(BaseResponse):
-    data: Optional[ProactiveTopicData] = Field(
-        None, description="Response containing proactive topic data"
     )
 
 

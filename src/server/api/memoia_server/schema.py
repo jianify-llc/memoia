@@ -1,10 +1,10 @@
 """Explicit application schema preflight, never implicit import-time DDL."""
 from sqlalchemy import text
 from .connectors import Session
-from .models.database import Project, UserEvent, UserEventGist
+from .models.database import Project, UserEvent
 from .env import CONFIG
 
-EXPECTED_REVISION = "0009_blob_flush"
+EXPECTED_REVISION = "0011_retire_gists"
 
 
 def check_schema():
@@ -13,7 +13,6 @@ def check_schema():
         if revision != EXPECTED_REVISION:
             raise RuntimeError("Memoia schema is not at the required Alembic revision")
         UserEvent.check_legal_embedding_dim(session)
-        UserEventGist.check_legal_embedding_dim(session)
         dimension = session.execute(text("SELECT atttypmod FROM pg_attribute "
             "WHERE attrelid='memory_facts'::regclass AND attname='embedding' AND NOT attisdropped")).scalar_one()
         if dimension != CONFIG.embedding_dim:

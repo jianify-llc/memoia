@@ -5,8 +5,8 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Request, Query, HTTPException, Response
 from sqlalchemy.exc import IntegrityError
 from ..models.management import ContextInput, Context, ProfileInput, ProfileConfig, Usage, Health, Users, ProjectUser, Events
-from ..models.response import UserData, IdData, EventGistData
-from ..connectors import Session
+from ..models.response import UserData, IdData
+from ..connectors import Session, run_sql
 from ..models.database import User
 
 router = APIRouter(prefix="/api")
@@ -27,12 +27,14 @@ async def user_write(user_id, project_id, *, creating=False):
     from ..controllers.source import _fence_snapshot, SourceError
     try:
         async with UserLease(str(user_id), project_id) as lease:
-            with Session.begin() as session:
-                if session.get(User, (user_id, project_id)) is None:
-                    if not creating:
-                        raise HTTPException(404, detail={"code": "user_not_found", "message": "User not found", "retryable": False})
-                else:
-                    _fence_snapshot(session, str(user_id), project_id, lease)
+            def snapshot():
+                with Session.begin() as session:
+                    if session.get(User, (user_id, project_id)) is None:
+                        if not creating:
+                            raise HTTPException(404, detail={"code": "user_not_found", "message": "User not found", "retryable": False})
+                    else:
+                        _fence_snapshot(session, str(user_id), project_id, lease)
+            await run_sql(snapshot)
             yield
     except (LeaseLost, LeaseUnavailable):
         raise HTTPException(409, detail={"code": "lease_lost", "message": "User memory is being modified", "retryable": True})
@@ -44,7 +46,7 @@ async def user_write(user_id, project_id, *, creating=False):
 @router.get("/healthcheck", response_model=Health, operation_id="healthcheck")
 async def healthcheck():
     from ..connectors import db_health_check, redis_health_check
-    if not db_health_check() or not await redis_health_check():
+    if not await run_sql(db_health_check) or not await redis_health_check():
         raise HTTPException(503, detail={"code": "health_unavailable", "message": "Service unavailable", "retryable": True})
     return Health()
 
@@ -123,13 +125,14 @@ async def delete_event(user_id: UUID, event_id: UUID, request: Request):
 @router.post("/users/{user_id}/context", response_model=Context, operation_id="getContext")
 async def context(user_id: UUID, body: ContextInput, request: Request):
     from ..controllers.event import retrieve_user_facts, recent_user_facts
-    from ..temporal import render_gist
+    from ..temporal import render_memory_content
     from ..utils import get_encoded_tokens
     if body.query is not None:
         result = unwrap(await retrieve_user_facts(str(user_id), request.state.memobase_project_id, body.query))
-        entries = [render_gist(fact.gist) for fact in result]
+        entries = [render_memory_content(fact.content) for fact in result]
     else:
-        entries = [render_gist(fact) for fact in recent_user_facts(str(user_id), request.state.memobase_project_id)]
+        facts = await run_sql(recent_user_facts, str(user_id), request.state.memobase_project_id)
+        entries = [render_memory_content(fact) for fact in facts]
     # 事实与其证据共同计预算；大批次不能让全部短事实都被丢弃。
     kept = []
     for entry in entries:

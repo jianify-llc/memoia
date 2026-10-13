@@ -1,4 +1,5 @@
 """Profile storage reads committed PostgreSQL state without a Redis dependency."""
+from tests.legacy_fixtures import delete_user
 
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
@@ -19,16 +20,16 @@ from memoia_server.models.response import UserData
 ATTRIBUTES = {"topic": "basic_info", "sub_topic": "name"}
 
 
-def test_obsolete_profile_cache_setting_does_not_prevent_startup(tmp_path, monkeypatch):
+def test_obsolete_profile_cache_setting_is_explicitly_rejected(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MEMOBASE_LLM_API_KEY", "profile-config-test-key")
     monkeypatch.setenv("MEMOBASE_CACHE_USER_PROFILES_TTL", "invalid-unused-ttl")
     (tmp_path / "config.yaml").write_text("language: zh\ncache_user_profiles_ttl: 1200\n")
 
-    config = Config.load_config()
-    assert config.language == "zh"
-    assert not hasattr(config, "cache_user_profiles_ttl")
-    assert "cache_user_profiles_ttl" not in Config._process_env_vars({})
+    with pytest.raises(ValueError, match="cache_user_profiles_ttl"):
+        Config.load_config()
+    with pytest.raises(ValueError, match="MEMOBASE_CACHE_USER_PROFILES_TTL"):
+        Config._process_env_vars({})
 
 
 @pytest_asyncio.fixture
@@ -89,7 +90,7 @@ async def test_profile_read_ignores_stale_redis_and_preserves_contract(profile_u
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "operation", ["read", "add", "update", "delete", "delete_many", "merge", "delete_user"]
+    "operation", ["read", "add", "update", "delete", "delete_user"]
 )
 async def test_profile_read_and_mutations_do_not_require_redis(
     profile_user, monkeypatch, operation
@@ -118,25 +119,8 @@ async def test_profile_read_and_mutations_do_not_require_redis(
     elif operation == "delete":
         result = await profile.delete_user_profile(profile_user, DEFAULT_PROJECT_ID, first)
         expected = {"second"}
-    elif operation == "delete_many":
-        result = await profile.delete_user_profiles(
-            profile_user, DEFAULT_PROJECT_ID, [first, second]
-        )
-        expected = set()
-    elif operation == "merge":
-        result = await profile.add_update_delete_user_profiles(
-            profile_user,
-            DEFAULT_PROJECT_ID,
-            ["third"],
-            [ATTRIBUTES],
-            [first],
-            ["updated"],
-            [None],
-            [second],
-        )
-        expected = {"updated", "third"}
     else:
-        result = await user.delete_user(profile_user, DEFAULT_PROJECT_ID)
+        result = await delete_user(profile_user, DEFAULT_PROJECT_ID)
         expected = set()
 
     assert result.ok()

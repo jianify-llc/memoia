@@ -39,14 +39,14 @@ def render_search_fact(content, event_time):
     return f"{content}\n[Event time: {label}; precision: {time.precision}]"
 
 
-def render_gist(gist):
+def render_memory_content(item):
     # Labels prevent a recording timestamp from masquerading as an event date.
-    content = gist.content
-    details = {"event_time": gist.event_time.model_dump(mode="json") if gist.event_time else None,
-               "source_messages": [m.model_dump(mode="json") for m in gist.source_messages],
-               "source_id": gist.source_id,
-               "blob_id": str(gist.blob_id) if gist.blob_id else None,
-               "fact_id": str(gist.fact_id) if gist.fact_id else None}
-    if gist.event_time is None and not gist.source_messages and gist.source_id is None:
+    content = item.content
+    details = {"event_time": item.event_time.model_dump(mode="json") if item.event_time else None,
+               "source_messages": [m.model_dump(mode="json") for m in item.source_messages],
+               "source_id": item.source_id,
+               "blob_id": str(item.blob_id) if item.blob_id else None,
+               "fact_id": str(item.fact_id) if item.fact_id else None}
+    if item.event_time is None and not item.source_messages and item.source_id is None:
         return content
     return f'{content}\n[Time evidence (event_time=null means unknown): {json.dumps(details, ensure_ascii=False, separators=(",", ":"))}]'

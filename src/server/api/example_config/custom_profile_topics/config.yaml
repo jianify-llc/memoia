@@ -1,10 +1,8 @@
 llm_api_key: XXX
 llm_base_url: https://api.openai.com/v1/
-best_llm_model: gpt-4o
+best_llm_model: gpt-6-luna
 
 enable_event_embedding: false
-enable_event_summary: false
-profile_strict_mode: true
 
 overwrite_user_profiles:
   - topic: "basic_info"

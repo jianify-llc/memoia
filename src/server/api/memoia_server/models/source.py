@@ -378,6 +378,7 @@ memory_blobs = Table(
     ForeignKeyConstraint(["flush_operation_id", "user_id", "project_id"],
         ["memory_operations.id", "memory_operations.user_id", "memory_operations.project_id"], use_alter=True),
     Index("idx_memory_blobs_user", "user_id", "project_id", "source_id", "created_at", "id"),
+    Index("idx_memory_blobs_message_ids", "message_ids", postgresql_using="gin"),
 )
 memory_operations = Table(
     "memory_operations", REG.metadata,
@@ -423,7 +424,6 @@ memory_facts = Table(
     Column("occurred_at", TIMESTAMP(timezone=True), nullable=False),
     Column("event_time", JSONB),
     Column("included", Boolean, nullable=False, server_default="true"),
-    Column("active", Boolean, nullable=False, server_default="true"),
     Column("revision", BigInteger, nullable=False, server_default="1"),
     Column("created_version", BigInteger, nullable=False, server_default="0"),
     Column("search_text", String),
@@ -453,22 +453,12 @@ memory_profile_revisions = Table(
     Index("idx_memory_profile_revisions_user", "user_id", "project_id", "created_at", "id"),
 )
 
-memory_fact_corrections = Table(
-    "memory_fact_corrections", REG.metadata, *identity_columns(),
-    Column("fact_id", PGUUID(as_uuid=True), nullable=False),
-    Column("corrected_fact_id", PGUUID(as_uuid=True), nullable=False),
-    Column("support_groups", JSONB, nullable=False),
-    PrimaryKeyConstraint("fact_id", "corrected_fact_id", "project_id"),
-    ForeignKeyConstraint(["fact_id", "user_id", "project_id"],
-        ["memory_facts.id", "memory_facts.user_id", "memory_facts.project_id"], ondelete="CASCADE"),
-    ForeignKeyConstraint(["corrected_fact_id", "user_id", "project_id"],
-        ["memory_facts.id", "memory_facts.user_id", "memory_facts.project_id"], ondelete="CASCADE"),
-)
 memory_event_facts = Table(
     "memory_event_facts", REG.metadata, *identity_columns(),
     Column("event_id", PGUUID(as_uuid=True), nullable=False),
     Column("fact_id", PGUUID(as_uuid=True), nullable=False),
     PrimaryKeyConstraint("event_id", "fact_id", "project_id"),
+    Index("idx_memory_event_facts_reverse", "user_id", "project_id", "fact_id"),
     ForeignKeyConstraint(["event_id", "user_id", "project_id"],
         ["user_events.id", "user_events.user_id", "user_events.project_id"], ondelete="CASCADE"),
     ForeignKeyConstraint(["fact_id", "user_id", "project_id"],

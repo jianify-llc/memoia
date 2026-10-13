@@ -7,7 +7,10 @@ of Memobase; it now exposes one `/api` contract and the `@jianify/memoia` SDK.
 Upstream HTTP routes and SDKs are retired. Consumers must upgrade together.
 Deployment and rollback boundaries are in the [release guide](../../../docs/guide/memoia-release.md).
 
-Source extraction deduplicates factual conclusions, not independent message support.
+Source extraction only reads the current valid batch, never historical Facts.
+Supported historical statements may conflict; only Profile/Event organize the
+current understanding. Source has no cumulative Fact limit. Extraction deduplicates
+conclusions inside the batch, not independent message support.
 An undated confirmation still supports a fact when a dated message is deleted;
 the removed message's event time must not survive. Repeated messages across Blobs
 retain their original message identity and do not become independent evidence.
@@ -89,7 +92,7 @@ Redis coordinates user writes and stores approximate usage counters. PostgreSQL
 owns the memory data, operation receipts and flush scheduling/recovery.
 
 The obsolete `cache_user_profiles_ttl` YAML option and
-`MEMOBASE_CACHE_USER_PROFILES_TTL` override are ignored. Existing expiring
+`MEMOBASE_CACHE_USER_PROFILES_TTL` override are rejected, like other retired or unknown fields. Existing expiring
 `user_profiles::{project_id}::{user_id}` keys are no longer read or written and
 may expire naturally; no Redis cleanup or database migration is required.
 Descending profile update ordering is preserved. The single API and SDK contracts
@@ -119,8 +122,6 @@ project/user isolation and profile CRUD/merge/user deletion without Redis comman
 
 ## Configuration
 Key configuration options in `config.yaml`:
-- System prompt
-- Buffer flush interval
 - Token size limits
 - LLM settings
 - Language preferences
@@ -130,7 +131,7 @@ Key configuration options in `config.yaml`:
 
 The one-shot OpenAI Responses adapter recognizes the exact model ID `gpt-6-luna`.
 It defaults to `reasoning.effort=high` and `max_output_tokens=32768`
-for business calls through the configured best/thinking model. An explicit native
+for business calls through the configured model. An explicit native
 `max_output_tokens` overrides that default for the current request only.
 Startup uses a separate 4096-token completion budget and asks for exactly `OK`;
 empty, unexpected or incomplete probe results prevent startup. This shared request

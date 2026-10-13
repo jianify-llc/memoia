@@ -16,7 +16,6 @@ from memoia_server.models.database import User, UserEvent
 from memoia_server.models.source import (
     ImportSource, DeleteMessages, memory_sources, memory_blobs, memory_messages,
     memory_operations, memory_facts,
-    memory_fact_corrections,
 )
 
 
@@ -106,79 +105,136 @@ async def test_deleting_message_rebuilds_all_blobs_without_original_text(uid, mo
 
 
 @pytest.mark.asyncio
-async def test_correction_has_its_own_evidence_and_deleted_proof_restores_old_fact(uid, models, monkeypatch):
+async def test_conflicting_statements_keep_independent_evidence_and_old_receipt(uid, models, monkeypatch):
     async def extract(request, **kwargs):
-        related = kwargs["rules"].get("related_facts", [])
+        assert "related_facts" not in kwargs["rules"]
         if request.idempotency_key == "old":
             return source.ExtractedSource([dict(id=uuid4(), content="User lives in Beijing", subject="user",
-                reporter="user", certainty="asserted", corrects=[], support_groups=[["1"]])])
+                reporter="user", certainty="asserted", support_groups=[["1"]])])
         return source.ExtractedSource([dict(id=uuid4(), content="User lives in Shanghai", subject="user",
-            reporter="user", certainty="asserted", support_groups=[["2"], ["4"]],
-            corrects=[{"fact_id": related[0]["id"], "support_groups": [["2"]]}])])
+            reporter="user", certainty="asserted", support_groups=[["2"], ["4"]])])
     monkeypatch.setattr(source, "extract_source", extract)
     old = await source.import_source(uid, "__root__", body("old", "1"))
     newer = await source.import_source(uid, "__root__", body("correction", "2", "4"))
     with Session() as session:
         old_id, new_id = old.result.fact_ids[0], newer.result.fact_ids[0]
-        assert not session.scalar(select(memory_facts.c.active).where(memory_facts.c.id == old_id))
-        assert session.scalar(select(memory_facts.c.active).where(memory_facts.c.id == new_id))
+        assert set(session.scalars(select(memory_facts.c.id).where(memory_facts.c.user_id == uid))) == {old_id, new_id}
     await source.delete_messages(uid, "__root__", "dialog-1",
         DeleteMessages(idempotency_key="remove-correction", message_ids=["2"]))
     with Session() as session:
-        assert session.scalar(select(memory_facts.c.active).where(memory_facts.c.id == old_id))
+        assert session.scalar(select(memory_facts.c.support_groups).where(memory_facts.c.id == old_id)) == [["1"]]
         assert session.scalar(select(memory_facts.c.support_groups).where(memory_facts.c.id == new_id)) == [["4"]]
-        assert session.scalar(select(func.count()).select_from(memory_fact_corrections).where(
-            memory_fact_corrections.c.user_id == uid)) == 0
         changed = [c for batch in session.scalars(select(memory_blobs.c.fact_changes).where(memory_blobs.c.user_id == uid)) for c in batch]
-        assert any(c["fact_id"] == str(old_id) and c["kind"] == "updated" for c in changed)
+        assert all(c["kind"] == "added" for c in changed if c.get("fact_id") == str(old_id))
         assert all("messages" not in request for request in session.scalars(select(memory_operations.c.request).where(
             memory_operations.c.user_id == uid)))
 
 
 @pytest.mark.asyncio
-async def test_normal_time_change_is_not_an_explicit_correction(uid, models):
+async def test_each_batch_keeps_its_historical_statement(uid, models):
     await source.import_source(uid, "__root__", body("earlier", "1"))
     await source.import_source(uid, "__root__", body("later", "2"))
     with Session() as session:
-        assert session.scalar(select(func.count()).select_from(memory_facts).where(memory_facts.c.user_id == uid,
-            memory_facts.c.active)) == 2
-        assert session.scalar(select(func.count()).select_from(memory_fact_corrections).where(
-            memory_fact_corrections.c.user_id == uid)) == 0
+        assert session.scalar(select(func.count()).select_from(memory_facts).where(memory_facts.c.user_id == uid)) == 2
 
 
 @pytest.mark.asyncio
-async def test_cross_source_correction_reads_related_old_assertion_not_full_sentence_and(uid, models, monkeypatch):
+async def test_cross_source_statement_does_not_load_or_modify_earlier_fact(uid, models, monkeypatch):
     old = await source.import_source(uid, "__root__", body("old", "1", source_id="earlier"))
     with Session.begin() as session:
         session.execute(update(memory_facts).where(memory_facts.c.id == old.result.fact_ids[0])
                         .values(content="User lives in Beijing"))
     async def extract(request, **kwargs):
-        related = kwargs["rules"]["related_facts"]
-        assert [f["id"] for f in related] == [str(old.result.fact_ids[0])]
+        assert "related_facts" not in kwargs["rules"]
+        assert [m.message_id for m in request.messages] == ["2"]
         return source.ExtractedSource([dict(id=uuid4(), content="User lives in Shanghai", subject="user",
-            reporter="user", certainty="asserted", support_groups=[["2"]],
-            corrects=[{"fact_id": related[0]["id"], "support_groups": [["2"]]}])])
+            reporter="user", certainty="asserted", support_groups=[["2"]])])
     monkeypatch.setattr(source, "extract_source", extract)
     corrected = body("correct", "2", source_id="new-dialog")
     corrected.messages[0].content = "Correction: I misspoke about Beijing; actually I live in Shanghai."
     await source.import_source(uid, "__root__", corrected)
     with Session() as session:
-        assert not session.scalar(select(memory_facts.c.active).where(memory_facts.c.id == old.result.fact_ids[0]))
+        assert session.scalar(select(memory_facts.c.content).where(memory_facts.c.id == old.result.fact_ids[0])) == "User lives in Beijing"
+        assert session.scalar(select(func.count()).select_from(memory_facts).where(memory_facts.c.user_id == uid)) == 2
+    assert source.get_operation(uid, "__root__", operation_id=old.operation_id) == old
 
 
 @pytest.mark.asyncio
-async def test_capacity_repair_explicitly_resumes_original_import_receipt(uid, models, monkeypatch):
-    original = source._related_facts
-    def too_large(*args):
-        raise source.SourceError("related_facts_too_large", "fixture capacity", 413)
-    monkeypatch.setattr(source, "_related_facts", too_large)
+@pytest.mark.parametrize("kind", ["import", "delete"])
+@pytest.mark.parametrize("code", ["related_facts_too_large", "reconciliation_too_large"])
+async def test_retired_capacity_failure_requires_explicit_recovery_of_original_receipt(uid, models, monkeypatch, kind, code):
+    original = source.fence_commit
+    def old_capacity_failure(*args):
+        raise source.SourceError(code, "fixture legacy capacity", 413)
+    monkeypatch.setattr(source, "fence_commit", old_capacity_failure)
+    async def execute():
+        if kind == "import":
+            return await source.import_source(uid, "__root__", body("capacity", "1"))
+        return await source.delete_messages(uid, "__root__", "dialog-1",
+            DeleteMessages(idempotency_key="capacity", message_ids=["1"]))
     with pytest.raises(source.SourceError):
-        await source.import_source(uid, "__root__", body("capacity", "1"))
+        await execute()
     failed = source.get_operation(uid, "__root__", key="capacity")
     assert failed.status == "failed" and not failed.error.retryable
-    monkeypatch.setattr(source, "_related_facts", original)
+    monkeypatch.setattr(source, "fence_commit", original)
+    assert await execute() == failed
     done = await source.retry_operation(uid, "__root__", failed.operation_id)
     assert done.operation_id == failed.operation_id and done.status == "completed"
+    assert done.blob_id == failed.blob_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["related_facts_too_large", "reconciliation_too_large"])
+async def test_expired_retired_capacity_input_can_be_resupplied_without_reopening_receipt(uid, models, monkeypatch, code):
+    extract, commit = source.extract_source, source.fence_commit
+    calls = 0
+    async def counted_extract(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return await extract(*args, **kwargs)
+    def old_capacity_failure(*args):
+        raise source.SourceError(code, "fixture legacy capacity", 413)
+    monkeypatch.setattr(source, "extract_source", counted_extract)
+    monkeypatch.setattr(source, "fence_commit", old_capacity_failure)
+    request = body("expired-capacity", "1")
+    with pytest.raises(source.SourceError):
+        await source.import_source(uid, "__root__", request)
+    failed = source.get_operation(uid, "__root__", key=request.idempotency_key)
+    monkeypatch.setattr(source, "fence_commit", commit)
+    with Session.begin() as session:
+        session.execute(update(memory_operations).where(memory_operations.c.id == failed.operation_id)
+            .values(input_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)))
+    with pytest.raises(source.SourceError) as expired:
+        await source.retry_operation(uid, "__root__", failed.operation_id)
+    assert expired.value.code == "input_required"
+    assert source.get_operation(uid, "__root__", operation_id=failed.operation_id) == failed
+
+    different = request.model_copy(deep=True)
+    different.messages[0].content = "different input"
+    with pytest.raises(source.SourceError) as conflict:
+        await source.import_source(uid, "__root__", different)
+    assert conflict.value.code == "idempotency_conflict"
+    assert await source.import_source(uid, "__root__", request) == failed
+    assert calls == 1
+    with Session() as session:
+        stored = session.execute(select(memory_operations).where(
+            memory_operations.c.id == failed.operation_id)).mappings().one()
+        assert stored["request"]["messages"][0]["content"] == request.messages[0].content
+        deadline = stored["input_expires_at"]
+        assert timedelta(days=6, hours=23) < deadline - datetime.now(timezone.utc) <= timedelta(days=7)
+    assert await source.import_source(uid, "__root__", request) == failed
+    with Session() as session:
+        assert session.scalar(select(memory_operations.c.input_expires_at).where(
+            memory_operations.c.id == failed.operation_id)) == deadline
+    assert calls == 1
+
+    done = await source.retry_operation(uid, "__root__", failed.operation_id)
+    assert done.status == "completed" and done.operation_id == failed.operation_id
+    assert done.blob_id == failed.blob_id and calls == 2
+    with Session() as session:
+        stored = session.execute(select(memory_operations).where(
+            memory_operations.c.id == failed.operation_id)).mappings().one()
+        assert "messages" not in stored["request"] and stored["input_expires_at"] is None
 
 
 @pytest.mark.asyncio

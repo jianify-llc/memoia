@@ -1,3 +1,4 @@
+from tests.legacy_fixtures import delete_user, get_user_all_blobs
 # Modified for Memoia: use the renamed internal server package.
 import pytest
 from memoia_server.controllers import blob as blob_controller, buffer, user, profile, event
@@ -64,10 +65,6 @@ async def test_summary_buffer_uses_fact_import_and_flush(
     assert p.ok()
     assert len(p.data().profiles) == 4
 
-    p = await profile.truncate_profiles(p.data(), topk=2)
-    assert p.ok()
-    assert len(p.data().profiles) == 2
-
     p = await event.get_user_events(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
     assert len(p.data().events) == 4
@@ -78,12 +75,12 @@ async def test_summary_buffer_uses_fact_import_and_flush(
     assert p.ok() and p.data() == 0
 
     # persistent_chat_blobs default to True
-    p = await user.get_user_all_blobs(
+    p = await get_user_all_blobs(
         u_id, DEFAULT_PROJECT_ID, BlobType.summary
     )
     assert p.ok() and len(p.data().ids) == 2
 
-    p = await user.delete_user(u_id, DEFAULT_PROJECT_ID)
+    p = await delete_user(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
 
     four_fact_source_model.assert_awaited_once()

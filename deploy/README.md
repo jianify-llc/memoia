@@ -132,7 +132,7 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 
 ## Schema 维护与来源模型升级
 
-现有 v1 库升级 v2 是显式维护，不是普通 `prepare`。当前 Alembic 链依次为 `0001_v1_baseline`、`0002_sources_v2`、`0003_profile_history`、`0004_key_scopes_search`、`0005_user_tombstones`、`0006_source_blob_messages`、`0007_event_time_evidence`、`0008_serial_maintenance`、`0009_blob_flush`。0001 严格接纳匹配的完整 v1 库；漂移须停止调查，不重建历史数据。0005 增加永久用户墓碑；0006 建立 Blob／消息归属约束、保留 legacy 来源并清除完成输入原文，未完成输入暂留 7 天。0008 建立 Fact 独立检索，导入 completed 改为 Fact 提交；0009 将旧维护进度/变更/失败转为固定 Blob 和可恢复 flush Operation 后移除任务表。旧执行租约不延续，不重新抽取已清除正文。不可兼容的协议须协调升级，不能普通更新或恢复旧 API。不要 stamp 或手填 schema 指纹。迁移范围见[服务端迁移说明](../src/server/api/migrations/README)与[数据及恢复契约](../src/server/api/API-DESIGN.md)。
+现有库升级是显式维护，不是普通 `prepare`。当前 Alembic head 为 `0011_retire_gists`，整条前向链及数据范围见[迁移说明](../src/server/api/migrations/README)。0011 删除旧 Gist 索引表（不转换为 Fact），保留 Event 正文、Fact 和回执，并添加 Blob 消息成员 GIN 索引。0010 只删除旧隐藏 Fact、纠正图及 active，不复活历史、不重置消息状态或原回执；受影响派生内容由已有 flush 异步修复。需在发布前检查并单独处理退役配置键，不能静默改共享配置。保持原备份／授权和停写边界，不重新抽取已清除正文，不 stamp 或手填 schema 指纹。不可兼容升级不能通过切回旧 API 撤销，数据契约见 [API-DESIGN](../src/server/api/API-DESIGN.md)。
 
 首次增加 Worker 也走这次显式 schema 维护：旧 API／Redis／数据库／网络契约必须与已验收基线相同，且没有旧 Worker。备份策略只允许在旧配套恢复证明上增加同镜像 Worker，不放宽配置或基础设施校验；迁移暂存新的 Worker 指纹，只有两个进程及业务验收通过才接纳。普通 prepare／finalize 仍拒绝拓扑漂移。
 

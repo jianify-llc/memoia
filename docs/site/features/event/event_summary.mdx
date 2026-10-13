@@ -1,17 +1,22 @@
 ---
-title: Customizing Event Summaries
+title: Derived Event Stories
 ---
 
-For each event, Memobase generates a concise summary of the recent user interaction. This summary serves as the primary input for the subsequent extraction of profile updates and event tags, making its quality crucial for the overall effectiveness of the memory system.
+Events organize related supported Facts into a story. The unified AgentLoop
+maintains Profiles and Events after a fixed set of Blobs is flushed. A successful
+Fact import does not imply Event maintenance has completed.
 
-Memobase allows you to customize the prompt used for generating these summaries, giving you greater control over the focus and quality of the extracted information.
+An Event can contain title, summary, keywords, time, location and content.
+Unknown details stay empty. Optional interpretation is separately labeled and
+cannot support a Fact or Profile. Similar people or keywords alone do not mean
+two occurrences are the same story.
 
-## Customizing the Summary Prompt
+Facts and Events have a many-to-many relation. Deleting an Event removes its
+derived index, not the Facts. Message deletion updates Fact evidence immediately;
+old Event text may remain until the flush succeeds, but invalid evidence is not
+returned as current support.
 
-You can add a custom instruction to the summary generation process via the `event_theme_requirement` field in your `config.yaml` file. For example, if you want the summary to focus on the user's personal information rather than their instructions to the AI, you can configure it as follows:
-
-```yaml config.yaml
-event_theme_requirement: "Focus on the user's personal information and feelings, not their direct commands or questions."
-```
-
-This allows you to fine-tune the event summaries to better suit the specific needs of your application.
+The former `event_theme_requirement` setting and summary-first extraction chain
+are removed. Supplying retired settings is an error. Inspect the original flush
+Operation for failure or explicit recovery; do not re-import messages to repair
+a derived Event.

@@ -23,7 +23,7 @@ def modify_default_user_profile(CANDIDATE_PROFILE_TOPICS):
             UserProfileTopic(
                 up["topic"],
                 description=up.get("description", None),
-                sub_topics=up["sub_topics"],
+                sub_topics=up.get("sub_topics", []),
             )
             for up in CONFIG.overwrite_user_profiles
         ]
@@ -32,7 +32,7 @@ def modify_default_user_profile(CANDIDATE_PROFILE_TOPICS):
             UserProfileTopic(
                 up["topic"],
                 description=up.get("description", None),
-                sub_topics=up["sub_topics"],
+                sub_topics=up.get("sub_topics", []),
             )
             for up in CONFIG.additional_user_profiles
         ]
@@ -46,7 +46,7 @@ def read_out_profile_config(config: ProfileConfig, default_profiles: list):
             UserProfileTopic(
                 up["topic"],
                 description=up.get("description", None),
-                sub_topics=up["sub_topics"],
+                sub_topics=up.get("sub_topics", []),
             )
             for up in config.overwrite_user_profiles
         ]
@@ -56,7 +56,7 @@ def read_out_profile_config(config: ProfileConfig, default_profiles: list):
             UserProfileTopic(
                 up["topic"],
                 description=up.get("description", None),
-                sub_topics=up["sub_topics"],
+                sub_topics=up.get("sub_topics", []),
             )
             for up in config.additional_user_profiles
         ]

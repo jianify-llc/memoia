@@ -7,7 +7,6 @@ llm_base_url: https://api.openai.com/v1
 # null 仅原生 OpenAI 自动启用；兼容模式不能保证关闭供应商隐式缓存。
 llm_prompt_cache_options: null
 best_llm_model: gpt-6-luna
-thinking_llm_model: gpt-6-luna
 enable_event_embedding: true
 embedding_provider: openai
 embedding_base_url: https://api.openai.com/v1

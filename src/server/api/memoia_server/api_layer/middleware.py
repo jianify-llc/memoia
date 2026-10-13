@@ -7,7 +7,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from uvicorn.protocols.utils import get_path_with_query_string
-from ..env import ProjectStatus, LOG
+from ..env import LOG
+from ..connectors import run_sql
 from ..models.database import DEFAULT_PROJECT_ID
 from ..models.utils import Promise
 from ..telemetry import (
@@ -16,12 +17,7 @@ from ..telemetry import (
     HistogramMetricName,
 )
 from .. import __version__
-from ..models.response import CODE
-from ..auth.token import (
-    parse_project_id,
-    check_project_secret,
-    get_project_status,
-)
+from ..auth.token import authenticate_legacy_token, authenticate_scoped_key
 
 
 
@@ -38,7 +34,7 @@ async def global_wrapper_middleware(request: Request, call_next):
 
     private_context = request.url.path.startswith("/api/")
     # Do not log query strings, including rejected legacy requests.
-    url = request.url.path if private_context else get_path_with_query_string(request.scope)
+    url = _redact_operation_key(request.url.path) if private_context else get_path_with_query_string(request.scope)
     client_host = request.client.host
     client_port = request.client.port
     http_method = request.method
@@ -68,7 +64,7 @@ async def global_wrapper_middleware(request: Request, call_next):
         f"""{client_host}:{client_port} - "{http_method} {url} HTTP/{http_version}" {status_code}""",
         extra={
             "http": {
-                "url": request.url.path if private_context else str(request.url),
+                "url": url if private_context else str(request.url),
                 "status_code": status_code,
                 "method": http_method,
                 "version": http_version,
@@ -85,6 +81,11 @@ async def global_wrapper_middleware(request: Request, call_next):
     return response
 
 
+def _redact_operation_key(path):
+    import re
+    return re.sub(r"(/operations/by-key)/[^/]+", r"\1/{id}", path)
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     def normalize_path(self, path: str) -> str:
         """Remove dynamic path parameters to get normalized path for metrics"""
@@ -93,7 +94,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # 路径只保留资源形状，UUID 和来源编号不能制造高基数指标。
         import re
-        return re.sub(r"(/users|/projects|/sources|/blobs|/operations|/keys|/profiles|/events)/[^/]+", r"\1/{id}", path)
+        path = _redact_operation_key(path)
+        return re.sub(r"(/users|/projects|/sources|/blobs|/operations|/keys|/profiles|/events)/(?!by-key(?:/|$))[^/]+", r"\1/{id}", path)
 
     async def dispatch(self, request, call_next):
         if not request.url.path.startswith("/api"):
@@ -115,8 +117,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.memobase_project_id = DEFAULT_PROJECT_ID
         request.state.memoia_scopes = ["admin"]
         if not is_root:
-            from ..auth.token import authenticate_scoped_key
-            scoped = authenticate_scoped_key(auth_token) if auth_token.startswith("mka_") else None
+            scoped = await run_sql(authenticate_scoped_key, auth_token) if auth_token.startswith("mka_") else None
             p = await self.parse_project_token(auth_token) if scoped is None else Promise.resolve(scoped[0])
             if not p.ok():
                 return JSONResponse(status_code=401, content={"detail": {"code": "unauthorized", "message": "Unauthorized", "retryable": False}})
@@ -176,18 +177,4 @@ class AuthMiddleware(BaseHTTPMiddleware):
         return compare_digest(token, access_token.strip())
 
     async def parse_project_token(self, token: str) -> Promise[str]:
-        p = parse_project_id(token)
-        if not p.ok():
-            return Promise.reject(CODE.UNAUTHORIZED, "Invalid project id format")
-        project_id = p.data()
-        p = await check_project_secret(project_id, token)
-        if not p.ok():
-            return p
-        if not p.data():
-            return Promise.reject(CODE.UNAUTHORIZED, "Wrong secret key")
-        p = await get_project_status(project_id)
-        if not p.ok():
-            return p
-        if p.data() == ProjectStatus.suspended:
-            return Promise.reject(CODE.FORBIDDEN, "Your project is suspended!")
-        return Promise.resolve(project_id)
+        return await run_sql(authenticate_legacy_token, token)

@@ -13,7 +13,7 @@ from sqlalchemy import delete, insert, update
 from memoia_server.connectors import Session
 from memoia_server.controllers import event
 from memoia_server.env import CONFIG
-from memoia_server.models.database import Project, User, UserEvent, UserEventGist, UserProfile
+from memoia_server.models.database import Project, User, UserEvent, UserProfile
 from memoia_server.models.source import (SearchResult, memory_sources, memory_messages,
     memory_blobs, memory_facts, memory_event_facts)
 from memoia_server.models.utils import Promise
@@ -71,6 +71,24 @@ def seed_derived(uid, ids, *, pid="__root__", story_id=None, profile_id=None, co
 
 def token_size(bundle):
     return len(get_encoded_tokens(bundle.model_dump_json()))
+
+
+@pytest.mark.asyncio
+async def test_disabling_events_also_excludes_legacy_stories(search_users):
+    uid, _, _, _ = search_users
+    ids = seed_facts(uid, ["Sakura hotel visit"])
+    _, profile_id = seed_derived(uid, ids)
+    legacy = uuid4()
+    with Session.begin() as session:
+        session.execute(UserEvent.__table__.insert().values(id=legacy, user_id=uid, project_id="__root__",
+            event_data={"event_tip": "Sakura legacy story"}))
+    result = await event.hybrid_search_user_events(uid, "__root__", "Sakura", include_events=False)
+    assert result.ok()
+    assert [fact.id for fact in result.data().facts] == ids
+    assert [profile.id for profile in result.data().profiles] == [profile_id]
+    assert result.data().events == []
+    enabled = await event.hybrid_search_user_events(uid, "__root__", "Sakura", include_events=True)
+    assert legacy in {story.id for story in enabled.data().events}
 
 
 @pytest.mark.asyncio
@@ -263,12 +281,12 @@ async def test_project_and_user_scope_filter_derived_links_even_for_corrupt_prof
 
 
 @pytest.mark.asyncio
-async def test_delayed_old_derived_text_never_returns_inactive_fact_as_valid_proof(search_users):
+async def test_delayed_old_derived_text_never_returns_deleted_fact_as_valid_proof(search_users):
     uid, _, _, _ = search_users
-    ids = seed_facts(uid, ["Sakura still valid", "Sakura corrected conclusion"])
+    ids = seed_facts(uid, ["Sakura still valid", "Sakura removed conclusion"])
     eid, profile = seed_derived(uid, ids, content="Old story temporarily awaits maintenance")
     with Session.begin() as session:
-        session.execute(update(memory_facts).where(memory_facts.c.id == ids[1]).values(active=False, revision=2))
+        session.execute(delete(memory_facts).where(memory_facts.c.id == ids[1]))
     bundle = (await event.hybrid_search_user_events(uid, "__root__", "Sakura")).data()
     assert [fact.id for fact in bundle.facts] == ids[:1]
     assert [story.id for story in bundle.events] == [eid] and bundle.events[0].content.startswith("Old story")
@@ -322,14 +340,13 @@ async def test_legacy_events_have_a_separate_pool_and_never_become_pseudo_facts(
 
 
 @pytest.mark.asyncio
-async def test_legacy_event_exclusion_is_applied_to_gist_and_whole_event_candidates(search_users):
+async def test_legacy_event_exclusion_is_applied_to_whole_event_candidates(search_users):
     uid, _, _, _ = search_users
     with Session.begin() as session:
         parent = UserEvent(user_id=uid, project_id="__root__", event_data={"event_tip": "Sakura old story"})
         session.add(parent)
         session.flush()
         eid = parent.id
-        session.add(UserEventGist(user_id=uid, project_id="__root__", event_id=eid, gist_data={"content": "Sakura old fact"}))
     bundle = (await event.hybrid_search_user_events(uid, "__root__", "Sakura", exclude_event_ids=[eid])).data()
     assert bundle.facts == bundle.events == bundle.profiles == []
 
@@ -415,14 +432,12 @@ async def test_cross_table_same_uuid_does_not_collapse_fact_and_legacy_event_ide
 
 
 @pytest.mark.asyncio
-async def test_legacy_gist_preserves_explicit_source_metadata_without_fabricating_proof(search_users):
+async def test_legacy_event_preserves_explicit_source_metadata_without_fabricating_proof(search_users):
     uid, _, _, _ = search_users
     with Session.begin() as session:
-        parent = UserEvent(user_id=uid, project_id="__root__", event_data={"event_tip": "Legacy story"})
+        parent = UserEvent(user_id=uid, project_id="__root__", event_data={"event_tip": "Sakura hotel", "source_id": "known-source"})
         session.add(parent)
         session.flush()
-        session.add(UserEventGist(user_id=uid, project_id="__root__", event_id=parent.id,
-            gist_data={"content": "Sakura hotel", "source_id": "known-source"}))
     bundle = (await event.hybrid_search_user_events(uid, "__root__", "Sakura")).data()
     assert bundle.facts == [] and len(bundle.events) == 1 and bundle.events[0].source_id == "known-source"
     assert bundle.events[0].fact_ids == bundle.events[0].evidence == []

@@ -137,25 +137,6 @@ Returns a list of the user's most recent events, ordered by recency.
 
 
 
-=== api-reference/events/search_event_gists.mdx ===
----
-title: 'Search Event Gists'
-openapi: get /api/v1/users/event_gist/search/{user_id}
----
-Search event gists by query.
-Event gist is a fraction of User Event. For example, if a user event has the `event_tips`:
-```
-- A // info
-- B // schedule
-- C // reminder
-```
-The event gists will be 
-- `- A // info`
-- `- B // schedule`
-- `- C // reminder`
-
-
-
 === api-reference/events/search_events.mdx ===
 ---
 title: 'Search Events'
@@ -768,64 +749,10 @@ A detailed description of the event format can be found in the [API Reference](/
 
 
 === features/event/event_search.mdx ===
----
-title: Searching Events
----
-
-User events in Memobase are stored as a sequence of experiences, each enriched with [tags](/features/event/event_tag). By default, events are retrieved in chronological order, but Memobase also provides a powerful search function to find events based on a query.
-
-## Semantic Search
-
-You can perform a semantic search to find events related to a specific topic or concept.
-
-```python
-# To use the Python SDK, first install the package:
-# pip install memobase
-
-from memobase import MemoBaseClient
-
-client = MemoBaseClient(project_url='YOUR_PROJECT_URL', api_key='YOUR_API_KEY')
-user = client.get_user('some_user_id')
-
-# Search for events related to the user's emotions
-events = user.search_event("Anything about my emotions")
-print(events)
-```
-
-This query will return events where the user discussed their emotions, events that were automatically [tagged](/features/event/event_tag) with an `emotion` tag, or events that updated profile slots related to emotion.
-
-For a detailed list of search parameters, please refer to the [API documentation](/api-reference/events/search_events).
-
-## Search Event Gists
-
-A user event is a group of user infos happened in a period of time.
-So when you need to search for specific facts or infos, you may need a more fine-grained search.
-
-In Memobase, we call it `event_gist`. `event_gist` is a fraction of `user_event` that only contains one fact, schedule, or reminder of user.
-
-So if you want to search particular things of user, without the context of other infos, you can use `search_event_gist` to conduct a search:
-<CodeGroup>
-```python Python
-# To use the Python SDK, install the package:
-# pip install memobase
-from memobase import MemoBaseClient
-from memobase.core.blob import ChatBlob
-
-client = MemoBaseClient(project_url='PROJECT_URL', api_key='PROJECT_TOKEN')
-u = client.get_user(UID)
-
-events = u.search_event_gist('Car')
-print(events)
-```
-```txt Output
-- user bought a car [mentioned at 2025-01]
-- user drove to the car dealership [mentioned at 2025-06]
-- user likes BMW [mentioned at 2024-08]
-...
-```
-</CodeGroup>
-
-For detail API, please refer to [Search Event Gists](/api-reference/events/search_event_gists).
+Memoia searches Facts directly with POST /api/users/{user_id}/search and returns
+facts, events and profiles separately. Independent query endpoints and current
+contracts are documented in features/event/event_search.mdx and server OpenAPI.
+The old Gist API and storage have been retired; legacy Event bodies remain.
 
 === features/event/event_summary.mdx ===
 ---

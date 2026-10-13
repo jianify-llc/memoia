@@ -1,3 +1,4 @@
+from tests.legacy_fixtures import delete_user, get_user_all_blobs
 # Modified for Memoia: use the renamed internal server package.
 import pytest
 from sqlalchemy import select
@@ -106,17 +107,13 @@ async def test_chat_buffer_uses_fact_import_and_flush(
     assert p.ok() and p.data().profiles == []
     p = await event.get_user_events(u_id, DEFAULT_PROJECT_ID)
     assert p.ok() and p.data().events == []
-    p = await user.get_user_all_blobs(u_id, DEFAULT_PROJECT_ID, BlobType.chat)
+    p = await get_user_all_blobs(u_id, DEFAULT_PROJECT_ID, BlobType.chat)
     assert p.ok() and p.data().ids == []
     assert await maintain(u_id)
 
     p = await profile.get_user_profiles(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
     assert len(p.data().profiles) == 4
-
-    p = await profile.truncate_profiles(p.data(), topk=2)
-    assert p.ok()
-    assert len(p.data().profiles) == 2
 
     p = await event.get_user_events(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
@@ -128,12 +125,12 @@ async def test_chat_buffer_uses_fact_import_and_flush(
     assert p.ok() and p.data() == 0
 
     # Successful processing erases chat input even under the old persistence flag.
-    p = await user.get_user_all_blobs(
+    p = await get_user_all_blobs(
         u_id, DEFAULT_PROJECT_ID, BlobType.chat
     )
     assert p.ok() and len(p.data().ids) == 0
 
-    p = await user.delete_user(u_id, DEFAULT_PROJECT_ID)
+    p = await delete_user(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
 
     four_fact_source_model.assert_awaited_once()
@@ -219,7 +216,7 @@ async def test_chat_buffer_maintenance_preserves_manual_profiles(
     assert profiles[-2].content == "user likes japanese food"
     assert all(original in [p.content for p in profiles] for original in PROFILES)
 
-    p = await user.delete_user(u_id, DEFAULT_PROJECT_ID)
+    p = await delete_user(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
 
     four_fact_source_model.assert_awaited_once()
@@ -268,7 +265,7 @@ async def test_chat_buffer_import_preserves_large_manual_profile_set(
     assert sorted(profile.content for profile in p.data().profiles) == sorted(OVER_MAX_PROFILEs)
     assert len(p.data().profiles) == len(OVER_MAX_PROFILE_ATTRS)
 
-    p = await user.delete_user(u_id, DEFAULT_PROJECT_ID)
+    p = await delete_user(u_id, DEFAULT_PROJECT_ID)
     assert p.ok()
     four_fact_source_model.assert_awaited_once()
 
@@ -311,5 +308,5 @@ async def test_failed_chat_buffer_recovers_original_operation_without_duplicate_
         assert len(session.execute(select(memory_facts.c.id).where(memory_facts.c.user_id == user_id)).all()) == 1
     bounded_source_model.assert_awaited()
     assert bounded_source_model.await_count == 2
-    assert (await user.get_user_all_blobs(user_id, DEFAULT_PROJECT_ID, BlobType.chat)).data().ids == []
-    assert (await user.delete_user(user_id, DEFAULT_PROJECT_ID)).ok()
+    assert (await get_user_all_blobs(user_id, DEFAULT_PROJECT_ID, BlobType.chat)).data().ids == []
+    assert (await delete_user(user_id, DEFAULT_PROJECT_ID)).ok()

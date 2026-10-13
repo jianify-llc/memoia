@@ -39,7 +39,7 @@ class Context:
     async def read(self, collection, *, ids=None, cursor=None, query=None, limit=20):
         self.calls.append(("read", collection, ids, cursor, query, limit))
         self.readset[collection]["fact-1"] = 2
-        return {"items": [{"id": "fact-1", "revision": 2, "active": True,
+        return {"items": [{"id": "fact-1", "revision": 2,
                            "content": "The user's colleague Wu cancelled the September hike due to overtime."}],
                 "next_cursor": None}
 
@@ -190,6 +190,10 @@ async def test_unified_runner_reads_stages_and_returns_only_after_final(transpor
     assert "in its own identity profile" in first["instructions"]
     assert "For a new Profile or Event set id=null" in first["instructions"]
     assert "Use query/search for names, not an ids argument" in first["instructions"]
+    assert "Facts record supported statements, not adjudicated truth" in first["instructions"]
+    assert "Newer alone does not mean truer" in first["instructions"]
+    assert "Never edit, invalidate or delete a Fact" in first["instructions"]
+    assert "visible as pending_delete for navigation" in first["instructions"]
     assert first["reasoning"] == {"effort": "high"}
     assert all(body["service_tier"] == "flex" for body in transport["requests"])
     assert all(body["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}
