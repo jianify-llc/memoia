@@ -472,6 +472,47 @@ else:
         self.assertNotEqual(self.deploy("migrate-schema", evidence=self.disposable_evidence()).returncode, 0)
         self.assertEqual(self.actions(), [])
 
+    def repair(self, *, run="201", expected="200"):
+        return self.run_command("bash", str(SOURCE / "deploy-memoia.sh"), "repair-schema",
+                                str(ROOT), IMAGE, SHA, run, self.compose_sha, expected)
+
+    def test_pending_schema_forward_repair_preserves_failed_candidate_and_acceptance(self):
+        self.assertEqual(self.deploy("migrate-schema", evidence=self.disposable_evidence()).returncode, 0)
+        accepted = (self.state / "deploy-state").read_bytes()
+        pending = (self.state / "pending-maintenance").read_bytes()
+        result = self.repair()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.state / "deploy-state").read_bytes(), accepted)
+        self.assertEqual((self.state / "schema.sha256").read_text().strip(), "f" * 64)
+        self.assertEqual((self.state / "schema-archives/201/superseded-pending-maintenance").read_bytes(), pending)
+        self.assertEqual(json.loads((self.state / "pending-maintenance").read_text())["supersedes"]["run_id"], "200")
+        self.assertEqual(sum("run" in a["args"] for a in self.actions()), 2)  # No second migration.
+        business = self.schema_business_evidence()
+        record = json.loads(business.read_text())
+        record["run_id"] = "201"
+        business.write_text(json.dumps(record))
+        self.assertEqual(self.deploy("finalize-schema", run="201", evidence=business).returncode, 0)
+        self.assertFalse((self.state / "pending-maintenance").exists())
+        self.assert_configs_unchanged()
+
+    def test_pending_repair_rejects_wrong_identity_changed_schema_config_and_infra_before_stop(self):
+        self.assertEqual(self.deploy("migrate-schema", evidence=self.disposable_evidence()).returncode, 0)
+        before = sum("stop" in a["args"] for a in self.actions())
+        pending = (self.state / "pending-maintenance").read_bytes()
+        for changes, arguments in (({}, {"expected": "199"}), ({}, {"run": "200"}),
+                                   ({"FIXTURE_SCHEMA": "b" * 64}, {}),
+                                   ({"FIXTURE_PG_CONTAINER_ID": "changed"}, {}),
+                                   ({"FIXTURE_ENV": "online"}, {})):
+            with self.subTest(changes=changes, arguments=arguments):
+                original = self.env.copy()
+                self.env.update(changes)
+                self.assertNotEqual(self.repair(**arguments).returncode, 0)
+                self.env = original
+        (ROOT / "api/config.yaml").write_text(self.managed[ROOT / "api/config.yaml"] + "# changed\n")
+        self.assertNotEqual(self.repair().returncode, 0)
+        self.assertEqual(sum("stop" in a["args"] for a in self.actions()), before)
+        self.assertEqual((self.state / "pending-maintenance").read_bytes(), pending)
+
     def test_schema_maintenance_success_archives_old_schema_and_only_updates_application(self):
         preflight = self.schema_evidence()
         (self.state / "previous-accepted").write_text("older-accepted-fixture")

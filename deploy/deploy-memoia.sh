@@ -4,7 +4,7 @@ set -euo pipefail
 # 日常发布配置只读；init-config 仅补缺失模板与权限，绝不覆盖已有值。
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 [[ "$EUID" == 0 ]] || { echo 'Run with sudo -n' >&2; exit 2; }
-mode=${1:?init-config, init, prepare, finalize, migrate-schema, finalize-schema, restore-api, adopt-external-postgres, backup or restore-data}
+mode=${1:?init-config, init, prepare, finalize, migrate-schema, repair-schema, finalize-schema, restore-api, adopt-external-postgres, backup or restore-data}
 root=${2:?deployment root}
 
 [[ "$root" == /opt/memoia ]] || {
@@ -51,7 +51,7 @@ compose_sha=${6:?compose SHA-256}
 [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || exit 2
 [[ "$run_id" =~ ^[0-9]+$ ]] || exit 2
 [[ "$compose_sha" =~ ^[0-9a-f]{64}$ ]] || exit 2
-[[ "$mode" == init || "$mode" == prepare || "$mode" == finalize || "$mode" == migrate-schema || "$mode" == finalize-schema || "$mode" == restore-api || "$mode" == adopt-external-postgres ]] || exit 2
+[[ "$mode" == init || "$mode" == prepare || "$mode" == finalize || "$mode" == migrate-schema || "$mode" == repair-schema || "$mode" == finalize-schema || "$mode" == restore-api || "$mode" == adopt-external-postgres ]] || exit 2
 export MEMOIA_IMAGE="$image"
 
 [[ -d "$root" && ! -L "$root" && "$(stat -c '%u:%g:%a' "$root")" == 0:0:700 ]] || exit 2
@@ -79,6 +79,11 @@ deployment_env=$(jq -r '.services.memoia.labels["io.jianify.environment"]' <<< "
 if [[ "$mode" == migrate-schema || "$mode" == finalize-schema ]]; then
   [[ "$deployment_env" == test ]] || { echo 'Schema maintenance is test-only in this release' >&2; exit 2; }
   evidence_file=${7:?protected maintenance evidence file}
+fi
+if [[ "$mode" == repair-schema ]]; then
+  [[ "$deployment_env" == test ]] || { echo 'Pending schema repair is Test-only' >&2; exit 2; }
+  repair_run=${7:?expected pending migration run ID}
+  [[ "$repair_run" =~ ^[0-9]+$ ]] || exit 2
 fi
 [[ "$(jq -r '.services.redis.volumes[0].source' <<< "$resolved")" == "$root/data/redis" ]] || {
   echo 'Resolved data mount differs from the canonical absolute path' >&2; exit 1;
@@ -147,7 +152,7 @@ if [[ "$next_infra" != "$(sed -n '1p' infra-config.sha256)" ]]; then
         "$(bash "$script_dir/infra-fingerprint.sh" "$root" legacy-api-only)" == "$(< infra-config.sha256)" &&
         -z "$("${compose[@]}" ps -aq maintenance)" ]]; then
     worker_introduction=true
-  elif [[ "$mode" == finalize-schema && -f pending-worker-infra.sha256 &&
+  elif [[ ( "$mode" == finalize-schema || "$mode" == repair-schema ) && -f pending-worker-infra.sha256 &&
           "$next_infra" == "$(< pending-worker-infra.sha256)" ]]; then
     :
   else
@@ -266,11 +271,13 @@ if [[ "$mode" == finalize || "$mode" == finalize-schema ]]; then
   exit 0
 fi
 
+if [[ "$mode" != repair-schema ]]; then
 [[ ! -e pending-deploy ]] || {
   echo 'Previous deployment has an unresolved result; operator review required' >&2
   exit 1
 }
 [[ ! -e pending-maintenance ]] || { echo 'Unresolved maintenance blocks deployment' >&2; exit 1; }
+fi
 if [[ "$mode" == adopt-external-postgres ]]; then
   # 只在数据库切换、应用验收之后显式接纳新基础设施基线，普通发布不执行此路径。
   [[ "$deployment_env" == test ]] || { echo 'PostgreSQL adoption is a test-only migration' >&2; exit 2; }
@@ -392,7 +399,17 @@ if [[ "$mode" == init ]]; then
   echo 'First stack started; business acceptance is required before finalize. Automatic updates remain disabled.'
   exit 0
 fi
-if [[ "$mode" == migrate-schema ]]; then
+if [[ "$mode" == repair-schema ]]; then
+  [[ -f pending-schema.sha256 && "$schema_sha" == "$(< pending-schema.sha256)" ]] || {
+    echo 'Repair cannot change the pending schema' >&2; exit 1;
+  }
+  maintenance_record=$(python3 "$script_dir/schema-maintenance.py" repair "$root" "$image" "$source_sha" "$run_id" "$repair_run" "$config_sha")
+  [[ "$postgres_container" == "$(sed -n '/^postgres /s/^postgres //p' pending-infra)" &&
+     "$("${compose[@]}" ps -q redis)" == "$(sed -n '/^redis /s/^redis //p' pending-infra)" &&
+     "$(systemctl show jianify-cloudflared.service -p MainPID -p ActiveEnterTimestamp)" == "$(< pending-tunnel)" ]] || {
+    echo 'Pending maintenance infrastructure changed; repair blocked' >&2; exit 1;
+  }
+elif [[ "$mode" == migrate-schema ]]; then
   if schema_matches_baseline "$schema_sha"; then echo 'Schema is unchanged; use ordinary prepare' >&2; exit 1; fi
   worker_flag=()
   [[ "$worker_introduction" != true ]] || worker_flag=(introduce-worker)
@@ -408,6 +425,7 @@ tunnel_ready || { echo 'Host Tunnel is not connected' >&2; exit 1; }
 old_container=$("${compose[@]}" ps -q memoia)
 [[ -n "$old_container" && -f deploy-state ]] || { echo 'No accepted running API to switch safely' >&2; exit 1; }
 accepted_image=$(cut -d' ' -f3 deploy-state)
+if [[ "$mode" == repair-schema ]]; then accepted_image=$(jq -r '.supersedes.image' <<< "$maintenance_record"); fi
 [[ "$accepted_image" =~ ^ghcr\.io/(jianify|jianify-llc)/memoia@sha256:[0-9a-f]{64}$ && "$(docker inspect --format '{{.Config.Image}}' "$old_container")" == "$accepted_image" ]] || {
   echo 'Running API differs from the accepted deployment; review manual changes before switching' >&2; exit 1;
 }
@@ -432,6 +450,16 @@ actual_mount=$(docker inspect "$redis_container" | jq -r '.[0].Mounts[] | select
   echo 'Redis is not healthy' >&2
   exit 1
 }
+if [[ "$mode" == repair-schema ]]; then
+  [[ -d "schema-archives/$repair_run" && ! -e "schema-archives/$run_id" ]] || { echo 'Repair archive mismatch' >&2; exit 1; }
+  install -d -m 700 "schema-archives/$run_id"
+  for name in previous-deploy-state previous-schema.sha256 preflight.json; do
+    cp "schema-archives/$repair_run/$name" "schema-archives/$run_id/$name"
+  done
+  cp pending-deploy "schema-archives/$run_id/superseded-pending-deploy"
+  cp pending-maintenance "schema-archives/$run_id/superseded-pending-maintenance"
+  printf '%s\n' "$maintenance_record" > pending-maintenance
+fi
 printf 'redis %s\npostgres %s\n' "$redis_container" "$postgres_container" > pending-infra
 systemctl show jianify-cloudflared.service -p MainPID -p ActiveEnterTimestamp > pending-tunnel
 printf '%s %s %s %s\n' "$run_id" "$source_sha" "$image" "$config_sha" > pending-deploy

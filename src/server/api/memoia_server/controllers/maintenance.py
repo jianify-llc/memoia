@@ -396,6 +396,7 @@ class DBMaintenanceContext:
     def __init__(self, claim: Claim, lease: TaskLease):
         from .source import _project_rules
         self.claim, self.lease = claim, lease
+        self.operation_id = claim.operation_id
         self.user_id, self.project_id = claim.user_id, claim.project_id
         self.through_version, self.changes = claim.through_version, claim.changes
         self.blob_count = len(claim.blob_ids)
@@ -461,7 +462,7 @@ class DBMaintenanceContext:
     async def assert_active(self):
         await self.lease.assert_active()
 
-    def _read(self, collection, ids, cursor, query, limit):
+    def _read(self, collection, ids, cursor, query, limit, readset, staged):
         from ..models.database import UserProfile, UserEvent
         from ..models.source import memory_facts, memory_blobs, memory_event_facts
         from ..maintenance_agent import MAX_PAGE_SIZE, MAX_TOOL_BYTES
@@ -478,7 +479,6 @@ class DBMaintenanceContext:
         if query and len(query) > 500:
             raise SourceError("invalid_model_output", "Memory query exceeds limit", 502)
         requested = {_uuid(value) for value in ids} if ids is not None else None
-        staged = self._staged.get(collection, {})
         staged_page = {ident: change for ident, change in staged.items()
                        if (after is None or _uuid(ident) > after)
                        and (requested is None or _uuid(ident) in requested)}
@@ -519,9 +519,9 @@ class DBMaintenanceContext:
                 for value in requested:
                     ident = str(value)
                     if ident not in present:
-                        if self.readset[collection].get(ident) is not None:
+                        if readset[collection].get(ident) is not None:
                             raise SourceError("maintenance_read_conflict", "Memory disappeared during the Loop", 409, True)
-                        self.readset[collection][ident] = None
+                        readset[collection][ident] = None
 
             def entry(row):
                 ident = str(row["id"])
@@ -551,7 +551,7 @@ class DBMaintenanceContext:
             for ident, change in staged_page.items():
                 row = staged_rows.get(ident)
                 actual = row["revision"] if row else None
-                if self.readset[collection].get(ident) != actual:
+                if readset[collection].get(ident) != actual:
                     raise SourceError("maintenance_read_conflict", "Staged memory changed during the Loop", 409, True)
                 item = entry(row) if row else {"id": ident, "revision": None, "fact_ids": []}
                 if change.action == "remove":
@@ -611,23 +611,41 @@ class DBMaintenanceContext:
                     raise SourceError("maintenance_capacity", "A complete memory entry exceeds the tool budget", 413)
                 break
             ident = str(item["id"])
-            if self.readset[collection].get(ident, item["revision"]) != item["revision"]:
+            if readset[collection].get(ident, item["revision"]) != item["revision"]:
                 raise SourceError("maintenance_read_conflict", "Memory changed during the maintenance read", 409, True)
-            self.readset[collection][ident] = item["revision"]
+            readset[collection][ident] = item["revision"]
             for fact in item.get("evidence", []):
                 fid = str(fact["id"])
-                if self.readset["facts"].get(fid, fact["revision"]) != fact["revision"]:
+                if readset["facts"].get(fid, fact["revision"]) != fact["revision"]:
                     raise SourceError("maintenance_read_conflict", "Fact changed while reading the event", 409, True)
-                self.readset["facts"][fid] = fact["revision"]
+                readset["facts"][fid] = fact["revision"]
             accepted.append(item)
             size += cost
         next_cursor = str(accepted[-1]["id"]) if accepted and (more or len(accepted) < len(items)) else None
-        return json.loads(json.dumps({"items": accepted, "next_cursor": next_cursor}, default=str))
+        return json.loads(json.dumps({"items": accepted, "next_cursor": next_cursor}, default=str)), readset
+
+    def _merge_reads(self, reads):
+        # SQL threads operate on private snapshots. Validate then merge without
+        # yielding on the event loop, so concurrent reads cannot overwrite a conflict.
+        for collection, versions in reads.items():
+            for ident, revision in versions.items():
+                if ident in self.readset[collection] and self.readset[collection][ident] != revision:
+                    raise SourceError("maintenance_read_conflict", "Memory changed during the Loop", 409, True)
+        for collection, versions in reads.items():
+            self.readset[collection].update(versions)
 
     async def read(self, collection, *, ids=None, cursor=None, query=None, limit=100):
         await self.assert_active()
-        result = await run_sql(self._read, collection, ids, cursor, query, limit)
+        reads = {key: dict(value) for key, value in self.readset.items()}
+        staged = dict(self._staged.get(collection, {}))
+        result, reads = await run_sql(self._read, collection, ids, cursor, query, limit, reads, staged)
         await self.assert_active()
+        # A concurrently staged update of an entry returned by this read makes its
+        # staged text stale even when the underlying DB revision has not changed.
+        if any(self._staged.get(collection, {}).get(item["id"]) != staged.get(item["id"])
+               for item in result["items"]):
+            raise SourceError("maintenance_read_conflict", "Staged memory changed during the read", 409, True)
+        self._merge_reads(reads)
         return result
 
     async def search(self, query, *, limit=20):
@@ -684,7 +702,7 @@ class DBMaintenanceContext:
     async def stage_event(self, change):
         return await self._stage(change, "event")
 
-    def _read_changes(self, cursor, limit):
+    def _read_changes(self, cursor, limit, reads):
         from ..maintenance_agent import MAX_PAGE_SIZE, MAX_TOOL_BYTES
         from ..models.source import memory_facts
         if not 1 <= limit <= MAX_PAGE_SIZE:
@@ -710,15 +728,14 @@ class DBMaintenanceContext:
                 break
             if ident:
                 revision = fact["revision"] if fact else None
-                if ident in self.readset["facts"] and self.readset["facts"][ident] != revision:
+                if ident in reads and reads[ident] != revision:
                     raise SourceError("maintenance_read_conflict", "Fact changed during the Loop", 409, True)
-                self.readset["facts"][ident] = revision
+                reads[ident] = revision
             items.append(item)
             size += cost
-        self._seen_changes.update(range(cursor, cursor + len(items)))
         end = cursor + len(items)
         return json.loads(json.dumps({"items": items,
-            "next_cursor": str(end) if end < len(self.changes) else None}, default=str))
+            "next_cursor": str(end) if end < len(self.changes) else None}, default=str)), reads
 
     async def read_changes(self, *, cursor=None, limit=100):
         await self.assert_active()
@@ -728,8 +745,10 @@ class DBMaintenanceContext:
             raise SourceError("invalid_model_output", "Invalid change cursor", 502) from None
         if offset < 0 or offset > len(self.changes):
             raise SourceError("invalid_model_output", "Invalid change page", 502)
-        result = await run_sql(self._read_changes, offset, limit)
+        result, reads = await run_sql(self._read_changes, offset, limit, dict(self.readset["facts"]))
         await self.assert_active()
+        self._merge_reads({"facts": reads})
+        self._seen_changes.update(range(offset, offset + len(result["items"])))
         return result
 
     def get_plan(self, usage):

@@ -113,6 +113,21 @@ def audit(root, image):
     check_quiet(command, config, pg)
 
 
+def repair(root, image, sha, run_id, expected_run, config_sha):
+    """Forward-only application repair on an already migrated, unaccepted Test schema."""
+    state = root / ".deploy"
+    pending = load(state / "pending-maintenance")
+    secure_file(state / "pending-deploy")
+    old_run, old_sha, old_image, old_config = (state / "pending-deploy").read_text().split()
+    identity(pending, old_image, old_sha, old_run)
+    if (pending.get("mode") != "migrate-schema" or old_run != expected_run
+            or int(run_id) <= int(old_run) or old_config != config_sha
+            or pending.get("old_schema") != (state / "schema.sha256").read_text().strip()):
+        raise RuntimeError("Repair must identify the unchanged pending migration and a newer candidate")
+    return {**pending, "image": image, "source_sha": sha, "run_id": run_id,
+            "supersedes": {"image": old_image, "source_sha": old_sha, "run_id": old_run}}
+
+
 def finalize(root, image, sha, run_id, evidence_path):
     pending = load(root / ".deploy/pending-maintenance")
     identity(pending, image, sha, run_id)
@@ -149,6 +164,8 @@ if __name__ == "__main__":
                                       introduce_worker=len(sys.argv) == 8 and sys.argv[7] == "introduce-worker")))
         elif mode == "finalize":
             finalize(root, image, sys.argv[4], sys.argv[5], Path(sys.argv[6]))
+        elif mode == "repair":
+            print(json.dumps(repair(root, image, sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7])))
         else:
             raise RuntimeError("Unknown schema maintenance stage")
     except (RuntimeError, OSError, ValueError, KeyError, IndexError) as error:

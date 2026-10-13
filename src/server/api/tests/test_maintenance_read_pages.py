@@ -1,4 +1,5 @@
 """Mutable tool pages preserve identities, evidence scope and bounded SQL work."""
+import asyncio
 from uuid import UUID
 
 import pytest
@@ -12,6 +13,80 @@ from memoia_server.models.source import memory_facts
 from tests.maintenance_support import claim_for
 from tests.test_maintenance import source_user, batch
 from tests.test_search_bundle import search_users, seed_facts, seed_derived
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sql_reads_merge_on_event_loop_without_losing_version_conflict(source_user, monkeypatch):
+    _, fid = batch(source_user)
+    maintenance.flush(source_user, "__root__", "parallel-read-conflict")
+    claim = claim_for(source_user)
+    real_sql = maintenance.run_sql
+    old_fetched, release_old = asyncio.Event(), asyncio.Event()
+    first = True
+
+    async def delayed_sql(fn, *args):
+        nonlocal first
+        delay = first
+        first = False
+        result = await real_sql(fn, *args)
+        if delay:
+            old_fetched.set()
+            await release_old.wait()
+        return result
+
+    async with maintenance.TaskLease(claim) as lease:
+        context = maintenance.DBMaintenanceContext(claim, lease)
+        monkeypatch.setattr(maintenance, "run_sql", delayed_sql)
+        task = asyncio.create_task(context.read("facts", ids=[str(fid)]))
+        try:
+            await asyncio.wait_for(old_fetched.wait(), 5)
+            with Session.begin() as session:
+                session.execute(update(memory_facts).where(memory_facts.c.id == fid)
+                                .values(revision=memory_facts.c.revision + 1))
+            current = await context.read("facts", ids=[str(fid)])
+            revision = current["items"][0]["revision"]
+            release_old.set()
+            with pytest.raises(maintenance.SourceError, match="Memory changed"):
+                await task
+            assert context.readset["facts"][str(fid)] == revision
+        finally:
+            release_old.set()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_read_cannot_return_superseded_staged_text(source_user, monkeypatch):
+    _, fid = batch(source_user)
+    profiles(source_user, fid, [(10, "old profile")])
+    maintenance.flush(source_user, "__root__", "parallel-stage-conflict")
+    claim = claim_for(source_user)
+    async with maintenance.TaskLease(claim) as lease:
+        context = maintenance.DBMaintenanceContext(claim, lease)
+        await context.read_changes()
+        ident = str(UUID(int=10))
+        await context.read("profiles", ids=[ident])
+        real_sql = maintenance.run_sql
+        fetched, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed_sql(fn, *args):
+            result = await real_sql(fn, *args)
+            fetched.set()
+            await release.wait()
+            return result
+
+        monkeypatch.setattr(maintenance, "run_sql", delayed_sql)
+        task = asyncio.create_task(context.read("profiles", ids=[ident]))
+        try:
+            await asyncio.wait_for(fetched.wait(), 5)
+            await context.stage_profile(maintenance_agent.ProfileMutation(action="upsert", id=ident,
+                content="new profile", topic="interests_preferences", sub_topic="fixture", fact_ids=[str(fid)]))
+            release.set()
+            with pytest.raises(maintenance.SourceError, match="Staged memory changed"):
+                await task
+            assert context._staged["profiles"][ident].content == "new profile"
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 def profiles(uid, fid, values):

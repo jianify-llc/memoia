@@ -144,6 +144,8 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 4. 执行 `migrate-schema /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256 PREFLIGHT_JSON`。校验候选 revision／Test HEAD、高水位、配置、备份及恢复回执，审计静止状态并记录 pending 后，正常停止所有既有应用写入进程。复查旧状态，再从候选镜像执行 `alembic upgrade head`＋`check_schema()`，随后启动同 digest 的 API／Worker；PG、Redis、宿主机 Tunnel 均不重启。
 5. 完成鉴权、幂等查询／重放、删除消息、画像历史过滤、真实模型／embedding 与统一 flush 原子提交验收，保存受保护证据。执行 `finalize-schema /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256 BUSINESS_JSON`，才更新 schema 和应用身份。普通 finalize 不能接纳 pending-maintenance；普通 prepare 仍拒绝 schema 指纹变化。
 
+已迁移但业务验收失败时，仅 Test 可执行 `repair-schema /opt/memoia IMAGE SOURCE_SHA RUN_ID COMPOSE_SHA256 EXPECTED_PENDING_RUN_ID`，前向替换应用候选，不再迁移。新候选必须是当前 Test HEAD、较新 run、同一 pending schema；配置、PG/Redis/Tunnel 身份及健康运行的原候选必须一致。原 pending 和迁移证据归档，accepted/schema 基线不变；失败仍保留 pending，不能冒充已验收。修复后重新验收，再由 finalize-schema 接纳。此入口不允许改变云配置、schema 或数据，也不能恢复旧 schema 镜像。
+
 `PREFLIGHT_JSON` 格式（身份必须对应同一候选，不含秘密）：
 
 ```json

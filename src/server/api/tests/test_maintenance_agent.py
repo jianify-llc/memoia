@@ -204,7 +204,7 @@ async def test_unified_runner_reads_stages_and_returns_only_after_final(transpor
     assert all(body["prompt_cache_key"] == first["prompt_cache_key"] for body in transport["requests"])
     for previous, current in zip(transport["requests"], transport["requests"][1:]):
         assert current["input"][:len(previous["input"])] == previous["input"]
-    assert first["parallel_tool_calls"] is False
+    assert first["parallel_tool_calls"] is True
     assert first["max_output_tokens"] == 32768
     assert "max_tokens" not in first and "max_completion_tokens" not in first and "temperature" not in first
     assert first["store"] is False and first["truncation"] == "disabled"
@@ -218,10 +218,19 @@ async def test_unified_runner_reads_stages_and_returns_only_after_final(transpor
     assert set(tools) == {"read_memory", "stage_profile", "stage_event", "search_memory", "read_changes"}
     for name in ("stage_profile", "stage_event"):
         definition = tools[name]["properties"]["changes"]["items"]
+        definition = definition["anyOf"][0]
         if "$ref" in definition:
             definition = tools[name]["$defs"][definition["$ref"].rsplit("/", 1)[-1]]
         assert "Use null" in definition["properties"]["id"]["description"]
         assert "Copy exact Fact ids" in definition["properties"]["fact_ids"]["description"]
+        assert definition["properties"]["content"]["type"] == "string"
+        assert definition["properties"]["content"]["minLength"] == 1
+        assert definition["properties"]["fact_ids"]["minItems"] == 1
+        removal = tools[name]["properties"]["changes"]["items"]["anyOf"][1]
+        if "$ref" in removal:
+            removal = tools[name]["$defs"][removal["$ref"].rsplit("/", 1)[-1]]
+        assert set(removal["properties"]) == {"action", "id"}
+        assert removal["properties"]["id"]["type"] == "string"
     assert "project_id" not in tools["read_memory"]["properties"]
     assert "user_id" not in tools["read_memory"]["properties"]
     for name, maximum in (("read_memory", 200), ("read_changes", 200), ("search_memory", 20)):
@@ -467,7 +476,7 @@ async def test_expired_execution_cannot_invoke_tool_or_return_plan(transport):
 
 
 @pytest.mark.asyncio
-async def test_tools_are_serial_even_when_provider_returns_parallel_calls(transport):
+async def test_independent_reads_run_concurrently_in_one_model_turn(transport):
     transport["responses"] = [completion(None, calls=[
         tool("read_memory", {"collection": "facts"}, "call-1"),
         tool("read_memory", {"collection": "profiles"}, "call-2")]), completion()]
@@ -482,8 +491,60 @@ async def test_tools_are_serial_even_when_provider_returns_parallel_calls(transp
 
     context.read = read
     await run_loop(context)
-    assert activity == [("facts", "start"), ("facts", "end"),
-                        ("profiles", "start"), ("profiles", "end")]
+    assert activity == [("facts", "start"), ("profiles", "start"),
+                        ("facts", "end"), ("profiles", "end")]
+    assert len(transport["requests"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_independent_staged_targets_parallel_but_same_target_ordered(transport):
+    transport["responses"] = [completion(None, calls=[
+        tool("stage_profile", {"changes": [{"action": "remove", "id": "same"}]}, "call-1"),
+        tool("stage_profile", {"changes": [{"action": "remove", "id": "same"}]}, "call-2"),
+        tool("stage_profile", {"changes": [{"action": "remove", "id": "other"}]}, "call-3"),
+        tool("stage_event", {"changes": [{"action": "remove", "id": "same"}]}, "call-4"),
+    ]), completion()]
+    context = Context()
+    activity = []
+
+    async def stage(change, collection):
+        activity.append((collection, change.id, "start"))
+        await asyncio.sleep(0)
+        activity.append((collection, change.id, "end"))
+        return change.id
+
+    context.stage_profile = lambda change: stage(change, "profiles")
+    context.stage_event = lambda change: stage(change, "events")
+    await run_loop(context)
+    assert activity[:3] == [("profiles", "same", "start"), ("profiles", "other", "start"),
+                            ("events", "same", "start")]
+    same = [item for item in activity if item[:2] == ("profiles", "same")]
+    assert [item[2] for item in same] == ["start", "end", "start", "end"]
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_failure_cancels_sibling_without_returning_partial_plan(transport):
+    context = Context()
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def read(collection, **kwargs):
+        if collection == "facts":
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        await started.wait()
+        raise MaintenanceRunError("LEASE_LOST")
+
+    context.read = read
+    transport["responses"] = [completion(None, calls=[
+        tool("read_memory", {"collection": "facts"}, "call-1"),
+        tool("read_memory", {"collection": "profiles"}, "call-2")])]
+    with pytest.raises(MaintenanceRunError, match="LEASE_LOST"):
+        await run_loop(context)
+    assert cancelled.is_set() and context.plans == 0
+    assert len(transport["requests"]) == 1
 
 
 @pytest.mark.asyncio
@@ -519,6 +580,37 @@ async def test_invalid_tool_schema_propagates_instead_of_becoming_completion(tra
     with pytest.raises(ModelBehaviorError):
         await run_loop(context)
     assert context.staged == [] and len(transport["requests"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_wire_schema_rejects_null_upserts_and_exposes_remove_as_its_own_action(transport):
+    from jsonschema import Draft202012Validator
+    transport["responses"] = [completion()]
+    await run_loop(Context())
+    schemas = {tool["name"]: tool["parameters"] for tool in transport["requests"][0]["tools"]}
+    for name, mutation in (("stage_profile", ProfileMutation), ("stage_event", EventMutation)):
+        validator = Draft202012Validator(schemas[name])
+        validator.validate({"changes": [{"action": "remove", "id": "existing-id"}]})
+        assert not validator.is_valid({"changes": [{"action": "remove", "id": None}]})
+        bad = mutation.model_construct(action="upsert").model_dump()
+        assert not validator.is_valid({"changes": [bad]})
+
+
+@pytest.mark.asyncio
+async def test_tool_diagnostics_preserve_operation_request_and_counts_without_payloads(transport, monkeypatch):
+    messages = []
+    monkeypatch.setattr(module.LOG, "info", lambda message, *args: messages.append(message % args))
+    context = Context()
+    context.operation_id = "test-operation"
+    secret = "private query not for logs"
+    transport["responses"] = [completion(None, calls=[tool("search_memory", {"query": secret})]), completion()]
+    await run_loop(context)
+    records = "\n".join(messages)
+    assert "operation=test-operation request=1" in records
+    assert "tool=search_memory status=start" in records
+    assert "tool=search_memory status=completed" in records
+    assert "'facts': 1" in records
+    assert secret not in records and "Wu cancelled" not in records
 
 
 @pytest.mark.asyncio
