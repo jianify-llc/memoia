@@ -126,6 +126,8 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 - 旧 run/较新环境分支 HEAD/未完成的上次发布或维护/配置变化/Tunnel 未连接仍阻断。test 检查 `test` HEAD，online 检查 `release` HEAD。日常 prepare 和 restore-api 不查询 processing/failed buffer 或 Redis 锁队列，也不要求调用方先停写。
 - 指纹包含公司 PG 脱敏配置指纹、Redis/挂载/连接、外部网络及完整 YAML 哈希，同维度的 provider、模型或 endpoint 变化也不能静默发布。配置变更单独维护；仅轮换 .env 中密钥不等于向量迁移。两阶段间配置或 PG 容器变化禁止提交成功。
 
+数据库客户端默认连接超时 5 秒、锁等待 5 秒、SQL 执行 30 秒，由代码统一提供；标准 Compose 不重复映射这些默认值。在 `.env` 中添加同名变量不会自动传入容器；确需覆盖时，须单独维护 Compose 并验收配置基线，不能借普通镜像发布修改服务器配置。
+
 .env 的 MEMOIA_IMAGE 是初始人工选择，后续实际版本以 .deploy/deploy-state 为准。不要直接用旧 .env 重建 API；恢复必须指定已验收 digest 并确认 schema/处理状态。finalize 保存 accepted/SHA；切到不同镜像时才更新 previous-accepted。相同版本重验不会覆盖真正的上一版本。
 
 日常更新假定候选与现有 schema、持久化队列和处理状态兼容；拉取镜像后正常停止旧 API／Worker，再启动同 digest 的新 API／Worker，接受短暂不可用。正常退出不等于每个请求已向调用方返回最终结果；中断/超时由业务链查询回执或接管过期租约，不在部署脚本中清队列、重置状态或自动重放。数据库结构、embedding 身份或处理状态协议不兼容的变化走单独维护，不沿用普通发布入口。

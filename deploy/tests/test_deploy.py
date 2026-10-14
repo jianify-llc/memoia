@@ -241,6 +241,17 @@ else:
         self.assertTrue(all("pull" in action["args"] for action in self.actions()))
         self.assert_configs_unchanged()
 
+    def test_compose_mismatch_blocks_before_switch_and_preserves_accepted_state(self):
+        before = (self.state / "deploy-state").read_text()
+        self.compose_sha = "0" * 64
+        result = self.deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Compose changed; use the separate infrastructure maintenance procedure", result.stderr)
+        self.assertEqual(self.actions(), [])
+        self.assertFalse((self.state / "pending-deploy").exists())
+        self.assertEqual((self.state / "deploy-state").read_text(), before)
+        self.assert_configs_unchanged()
+
     def test_missing_accepted_record_blocks_switch_without_stop(self):
         (self.state / "deploy-state").unlink()
         self.assertNotEqual(self.deploy().returncode, 0)

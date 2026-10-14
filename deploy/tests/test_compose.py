@@ -64,6 +64,10 @@ class ComposeContract(unittest.TestCase):
             self.assertIn("ingress", api["networks"])
             self.assertFalse(config["networks"]["ingress"].get("internal", False))
             self.assertEqual(api["environment"]["DATABASE_URL"], values["DATABASE_URL"])
+            # Client defaults do not require a server Compose configuration change.
+            for key in ("DATABASE_CONNECT_TIMEOUT_SECONDS", "DATABASE_LOCK_TIMEOUT_MS",
+                        "DATABASE_STATEMENT_TIMEOUT_MS"):
+                self.assertNotIn(key, api["environment"])
             self.assertEqual(api["environment"]["REDIS_MAX_CONNECTIONS"], "32")
             self.assertEqual(api["environment"]["REDIS_CONNECT_TIMEOUT_SECONDS"], "1")
             self.assertEqual(api["environment"]["REDIS_SOCKET_TIMEOUT_SECONDS"], "2")
