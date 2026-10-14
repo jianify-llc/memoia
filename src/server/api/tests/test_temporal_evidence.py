@@ -157,6 +157,8 @@ async def test_extraction_anchors_each_message_in_its_recorded_zone_and_rejects_
     monkeypatch.setattr(source, "_structured", structured)
     result = await source.extract_source(body)
     assert [m["local_recorded_date"] for m in seen[0]["messages"]] == ["2026-01-01", "2025-12-31", None]
+    # Historical extraction uses original per-message anchors, never today's clock.
+    assert "current_date" not in seen[0] and "reference_time" not in seen[0]
     assert result.facts[0]["occurred_at"].year == 2025
     assert result.facts[0]["event_time"]["start"] == "2025-12-31"
     bad = source.Extraction(facts=[source.ExtractedFact(content="Kyoto", subject="user",

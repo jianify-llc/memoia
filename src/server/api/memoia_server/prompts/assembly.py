@@ -10,21 +10,16 @@ def reference_data(name: str, value) -> str:
     return f'<{name} source="memoia">{escape(json.dumps(value, ensure_ascii=False), quote=False)}</{name}>'
 
 
-def developer_data(name: str, value, *, cache: bool = False, format_rules: str | None = None) -> dict:
+def developer_data(name: str, value, *, cache: bool = False) -> dict:
     content = {"type": "input_text", "text": reference_data(name, value)}
     if cache:
         content["prompt_cache_breakpoint"] = {"mode": "explicit"}
-    blocks = [content]
-    if format_rules is not None:
-        rules = {"type": "input_text", "text": format_rules}
-        if cache:
-            rules["prompt_cache_breakpoint"] = {"mode": "explicit"}
-        blocks.insert(0, rules)
-    return {"role": "developer", "content": blocks}
+    return {"role": "developer", "content": [content]}
 
 
-def user_cache_key(project_id: str, user_id: str) -> str:
-    # Compact JSON avoids delimiter collisions and keeps project/user scope stable
-    # across processes, retries and batches without sending the raw identity.
-    identity = json.dumps([str(project_id), str(user_id)], ensure_ascii=False, separators=(",", ":"))
+def loop_cache_key(project_id: str, user_id: str, operation_id: str) -> str:
+    # The server-owned flush identity survives retries and recovery, not new batches.
+    # Structured encoding avoids delimiter collisions and hides raw scoped identities.
+    identity = json.dumps(["memoia", "flush", str(project_id), str(user_id), str(operation_id)],
+                          ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(identity.encode()).hexdigest()

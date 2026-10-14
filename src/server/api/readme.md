@@ -141,9 +141,10 @@ with reasoning enabled can truncate the completion before usable text is produce
 
 Projects can independently override `llm_model` and `reasoning_effort` in their
 configuration YAML; omitted fields inherit service defaults `gpt-6-luna / high`.
-This applies to Fact extraction and the unified Profile/Event AgentLoop. The maintenance
-tool loop and one-shot calls both use Responses with `store=false`; neither silently
-lowers a project's reasoning setting. Embeddings keep their separate API.
+This applies to Fact extraction and the unified Profile/Event AgentLoop. One-shot calls
+use Responses with `store=false`; the maintenance tool loop uses `store=true` and
+SDK-native response chaining within each execution. Neither silently lowers a project's
+reasoning setting. Embeddings keep their separate API.
 The optional Inspector Playground has its own runtime model configuration.
 
 ### Prompt caching and numerical usage
@@ -153,14 +154,79 @@ The two business generation paths use different cache policies, without an appli
 The [company Prompt/cache contract](https://github.com/jianify-llc/Jianify-LLC/blob/main/docs/engineering/llm-prompt-cache.md) owns the shared rules. Memoia maps its two paths as follows:
 
 - Fact extraction (Responses): fixed developer instructions followed by escaped XML source material in a separate developer message, not a fabricated User turn. Its only explicit breakpoint is on fixed instructions; explicit mode, no cache key or top-level instructions. Strict output schema uses native `text.format`, then existing Pydantic business validation. Project/model/reasoning configuration remains authoritative.
-- Unified AgentLoop (Responses through Agents SDK): fixed behavior remains in top-level instructions. The first Developer has two `input_text` blocks: trusted fixed XML-format definitions (breakpoint A), then escaped initial project data (breakpoint B). Batch XML follows separately. Dynamic XML values are reference data; the fixed explanation is trusted. Implicit mode keeps native tool/model history append-only until compaction. The key is SHA-256 of compact UTF-8 JSON `[project_id,user_id]`, never a batch/time value. The pinned SDK forwards it through its formal `extra_args` extension. No remote conversations or external tracing.
+- Unified AgentLoop (Responses through Agents SDK): the complete fixed rules live in the single English source `memoia_server/prompts/maintenance.md`, including Profile/Event behavior, XML meaning, data trust and time interpretation. `Agent.instructions` loads that file; every HTTP request sends the same full `instructions`, including tool continuations, tier fallback and calls after native compaction. Fixed rules are not duplicated in `input` or dependent on compressed history. The first Developer contains escaped `project_context` data with one explicit breakpoint when supported; separate `maintenance_batch` XML follows. The SDK's `auto_previous_response_id` sends these dynamic Developer messages once, then only incremental tool results linked to the last validated response. Implicit caching continues within the chain. The key is SHA-256 of compact UTF-8 JSON `["memoia","flush",project_id,user_id,operation_id]`. This server-scoped Operation identity survives rounds, tier fallback and recovery; a different flush gets a different key. Lease owners, attempts, watermarks, request IDs and timestamps never select it. The key does not replace database ownership checks; the pinned SDK forwards it through `extra_args`.
 - Startup completion probes are classified separately; embeddings are not generation calls. Inspector's optional Playground is a separate caller and is not configured by these policies.
+
+Responses chain IDs stay in the current execution, without a Conversations object,
+SDK session or database checkpoint. Flex fallback retries the same parent and input;
+failed responses do not advance the chain. Business recovery starts a fresh chain
+from current database context and retains existing retry/commit protections. Native
+`context_management` compaction remains at 262144 tokens; no manual input pruning or
+encrypted reasoning replay is needed in this stateful path. Status, refusal, tool
+arguments/call IDs and compaction payload validation still run before tool dispatch.
+`store=true` retains provider-side responses (normally 30 days); local raw-input cleanup
+does not delete those provider records. External tracing remains disabled. See
+[Responses state](https://developers.openai.com/api/docs/guides/conversation-state) and
+[native compaction](https://developers.openai.com/api/docs/guides/compaction#server-side-compaction).
+
+Only an HTTP 400/404 with `code=previous_response_not_found` on a request that
+actually carries a parent (and no conflicting error parameter) becomes
+`MAINTENANCE_PARENT_UNAVAILABLE`. The run ends without committing its staged plan;
+the same flush Operation uses its existing 5/15/60-minute backoff and four-attempt
+budget to start a fresh chain from current database state. There is no in-loop
+full replay, new flush, or Fact re-import. Other 400/404 errors remain provider
+rejections except the explicit `conversation_locked` case below; unknown gateway
+error formats are not guessed from message text.
+
+Each AgentLoop execution has one 900-second deadline, including tools, SDK backoff
+and any Flex-to-Standard fallback. It has no turn or total request-count limit:
+the pinned SDK accepts `max_turns=None`, and the adapter counts attempts only for
+diagnostics. The prompt asks for relevant reads, batched independent work and prompt
+completion without redundant confirmation. Time bounds elapsed execution, not a fixed
+token cost. Each model response is still limited to 32768 output tokens.
+HTTP waits have a 600-second
+timeout so Flex is not cut off after two minutes; the outer deadline can cancel
+them earlier. The HTTP client's generic retries remain disabled. Agents SDK retains
+its three `conversation_locked` retries; if they succeed, the tier remains Flex.
+Only after those retries fail, its existing retry hook permits one replay in Standard
+with the same parent and input. Standard remains selected for later turns. A terminal
+lock failure in Standard becomes `MAINTENANCE_CONVERSATION_LOCKED` for original Operation
+recovery. HTTP 408, transport timeouts, 429 and 5xx use the existing immediate tier
+fallback. All actual HTTP attempts and SDK backoff share the same 900-second
+deadline; no tools or staged plans are replayed by a tier switch.
+Operation heartbeats renew independently
+during model waits, without holding a database transaction. The deadline does not
+cover the subsequent embedding/commit steps, which retain their own bounds.
+
+Time is scenario-specific: Fact extraction is historical and sends no current clock. Each
+source message carries its original recording instant and optional IANA `time_zone`;
+the server derives `local_recorded_date` only when that historical zone is known.
+Unknown zones or relative anchors remain uncertain. Recording time, memory
+creation/update time and the event's supported occurrence period are distinct.
+
+AgentLoop's fixed Prompt explains those distinctions; its initial Developer data includes
+`reference_time` with `current_date` (`YYYY-MM-DD`), `time_zone` and
+`time_zone_source=service_default`. Memoia currently has no validated current-user
+timezone field: the reference uses configured `use_timezone`, or explicit UTC if
+unset/invalid, never a zone guessed from user metadata or an old source message.
+Invalid-zone fallback is local to this reference; it does not change global configuration
+validation or original message timezone/evidence rules. Capture it
+once per execution and reuse it across tool rounds and Flex fallback. A new execution
+may refresh the date/default zone; time never enters the flush cache key. This is
+run-local context, not new persistence, an event-time anchor or a promise to resolve
+the user's local 'today'. Existing `event_time` evidence remains authoritative.
+
+The local HTTP contract tests use the pinned Agents SDK with simulated Responses,
+including a compaction item, to verify full instructions on every request and
+incremental native tool outputs without history replay. They also cover output
+validation, retries and numeric usage. This proves request construction, not real
+256K compaction quality or cache savings; those require separate provider validation.
 
 Prefixes shorter than the provider's minimum cacheable length may not be cached; do not pad instructions to manufacture hits. Compaction or changes to tools, instructions, model or reasoning can reduce reuse. Cache entries expire at the provider, not in Redis. See [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching).
 
 New cache options and breakpoints require both a known GPT-5.6/GPT-6/GPT-6.1 model (including dated names) and endpoint support. Native HTTPS `api.openai.com/v1` enables the contract automatically; custom gateways require strict boolean `llm_prompt_cache_options: true`. `false` disables it everywhere. Unknown/older models never opt in, even when declared true. Undeclared gateways use compatibility mode: no options, breakpoint or key is sent, and their implicit caching defaults cannot be claimed disabled. Safe capability diagnostics report only the path and enabled boolean; no endpoint, key or material is logged. Do not change a deployed configuration without separate approval.
 
-Both generation clients disable SDK retries: Fact failures return to Operation recovery; AgentLoop alone owns its bounded Flex-to-Standard fallback. Reported failed usage is observed, while absent usage stays unknown. Shared model initialization suppresses OpenAI transport request-body DEBUG logs independently of AgentLoop imports. The retired generic JSON parser is removed; Fact extraction still uses its strict Pydantic contract and AgentLoop its validated tools.
+Both generation HTTP clients disable generic SDK retries: Fact failures return to Operation recovery; AgentLoop uses the bounded tier fallback and Agents Runner lock retries described above. Reported failed usage is observed, while absent usage stays unknown. Shared model initialization suppresses OpenAI transport request-body DEBUG logs independently of AgentLoop imports. The retired generic JSON parser is removed; Fact extraction still uses its strict Pydantic contract and AgentLoop its validated tools.
 
 One-shot Responses observes actual input/output/cache usage before output and schema validation. Refused, failed, incomplete or missing text output is not success; valid JSON with no facts remains legal. Startup keeps its isolated budget and exact-OK check. One-shot requests use `truncation=disabled` and the existing 120-second timeout; cancellation propagates without replay. The unused legacy history branch and Chat Completions production endpoint are removed, not retained as a fallback. Configured gateways must support Responses independently of the optional new cache fields. See [official migration guidance](https://developers.openai.com/api/docs/guides/migrate-to-responses).
 

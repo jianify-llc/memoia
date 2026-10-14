@@ -1,5 +1,6 @@
 """Fixed Blob sealing, per-user operation leases and atomic unified maintenance."""
 import asyncio
+import ast
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -13,8 +14,9 @@ from memoia_server.controllers.source import SourceError
 from memoia_server.models.database import User, UserProfile, UserEvent
 from memoia_server.models.source import (memory_operations as operations, memory_blobs as blobs,
     memory_sources, memory_messages, memory_facts, FlushInput)
-from memoia_server.maintenance_agent import ProfileMutation, EventMutation, LoopUsage
+from memoia_server.maintenance_agent import ProfileMutation, EventMutation, LoopUsage, MaintenanceRunError, run_loop
 from tests.maintenance_support import derive, claim_for
+from tests.test_maintenance_agent import transport, completion, tool, http_failure
 
 
 @pytest_asyncio.fixture
@@ -194,21 +196,124 @@ async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(so
 
 
 @pytest.mark.asyncio
-async def test_four_attempts_backoff_and_new_batch_cannot_reset_old_budget(source_user):
+@pytest.mark.parametrize("error", [SourceError("model_unavailable", "safe", 503, True),
+    MaintenanceRunError("MAINTENANCE_PARENT_UNAVAILABLE", retryable=True),
+    MaintenanceRunError("MAINTENANCE_CONVERSATION_LOCKED", retryable=True)])
+async def test_four_attempts_backoff_and_new_batch_cannot_reset_old_budget(source_user, error):
     batch(source_user)
     op = maintenance.flush(source_user, "__root__", "exhaust")
     for attempt in range(1, 5):
         ready(source_user)
         claim = claim_for(source_user)
         assert claim.attempts == attempt
-        maintenance.fail_claim(claim, SourceError("model_unavailable", "safe", 503, True))
-        assert row(op.operation_id)["lease_owner"] is None
+        maintenance.fail_claim(claim, error)
+        failed = row(op.operation_id)
+        assert failed["lease_owner"] is None
+        assert failed["status"] == ("processing" if attempt < 4 else "failed")
+        if attempt < 4:
+            remaining = (failed["available_at"] - datetime.now(timezone.utc)).total_seconds()
+            assert maintenance.RETRY_SECONDS[attempt - 1] - 5 <= remaining <= maintenance.RETRY_SECONDS[attempt - 1]
     batch(source_user, 2)
     new = maintenance.flush(source_user, "__root__", "after-exhaust")
     assert claim_for(source_user).operation_id == new.operation_id
     assert row(op.operation_id)["attempts"] == 4
     recovered = maintenance.retry_flush(source_user, "__root__", op.operation_id)
     assert recovered.operation_id == op.operation_id and recovered.flush.attempts == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deleted", [False, True])
+async def test_parent_loss_recovers_original_operation_without_stale_staged_writes(source_user, transport, deleted):
+    from memoia_server.models.source import DeleteMessages
+    sid = uuid4().hex
+    bid, fid = batch(source_user, sid=sid)
+    op = maintenance.flush(source_user, "__root__", "lost-parent")
+    original = claim_for(source_user)
+
+    async def fail_after_staging(context):
+        transport["outcomes"] = [
+            completion(None, calls=[tool("read_changes", {})], response_id="resp-read"),
+            completion(None, calls=[tool("stage_profile", {"changes": [{
+                "action": "upsert", "id": None, "topic": context.allowed_topics[0],
+                "sub_topic": "fixture", "content": "Never commit this failed draft",
+                "fact_ids": [str(fid)]}]}, "stage-1")], response_id="resp-stage"),
+            http_failure(400, code="previous_response_not_found", param="previous_response_id"),
+        ]
+        return await run_loop(context)
+
+    assert not await maintenance.execute_claim(original, runner=fail_after_staging)
+    failed = row(op.operation_id)
+    assert failed["status"] == "processing" and failed["attempts"] == 1
+    assert failed["error"] == {"code": "MAINTENANCE_PARENT_UNAVAILABLE", "retryable": True}
+    assert failed["lease_owner"] is None and failed["result"] is None
+    assert claim_for(source_user) is None  # The original backoff is enforced.
+    with Session() as session:
+        assert session.query(UserProfile).filter_by(user_id=source_user).count() == 0
+        assert session.query(UserEvent).filter_by(user_id=source_user).count() == 0
+        assert session.scalar(select(blobs.c.flush_operation_id).where(blobs.c.id == bid)) == op.operation_id
+
+    if deleted:
+        result = await source.delete_messages(source_user, "__root__", sid,
+            DeleteMessages(idempotency_key="delete-during-backoff", message_ids=["m1"]))
+        assert result.status == "completed"
+    # Advance only this fixture's clock, not the retry count or identity.
+    with Session.begin() as session:
+        session.execute(update(operations).where(operations.c.id == op.operation_id)
+                        .values(available_at=func.now() - timedelta(seconds=1)))
+    recovered = claim_for(source_user)
+    assert recovered.operation_id == original.operation_id and recovered.blob_ids == original.blob_ids
+    assert recovered.attempts == 2 and recovered.generation > original.generation
+    assert not maintenance.fail_claim(original, MaintenanceRunError("stale", retryable=True))
+    with Session.begin() as session, pytest.raises(SourceError, match="ownership was lost"):
+        maintenance.assert_claim(session, original)
+
+    restart_index = len(transport["requests"])
+    transport["responses"] = [
+        completion(None, calls=[tool("read_changes", {})], response_id="resp-new"), completion(),
+    ]
+    assert await maintenance.execute_claim(recovered)
+    restarted, continued = transport["requests"][restart_index:]
+    assert "previous_response_id" not in restarted
+    assert restarted["prompt_cache_key"] == transport["requests"][0]["prompt_cache_key"]
+    assert continued["previous_response_id"] == "resp-new"
+    # The pinned Agents SDK serializes dict tool results with str(), not JSON.
+    changes = ast.literal_eval(continued["input"][0]["output"])["items"]
+    assert (changes[0]["current_fact"] is None) == deleted
+    assert row(op.operation_id)["status"] == "completed"
+    with Session() as session:
+        assert session.query(UserProfile).filter_by(user_id=source_user).count() == 0
+        assert session.query(UserEvent).filter_by(user_id=source_user).count() == 0
+        assert bool(session.scalar(select(memory_facts.c.id).where(memory_facts.c.id == fid))) != deleted
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 404])
+async def test_unclassified_parent_error_stops_operation_without_automatic_replay(source_user, transport, status):
+    batch(source_user)
+    op = maintenance.flush(source_user, "__root__", "unknown-provider-error")
+    transport["responses"] = []
+    transport["outcomes"] = [completion(None, calls=[tool("read_changes", {})]),
+        http_failure(status, param="previous_response_id", message="previous_response_not_found")]
+    assert not await maintenance.execute_claim(claim_for(source_user))
+    assert row(op.operation_id)["status"] == "failed"
+    assert row(op.operation_id)["error"] == {"code": "model_configuration_rejected", "retryable": False}
+    assert claim_for(source_user) is None
+
+
+@pytest.mark.asyncio
+async def test_model_wait_renews_short_operation_lease_without_holding_write_lock(source_user):
+    batch(source_user)
+    op = maintenance.flush(source_user, "__root__", "slow-model")
+    claim = claim_for(source_user)
+    async with maintenance.TaskLease(claim, ttl=.6) as lease:
+        initial_expiry = row(op.operation_id)["lease_until"]
+        await asyncio.sleep(.9)
+        await lease.assert_active()
+        assert row(op.operation_id)["lease_until"] > initial_expiry
+        assert claim_for(source_user) is None
+        # A new Fact batch can still arrive while this model execution waits.
+        batch(source_user, 2)
+        assert maintenance.get_status(source_user, "__root__")["pending_blob_count"] == 1
 
 
 @pytest.mark.asyncio
