@@ -19,6 +19,10 @@ from test_push import ROOT, local_env, run
 QUICK_TESTS = (
     "test_llm_logging.py", "test_embedding_validation.py", "test_source_quality.py", "test_responses_contract.py",
     "test_maintenance_agent.py", "test_maintenance_worker.py", "test_project_model_config.py",
+    *["test_profile_topic_contract.py::" + name for name in (
+        "test_default_topic_ids_are_language_independent_and_descriptions_survive_formatting",
+        "test_three_context_topics_are_described_in_actual_runner_request",
+    )],
     *["test_redis_boundaries.py::" + name for name in (
         "test_shared_client_lifecycle_and_explicit_initialization",
         "test_api_startup_failure_or_cancellation_closes_shared_client",

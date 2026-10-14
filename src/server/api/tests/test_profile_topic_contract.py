@@ -36,14 +36,15 @@ async def test_three_context_topics_are_described_in_actual_runner_request(trans
     transport["responses"] = [completion()]
     await run_loop(context)
     request = transport["requests"][0]
-    project = json.loads(ElementTree.fromstring(request["input"][0]["content"][1]["text"]).text)
+    assert len(request["input"][0]["content"]) == 1
+    project = json.loads(ElementTree.fromstring(request["input"][0]["content"][0]["text"]).text)
     assert [item["topic"] for item in project["profile_topics"]] == TOPICS
     instructions = request["instructions"]
     for rule in ("user_profile", "interests_preferences", "sub_topic=interaction_preferences",
                  "lifestyle", "single episode is not a habit", "not a concatenation",
                  "one-off", "explicit settings", "not a schema singleton"):
         assert rule in instructions
-    assert "Never modify facts or their evidence" in instructions
+    assert "Never edit, invalidate or delete a Fact or its evidence" in instructions
 
 
 @pytest.mark.asyncio
