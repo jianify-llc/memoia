@@ -222,7 +222,8 @@ async def test_unified_runner_reads_stages_and_returns_only_after_final(transpor
     assert first["max_output_tokens"] == 32768
     assert "max_tokens" not in first and "max_completion_tokens" not in first and "temperature" not in first
     assert all(body["store"] is True and body["truncation"] == "disabled" for body in transport["requests"])
-    assert first["context_management"] == [{"type": "compaction", "compact_threshold": 262144}]
+    assert all(body["context_management"] == [{"type": "compaction", "compact_threshold": 256000}]
+               for body in transport["requests"])
     assert "reasoning.encrypted_content" not in first.get("include", [])
     assert all("conversation" not in body for body in transport["requests"])
     assert transport["paths"] == ["/v1/responses"] * 3
@@ -277,7 +278,10 @@ def test_prompt_consolidates_shared_rules_without_losing_domain_constraints():
                   "invalid_fact_ids are stale links, not usable evidence",
                   "all writes are staged until final commit",
                   "Never edit, invalidate or delete a Fact or its evidence",
-                  "For existing entries, read the exact target before using its id"]),
+                  "any tool result containing the complete target with its registered version is sufficient",
+                  "do not fetch it again by id",
+                  "returned Facts are already registered for use as support",
+                  "read only missing Facts needed for your changes"]),
         (profiles, ["participation in an event does not transfer another participant's attributes",
                     "never add a top-level topic or infer identical identity from a shared name",
                     "'keep this answer short today' is not 'always answer briefly'",
@@ -1061,13 +1065,14 @@ async def test_native_compaction_chain_preserves_plan_and_budgets_through_flex_f
     assert plan.usage.turns == 4 and plan.usage.input_tokens == 30 and plan.usage.output_tokens == 15
     assert [body["service_tier"] for body in transport["requests"]] == ["flex", "flex", "flex", "default"]
     assert all(body["instructions"] == module.MAINTENANCE_INSTRUCTIONS for body in transport["requests"])
+    assert all(body["context_management"] == [{"type": "compaction", "compact_threshold": 256000}]
+               for body in transport["requests"])
     assert len(transport["requests"][0]["input"][0]["content"]) == 1
     assert [item["type"] for item in transport["requests"][1]["input"]] == ["function_call_output"]
     for request in transport["requests"][2:]:
         assert request["previous_response_id"] == "resp-compacted"
         assert [item["type"] for item in request["input"]] == ["function_call_output"]
         assert request["input"][0]["call_id"] == "read-2"
-        assert request["context_management"] == [{"type": "compaction", "compact_threshold": 262144}]
     assert transport["requests"][2]["input"] == transport["requests"][3]["input"]
     assert [call[0] for call in context.calls] == ["profile", "read"]
     assert transport["paths"] == ["/v1/responses"] * 4

@@ -220,7 +220,8 @@ async def test_derived_pages_preserve_complete_text_and_reject_oversized_entries
 
 
 @pytest.mark.asyncio
-async def test_event_page_hydration_and_readset_validation_use_set_queries(search_users):
+@pytest.mark.parametrize("collection", ["profiles", "events"])
+async def test_page_hydration_shares_support_and_uses_set_queries(search_users, collection):
     uid, _, _, _ = search_users
     fid = seed_facts(uid, ["Shared support"])[0]
     pairs = [seed_derived(uid, [fid]) for _ in range(25)]
@@ -235,19 +236,77 @@ async def test_event_page_hydration_and_readset_validation_use_set_queries(searc
                 counts.append(statement)
         sql_events.listen(connectors.DB_ENGINE, "before_cursor_execute", record)
         try:
-            await context.read("events", ids=[str(pairs[0][0])])
+            ids = [str(pair[0 if collection == "events" else 1]) for pair in pairs]
+            await context.read(collection, ids=ids[:1])
             one_count = len(counts)
             counts.clear()
-            page = await context.read("events", ids=[str(eid) for eid, _ in pairs])
+            page = await context.read(collection, ids=ids)
             assert len(page["items"]) == 25
             assert len(counts) == one_count <= 6
-            assert all(item["evidence"][0]["id"] == str(fid) for item in page["items"])
+            assert [fact["id"] for item in page["items"] for fact in item["evidence"]] == [str(fid)]
+            assert all(item["fact_ids"] == [str(fid)] for item in page["items"])
             counts.clear()
             with Session.begin() as session:
                 maintenance._verify_readset(session, claim, context.readset)
-            assert len(counts) == 2  # One Fact set and one Event set, regardless of entry count.
+            assert len(counts) == 2  # One Fact set and one derived set, regardless of entry count.
         finally:
             sql_events.remove(connectors.DB_ENGINE, "before_cursor_execute", record)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collection", ["profiles", "events"])
+async def test_support_is_complete_on_each_page_and_stale_support_blocks_commit(search_users, collection):
+    uid, _, _, _ = search_users
+    old, current = seed_facts(uid, ["Historical support", "New batch support"])
+    pairs = [seed_derived(uid, [old, current]) for _ in range(2)]
+    batch(uid, fact=False, changes=[{"kind": "added", "fact_id": str(current)}])
+    maintenance.flush(uid, "__root__", "support-pages")
+    claim = claim_for(uid)
+    async with maintenance.TaskLease(claim) as lease:
+        context = maintenance.DBMaintenanceContext(claim, lease)
+        await context.read_changes()
+        assert str(old) not in context.readset["facts"]
+        first = await context.read(collection, limit=1)
+        second = await context.read(collection, cursor=first["next_cursor"], limit=1)
+        assert second["next_cursor"] is None
+        for page in (first, second):
+            assert {fact["id"] for fact in page["items"][0]["evidence"]} == {str(old), str(current)}
+        assert len({item["id"] for page in (first, second) for item in page["items"]}) == len(pairs)
+        assert context.readset["facts"][str(old)] == 1
+        with Session.begin() as session:
+            session.execute(update(memory_facts).where(memory_facts.c.id == old)
+                            .values(revision=memory_facts.c.revision + 1))
+        with Session.begin() as session, pytest.raises(maintenance.SourceError, match="Related memory changed"):
+            maintenance._verify_readset(session, claim, context.readset)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collection", ["profiles", "events"])
+async def test_many_long_supporting_facts_do_not_displace_short_entries(search_users, collection):
+    uid, _, _, _ = search_users
+    facts = seed_facts(uid, [f"Evidence {i}: ".ljust(4096, "x") for i in range(20)])
+    pairs = [seed_derived(uid, facts, content="Short supported story") for _ in range(2)]
+    batch(uid, fact=False, changes=[{"kind": "added", "fact_id": str(facts[0])}])
+    maintenance.flush(uid, "__root__", "bounded-support")
+    claim = claim_for(uid)
+    async with maintenance.TaskLease(claim) as lease:
+        context = maintenance.DBMaintenanceContext(claim, lease)
+        ids = [str(pid if collection == "profiles" else eid) for eid, pid in pairs]
+        page = await context.read(collection, ids=ids, limit=2)
+        assert page["next_cursor"] is None
+        assert {item["id"] for item in page["items"]} == set(ids)
+        assert all(set(item["fact_ids"]) == set(map(str, facts)) for item in page["items"])
+        evidence = [fact for item in page["items"] for fact in item["evidence"]]
+        delivered = {fact["id"] for fact in evidence}
+        assert len(delivered) == len(evidence)
+        assert 0 < len(delivered) < len(facts)
+        assert set(context.readset["facts"]) == delivered
+        assert all(len(fact["content"]) == 4096 for fact in evidence)
+        assert maintenance.payload_size(page) <= maintenance_agent.MAX_TOOL_BYTES
+        missing = set(map(str, facts)) - delivered
+        rest = await context.read("facts", ids=sorted(missing))
+        assert {fact["id"] for fact in rest["items"]} == missing
+        assert set(context.readset["facts"]) == set(map(str, facts))
 
 
 @pytest.mark.asyncio

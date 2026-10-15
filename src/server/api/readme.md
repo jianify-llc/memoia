@@ -161,7 +161,7 @@ Responses chain IDs stay in the current execution, without a Conversations objec
 SDK session or database checkpoint. Flex fallback retries the same parent and input;
 failed responses do not advance the chain. Business recovery starts a fresh chain
 from current database context and retains existing retry/commit protections. Native
-`context_management` compaction remains at 262144 tokens; no manual input pruning or
+`context_management` compaction uses 256,000 tokens (decimal, not 262,144); no manual input pruning or
 encrypted reasoning replay is needed in this stateful path. Status, refusal, tool
 arguments/call IDs and compaction payload validation still run before tool dispatch.
 `store=true` retains provider-side responses (normally 30 days); local raw-input cleanup
@@ -184,6 +184,17 @@ the pinned SDK accepts `max_turns=None`, and the adapter counts attempts only fo
 diagnostics. The prompt asks for relevant reads, batched independent work and prompt
 completion without redundant confirmation. Time bounds elapsed execution, not a fixed
 token cost. Each model response is still limited to 32768 output tokens.
+Profile/Event reads include current supporting Facts once per page, linked by
+`fact_ids`, within the 64 KiB read-page budget. Entry text and all support IDs remain
+complete; support that does not fit can be fetched with the existing Fact reader.
+Complete entries take priority over this optional evidence.
+Search also shares each returned Fact once across its three result collections.
+Its three bounded pages can total about 192 KiB plus scores and JSON framing;
+the 64 KiB page limit is not a combined search-result limit.
+Returned entries and supporting Facts already register their versions: updates
+need no redundant exact-ID read. Search hydrates the three result collections concurrently using
+private SQL sessions and joins all reads before returning a failure; staged-state
+and final commit checks remain unchanged.
 HTTP waits have a 600-second
 timeout so Flex is not cut off after two minutes; the outer deadline can cancel
 them earlier. The HTTP client's generic retries remain disabled. Agents SDK retains
@@ -220,7 +231,7 @@ The local HTTP contract tests use the pinned Agents SDK with simulated Responses
 including a compaction item, to verify full instructions on every request and
 incremental native tool outputs without history replay. They also cover output
 validation, retries and numeric usage. This proves request construction, not real
-256K compaction quality or cache savings; those require separate provider validation.
+256,000-token compaction quality or cache savings; those require separate provider validation.
 
 Prefixes shorter than the provider's minimum cacheable length may not be cached; do not pad instructions to manufacture hits. Compaction or changes to tools, instructions, model or reasoning can reduce reuse. Cache entries expire at the provider, not in Redis. See [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching).
 

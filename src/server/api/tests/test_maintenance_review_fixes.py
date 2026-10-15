@@ -1,5 +1,8 @@
 """Review counterexamples over real SQL/Redis and the actual SDK runner."""
 from datetime import datetime, timezone
+import ast
+import asyncio
+from types import SimpleNamespace
 from uuid import uuid4
 
 import numpy as np
@@ -9,7 +12,8 @@ from sqlalchemy import insert, select, update
 from tests.test_search_bundle import search_users, seed_facts, seed_derived
 from tests.test_maintenance_agent import transport, completion, tool
 from tests.test_temporal_evidence import period
-from tests.maintenance_support import maintain, derive
+from tests.maintenance_support import maintain, derive, claim_for
+from tests.test_maintenance import batch
 from memoia_server import maintenance_agent
 from memoia_server.connectors import Session
 from memoia_server.controllers import event, source, maintenance
@@ -66,11 +70,92 @@ async def test_loop_hybrid_search_is_semantic_scoped_and_reads_current_facts(sea
         assert set(fact["id"] for fact in found["facts"]) == {str(fid), str(future)}
         assert [entry["id"] for entry in found["events"]] == [str(eid)]
         assert [entry["id"] for entry in found["profiles"]] == [str(profile)]
+        assert all(not entry["evidence"] for name in ("events", "profiles") for entry in found[name])
         assert context.readset["facts"] == {str(fid): 1, str(future): 1}
         assert all("user_id" not in item and "project_id" not in item
                    for entries in found.values() for item in entries)
         return context.get_plan(maintenance_agent.LoopUsage())
     assert await maintain(uid, runner)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("discovery", ["read_memory", "search_memory"])
+async def test_loop_updates_found_entries_with_historical_support_without_rereading(search_users, transport, discovery):
+    uid, _, _, _ = search_users
+    old, current = seed_facts(uid, ["Enjoys being outdoors", "Sunday hiking plan"])
+    eid, pid = seed_derived(uid, [old, current], content="Sunday hiking plan")
+    with Session.begin() as session:
+        session.execute(update(UserProfile).where(UserProfile.id == pid).values(content="Sunday hiking plan"))
+    batch(uid, fact=False, changes=[{"kind": "added", "fact_id": str(current)}])
+    reads = ([tool("search_memory", {"query": "Sunday hiking"}, "search")] if discovery == "search_memory" else [
+        tool("read_memory", {"collection": collection, "query": "Sunday hiking"}, collection)
+        for collection in ("profiles", "events")])
+    transport["responses"] = [
+        completion(None, calls=[tool("read_changes", {}, "changes"), *reads], response_id="resp-found"),
+        completion(None, calls=[
+            tool("stage_profile", {"changes": [{"action": "upsert", "id": str(pid),
+                "topic": "interests_preferences", "sub_topic": "hiking", "content": "Enjoys outdoor walks on Sundays",
+                "fact_ids": [str(old), str(current)]}]}, "profile-write"),
+            tool("stage_event", {"changes": [{"action": "upsert", "id": str(eid),
+                "content": "Plans a Sunday hike and enjoys being outdoors", "fact_ids": [str(old), str(current)]}]},
+                "event-write")], response_id="resp-staged"),
+        completion(),
+    ]
+    assert await maintain(uid, maintenance_agent.run_loop)
+    assert len(transport["requests"]) == 3
+    if discovery == "search_memory":
+        # The historical Fact appears once in shared evidence, not again per linked entry.
+        output = next(item["output"] for item in transport["requests"][1]["input"]
+                      if item.get("call_id") == "search")
+        found = ast.literal_eval(output)
+        delivered = [fact["id"] for fact in found["facts"]]
+        delivered += [fact["id"] for name in ("profiles", "events") for item in found[name] for fact in item["evidence"]]
+        assert sorted(delivered) == sorted([str(old), str(current)])
+    with Session() as session:
+        profile = session.get(UserProfile, (pid, "__root__"))
+        story = session.get(UserEvent, (eid, "__root__"))
+        assert profile.content == "Enjoys outdoor walks on Sundays"
+        assert story.event_data["content"] == "Plans a Sunday hike and enjoys being outdoors"
+        assert set(profile.attributes["fact_ids"]) == set(story.event_data["fact_ids"]) == {str(old), str(current)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_read", [False, True])
+async def test_search_hydration_is_concurrent_and_joins_failures(search_users, monkeypatch, fail_read):
+    uid, _, _, _ = search_users
+    fid = seed_facts(uid, ["Concurrency fixture"])[0]
+    eid, pid = seed_derived(uid, [fid])
+    batch(uid, fact=False, changes=[{"kind": "added", "fact_id": str(fid)}])
+    maintenance.flush(uid, "__root__", "parallel-hydration")
+    claim = claim_for(uid)
+    async def search(*args, **kwargs):
+        return Promise.resolve(SimpleNamespace(**{name: [SimpleNamespace(id=ident, score=0.75)]
+            for name, ident in (("facts", fid), ("profiles", pid), ("events", eid))}))
+    monkeypatch.setattr(event, "hybrid_search_user_events", search)
+    async with maintenance.TaskLease(claim) as lease:
+        context = maintenance.DBMaintenanceContext(claim, lease)
+        original = context.read
+        started, finished, ready = set(), set(), asyncio.Event()
+        async def read(collection, **kwargs):
+            started.add(collection)
+            if len(started) == 3:
+                ready.set()
+            try:
+                await asyncio.wait_for(ready.wait(), 5)
+                if fail_read and collection == "profiles":
+                    raise maintenance.SourceError("maintenance_read_conflict", "Concurrent change", 409, True)
+                return await original(collection, **kwargs)
+            finally:
+                finished.add(collection)
+        monkeypatch.setattr(context, "read", read)
+        if fail_read:
+            with pytest.raises(maintenance.SourceError, match="Concurrent change"):
+                await context.search("fixture")
+        else:
+            found = await context.search("fixture")
+            assert {name: entries[0]["score"] for name, entries in found.items()} == dict.fromkeys(started, 0.75)
+            assert context.readset["facts"][str(fid)] == 1
+        assert finished == started == {"facts", "profiles", "events"}
 
 
 def timed_profile(uid, label):

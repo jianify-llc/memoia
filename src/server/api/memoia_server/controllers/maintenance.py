@@ -600,8 +600,7 @@ class DBMaintenanceContext:
                 for item in items:
                     item["invalid_fact_ids"] = sorted(set(item["fact_ids"]) - facts.keys())
                     item["fact_ids"] = sorted(set(item["fact_ids"]) & facts.keys())
-                    if collection == "events" and ids is not None:
-                        item["evidence"] = [facts[fid] for fid in item["fact_ids"]]
+                    item["evidence"] = []
 
         accepted, size = [], 96
         for item in items:
@@ -614,13 +613,27 @@ class DBMaintenanceContext:
             if readset[collection].get(ident, item["revision"]) != item["revision"]:
                 raise SourceError("maintenance_read_conflict", "Memory changed during the maintenance read", 409, True)
             readset[collection][ident] = item["revision"]
-            for fact in item.get("evidence", []):
-                fid = str(fact["id"])
-                if readset["facts"].get(fid, fact["revision"]) != fact["revision"]:
-                    raise SourceError("maintenance_read_conflict", "Fact changed while reading the event", 409, True)
-                readset["facts"][fid] = fact["revision"]
             accepted.append(item)
             size += cost
+        # Preserve complete entries before spending spare page space on support.
+        # Keep every fact_id; omitted evidence uses the existing Fact reader.
+        # Deduplicate within this page only, never across tool calls.
+        returned_facts = set()
+        if collection != "facts":
+            for item in accepted:
+                for fid in item["fact_ids"]:
+                    if fid in returned_facts:
+                        continue
+                    fact = facts[fid]
+                    cost = payload_size(fact) + 2
+                    if size + cost > MAX_TOOL_BYTES:
+                        continue
+                    if readset["facts"].get(fid, fact["revision"]) != fact["revision"]:
+                        raise SourceError("maintenance_read_conflict", "Fact changed while reading derived memory", 409, True)
+                    item["evidence"].append(fact)
+                    readset["facts"][fid] = fact["revision"]
+                    returned_facts.add(fid)
+                    size += cost
         next_cursor = str(accepted[-1]["id"]) if accepted and (more or len(accepted) < len(items)) else None
         return json.loads(json.dumps({"items": accepted, "next_cursor": next_cursor}, default=str)), readset
 
@@ -651,21 +664,30 @@ class DBMaintenanceContext:
     async def search(self, query, *, limit=20):
         from .event import hybrid_search_user_events
         await self.assert_active()
-        result = await hybrid_search_user_events(self.user_id, self.project_id, query, limit=limit,
-                                                )
+        result = await hybrid_search_user_events(self.user_id, self.project_id, query, limit=limit)
         if not result.ok():
             raise SourceError("maintenance_search_unavailable", "Memory search did not complete", 503,
                               result.code() in {429, 500, 502, 503, 504})
-        collections = {}
-        for collection in ("facts", "profiles", "events"):
-            ranked = getattr(result.data(), collection)
-            ids = [str(item.id) for item in ranked]
-            # Re-read exact identities to register the same version checks as every
-            # other tool. Search never grants support from a different task watermark.
-            items = (await self.read(collection, ids=ids, limit=limit))["items"] if ids else []
+        collections = {collection: [] for collection in ("facts", "profiles", "events")}
+        ranked = [(collection, getattr(result.data(), collection)) for collection in collections
+                  if getattr(result.data(), collection)]
+        # Hydrate independent collections concurrently; each read owns its SQL
+        # session and validates current versions/staged overlays. Join all reads
+        # before propagating a failure, so none outlives the failed search.
+        pages = await asyncio.gather(*(self.read(collection, ids=[str(item.id) for item in entries], limit=limit)
+                                      for collection, entries in ranked), return_exceptions=True)
+        for (collection, entries), page in zip(ranked, pages, strict=True):
+            if isinstance(page, BaseException):
+                raise page
+            items = page["items"]
             by_id = {item["id"]: item for item in items}
             collections[collection] = [dict(by_id[str(item.id)], score=item.score)
-                                       for item in ranked if str(item.id) in by_id]
+                                       for item in entries if str(item.id) in by_id]
+        returned_facts = {item["id"] for item in collections["facts"]}
+        for collection in ("profiles", "events"):
+            for item in collections[collection]:
+                item["evidence"] = [fact for fact in item["evidence"] if fact["id"] not in returned_facts]
+                returned_facts.update(fact["id"] for fact in item["evidence"])
         await self.assert_active()
         return collections
 

@@ -66,7 +66,7 @@ Loop 工具中的 Fact/Profile/Event ID 只能复制读取或暂存工具实际�
 
 一个 OpenAI Agents SDK Agent 同时查询并暂存 Profile/Event，模型自行安排处理顺序；不能修改 Fact。只使用 Agent、异步 Runner、函数工具和 Pydantic，不使用 handoff、持久线程、MCP、Shell/文件工具。禁用外部 tracing/正文 debug，transport max_retries=0。项目 llm_model/reasoning_effort 默认继承 gpt-6-luna/high，运行固定配置、最终再次校验；不静默切模型或降低等级。
 
-Fact 用 Standard（service_tier=default）；Loop 先 Flex，临时供应商失败/超时后本轮余下请求用 Standard。只重试未执行工具的模型请求，Flex fallback 同样占一次请求，不重启会话或重置限制。鉴权、输入、拒绝/过滤、失锁和预算错误不能借 fallback 绕过。单次生成最多 32768 tokens，一次 Loop 最多 10 次模型请求/300 秒；无累计 64K 上限，用量仍记录。Responses 适配器 store=false，原生 context_management.compact_threshold=262144；不增加摘要模型调用，数据库读集和暂存修改不压缩。模型/入口真实兼容性单独验收。
+Fact 用 Standard（service_tier=default）；Loop 先 Flex，临时供应商失败/超时后本轮余下请求用 Standard。只重试未执行工具的模型请求，Flex fallback 延续原运行预算，不重启会话或重置限制。鉴权、输入、拒绝/过滤、失锁和预算错误不能借 fallback 绕过。单次生成最多 32768 tokens，一次 Loop 整体最多 900 秒，不设模型请求次数或累计 64K 上限，用量仍记录。Responses 使用 store=true、previous_response_id 增量续接，原生 context_management.compact_threshold=256000（十进制）；不增加摘要模型调用，数据库读集和暂存修改不压缩。模型/入口真实兼容性单独验收。
 
 初始仅批次概况。read_changes 返回固定变更及当前有效 Fact（不存在时为 null），代码登记实际返回页的读集和覆盖范围；遗漏任一非 noop 变更不能完成，全部检查后不生成派生修改可合法完成。read_memory 精确/分页读取，search_memory 复用同用户混合搜索；stage_profile/stage_event 批量暂存。读取/修改工具以完整条目分页，单页/批最多 64 KiB、200 条，读取默认 100 条，混合搜索最多 20 条；超限不截断正文。取消全局 100 个暂存目标限制。工具读当前数据并登记版本，不按旧 flush 水位过滤，不接受 project/user，不加载全部历史。覆盖校验不能证明模型语义判断正确，真实样例仍需验收。
 

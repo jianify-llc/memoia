@@ -41,7 +41,7 @@ MAX_COMPLETION_TOKENS = 32768
 MAX_PAGE_SIZE = 200
 MAX_SEARCH_RESULTS = 20
 MAX_TOOL_BYTES = 64 * 1024
-COMPACT_THRESHOLD = 262144
+COMPACT_THRESHOLD = 256000
 
 ReadCollection = Literal["facts", "profiles", "events"]
 ReadSet = dict[ReadCollection, dict[str, int | None]]
@@ -413,6 +413,9 @@ def _maintenance_tools():
         may contain fewer than limit. pending_delete entries remain visible for
         navigation/rewrite, but their old text is not evidence. Only current Fact
         entries and evidence returned from those Fact rows can support new content.
+        Profile/Event pages include bounded current supporting Facts in evidence,
+        shared by fact_ids once per page. Only fetch missing support if needed.
+        Returned entries and Facts are registered for use without an exact-ID reread.
         """
         if not 1 <= limit <= MAX_PAGE_SIZE or (ids is not None and len(ids) > MAX_PAGE_SIZE):
             LOG.warning("Maintenance bound rejected: tool=read_memory limit=%s id_count=%s", limit, len(ids or []))
@@ -437,6 +440,7 @@ def _maintenance_tools():
         Results are complete current entries, already registered for version checks;
         do not read the same entries again. Use read_memory only for additional exact
         IDs, paging or profile/event text filters. Empty results need no confirmation.
+        Supporting Facts are shared once across facts/evidence; fetch missing support only if needed.
         """
         if not query.strip() or len(query) > 500 or not 1 <= limit <= MAX_SEARCH_RESULTS:
             LOG.warning("Maintenance bound rejected: tool=search_memory limit=%s query_chars=%s", limit, len(query))

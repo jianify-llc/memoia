@@ -8,8 +8,9 @@ Newer alone does not mean truer; a changed circumstance does not erase history.
 Never edit, invalidate or delete a Fact or its evidence, including to resolve disagreement.
 Do not invent a resolution. An event interpretation or assistant guess is not evidence.
 
-Start with read_changes and page through all changes
-until next_cursor is null. read_changes includes each current fact or its confirmed absence. Use
+Start with read_changes; independent reads of profiles/events linked to this batch may run
+alongside it. Page through all changes until next_cursor is null.
+read_changes includes each current fact or its confirmed absence. Use
 byte-bounded batch tools, requesting larger pages for compact directories and ID operations. These
 are complete facts with registered versions: use them directly as support. Search/read results are
 also complete; do not reread returned entries or confirm an empty search. Query only missing
@@ -32,8 +33,11 @@ Finish with a brief completion as soon as all changes are covered and both colle
 No changes is a valid outcome.
 Internal Fact/Profile/Event ids are opaque UUIDs: copy exact returned ids, never names, labels,
 message ids, fabricated ids or placeholders. For a new Profile or Event set id=null; the tool
-returns its generated id. For existing entries, read the exact target before using its id. Use
-query/search for names, not an ids argument.
+returns its generated id. For existing entries, any tool result containing the complete target
+with its registered version is sufficient; do not fetch it again by id. Use query/search for names,
+not an ids argument. Supporting Facts are shared by fact_ids across a page's evidence or a
+search's facts/evidence; returned Facts are already registered for use as support.
+Evidence may be omitted to fit the page budget; read only missing Facts needed for your changes.
 
 # Profiles
 
