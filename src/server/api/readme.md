@@ -192,15 +192,27 @@ Search also shares each returned Fact once across its three result collections.
 Its three bounded pages can total about 192 KiB plus scores and JSON framing;
 the 64 KiB page limit is not a combined search-result limit.
 Returned entries and supporting Facts already register their versions: updates
-need no redundant exact-ID read. Search hydrates the three result collections concurrently using
+need no redundant exact-ID read. `read_memory` handles exact IDs, paging and literal,
+case-insensitive substring filters within one field (for example a known name or topic);
+it does not split a multi-keyword query. `search_memory` handles semantic/keyword
+discovery. Reuse existing complete results before querying again; neither tool is a
+mandatory confirmation step for the other. Search hydrates the three result collections concurrently using
 private SQL sessions and joins all reads before returning a failure; staged-state
 and final commit checks remain unchanged.
+The SDK limits each Loop to four concurrent function-tool calls, queuing the rest
+within the same model turn. Independent tools remain parallel; overlapping staged
+writes retain their target locks. Model calls remain serial. This limit is distinct
+from `MAINTENANCE_CONCURRENCY` (default two active user Loops per Worker process):
+additional users wait in PostgreSQL, not in an extra queue or a per-user Worker.
 HTTP waits have a 600-second
 timeout so Flex is not cut off after two minutes; the outer deadline can cancel
 them earlier. The HTTP client's generic retries remain disabled. Agents SDK retains
-its three `conversation_locked` retries; if they succeed, the tier remains Flex.
+its three `conversation_locked` retries for the current model call.
 Only after those retries fail, its existing retry hook permits one replay in Standard
-with the same parent and input. Standard remains selected for later turns. A terminal
+with the same parent and input. Every new model call starts with Flex; only a validated
+successful response resets the tier, so retries of the same call keep their selected
+tier. The response chain, instructions and cache key do not change on a tier switch;
+cache hits or savings across tiers still require provider measurement. A terminal
 lock failure in Standard becomes `MAINTENANCE_CONVERSATION_LOCKED` for original Operation
 recovery. HTTP 408, transport timeouts, 429 and 5xx use the existing immediate tier
 fallback. All actual HTTP attempts and SDK backoff share the same 900-second

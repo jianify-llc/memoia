@@ -98,6 +98,26 @@ def profiles(uid, fid, values):
 
 
 @pytest.mark.asyncio
+async def test_read_query_is_a_literal_substring_not_multi_keyword_discovery(search_users):
+    uid, _, _, _ = search_users
+    text = "Wu cancelled the October hike after overtime."
+    fid = seed_facts(uid, [text])[0]
+    eid, pid = seed_derived(uid, [fid], content=text)
+    with Session.begin() as session:
+        session.execute(update(UserProfile).where(UserProfile.user_id == uid).values(content=text))
+    batch(uid, fact=False, changes=[{"kind": "added", "fact_id": str(fid)}])
+    maintenance.flush(uid, "__root__", "literal-query")
+    claim = claim_for(uid)
+    async with maintenance.TaskLease(claim) as lease:
+        context = maintenance.DBMaintenanceContext(claim, lease)
+        for collection, ident in (("facts", fid), ("profiles", pid), ("events", eid)):
+            matching = await context.read(collection, query="WU CANCELLED")
+            assert [item["id"] for item in matching["items"]] == [str(ident)]
+            assert (await context.read(collection, query="Wu October"))["items"] == []
+            assert (await context.read(collection, query="%"))["items"] == []
+
+
+@pytest.mark.asyncio
 async def test_keyset_pages_merge_staged_add_update_and_delete_without_skipping(source_user, monkeypatch):
     _, fid = batch(source_user)
     profiles(source_user, fid, [(10, "needle first"), (30, "old text")])

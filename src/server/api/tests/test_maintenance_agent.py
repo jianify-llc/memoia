@@ -229,6 +229,10 @@ async def test_unified_runner_reads_stages_and_returns_only_after_final(transpor
     assert transport["paths"] == ["/v1/responses"] * 3
 
 
+    descriptions = {entry["name"]: " ".join(entry["description"].split()) for entry in first["tools"]}
+    assert "literal, case-insensitive substring" in descriptions["read_memory"]
+    assert "not a keyword list or semantic query" in descriptions["read_memory"]
+    assert "natural-language questions or multiple keywords" in descriptions["search_memory"]
     tools = {entry["name"]: entry["parameters"] for entry in first["tools"]}
     assert set(tools) == {"read_memory", "stage_profile", "stage_event", "search_memory", "read_changes"}
     for name in ("stage_profile", "stage_event"):
@@ -281,6 +285,8 @@ def test_prompt_consolidates_shared_rules_without_losing_domain_constraints():
                   "any tool result containing the complete target with its registered version is sufficient",
                   "do not fetch it again by id",
                   "returned Facts are already registered for use as support",
+                  "reuse matching entries already returned",
+                  "do not run both tools to confirm the same result",
                   "read only missing Facts needed for your changes"]),
         (profiles, ["participation in an event does not transfer another participant's attributes",
                     "never add a top-level topic or infer identical identity from a shared name",
@@ -665,6 +671,40 @@ async def test_independent_reads_run_concurrently_in_one_model_turn(transport):
 
 
 @pytest.mark.asyncio
+async def test_sdk_bounds_parallel_tools_to_four_and_drains_the_turn_once(transport):
+    transport["responses"] = [completion(None, calls=[
+        tool("read_memory", {"collection": "facts", "query": str(i)}, f"read-{i}")
+        for i in range(9)]), completion()]
+    context = Context()
+    active = peak = 0
+    started, finished = [], []
+    four_started = asyncio.Event()
+
+    async def read(collection, *, query, **kwargs):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        started.append(query)
+        if len(started) == 4:
+            four_started.set()
+        try:
+            await asyncio.wait_for(four_started.wait(), 5)
+            await asyncio.sleep(0)
+            finished.append(query)
+            return {"items": []}
+        finally:
+            active -= 1
+
+    context.read = read
+    plan = await run_loop(context)
+    assert peak == 4 and active == 0
+    assert sorted(started) == sorted(finished) == list(map(str, range(9)))
+    assert plan.usage.turns == 2 and context.plans == 1
+    assert [item["call_id"] for item in transport["requests"][1]["input"]] == [
+        f"read-{i}" for i in range(9)]
+
+
+@pytest.mark.asyncio
 async def test_independent_staged_targets_parallel_but_same_target_ordered(transport):
     transport["responses"] = [completion(None, calls=[
         tool("stage_profile", {"changes": [{"action": "remove", "id": "same"}]}, "call-1"),
@@ -691,27 +731,31 @@ async def test_independent_staged_targets_parallel_but_same_target_ordered(trans
 
 
 @pytest.mark.asyncio
-async def test_parallel_tool_failure_cancels_sibling_without_returning_partial_plan(transport):
+async def test_parallel_tool_failure_cancels_running_and_does_not_start_queued_tools(transport):
     context = Context()
-    started, cancelled = asyncio.Event(), asyncio.Event()
+    started, cancelled = [], []
+    four_started = asyncio.Event()
 
-    async def read(collection, **kwargs):
-        if collection == "facts":
-            started.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                cancelled.set()
-        await started.wait()
-        raise MaintenanceRunError("LEASE_LOST")
+    async def read(collection, *, query, **kwargs):
+        started.append(query)
+        if len(started) == 4:
+            four_started.set()
+        if query == "0":
+            await asyncio.wait_for(four_started.wait(), 5)
+            raise MaintenanceRunError("LEASE_LOST")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(query)
 
     context.read = read
     transport["responses"] = [completion(None, calls=[
-        tool("read_memory", {"collection": "facts"}, "call-1"),
-        tool("read_memory", {"collection": "profiles"}, "call-2")])]
+        tool("read_memory", {"collection": "facts", "query": str(i)}, f"read-{i}")
+        for i in range(6)])]
     with pytest.raises(MaintenanceRunError, match="LEASE_LOST"):
         await run_loop(context)
-    assert cancelled.is_set() and context.plans == 0
+    assert started == ["0", "1", "2", "3"]
+    assert sorted(cancelled) == ["1", "2", "3"] and context.plans == 0
     assert len(transport["requests"]) == 1
 
 
@@ -1057,25 +1101,31 @@ async def test_native_compaction_chain_preserves_plan_and_budgets_through_flex_f
     transport["outcomes"] = [
         completion(None, calls=[tool("stage_profile", {"changes": [{"action": "remove", "id": "profile-1"}]})], response_id="resp-stage"),
         completion(None, calls=[checkpoint, tool("read_memory", {"collection": "facts"}, "read-2")], response_id="resp-compacted"),
-        http_failure(429), completion(),
+        http_failure(429),
+        completion(None, calls=[tool("search_memory", {"query": "Wu hike"}, "search-3")], response_id="resp-searched"),
+        completion(),
     ]
     context = Context()
     plan = await run_loop(context)
     assert len((plan.profiles + plan.events)) == 1 and plan.readset["facts"] == {"fact-1": 2}
-    assert plan.usage.turns == 4 and plan.usage.input_tokens == 30 and plan.usage.output_tokens == 15
-    assert [body["service_tier"] for body in transport["requests"]] == ["flex", "flex", "flex", "default"]
+    assert plan.usage.turns == 5 and plan.usage.input_tokens == 40 and plan.usage.output_tokens == 20
+    assert [body["service_tier"] for body in transport["requests"]] == ["flex", "flex", "flex", "default", "flex"]
     assert all(body["instructions"] == module.MAINTENANCE_INSTRUCTIONS for body in transport["requests"])
     assert all(body["context_management"] == [{"type": "compaction", "compact_threshold": 256000}]
                for body in transport["requests"])
     assert len(transport["requests"][0]["input"][0]["content"]) == 1
     assert [item["type"] for item in transport["requests"][1]["input"]] == ["function_call_output"]
-    for request in transport["requests"][2:]:
+    for request in transport["requests"][2:4]:
         assert request["previous_response_id"] == "resp-compacted"
         assert [item["type"] for item in request["input"]] == ["function_call_output"]
         assert request["input"][0]["call_id"] == "read-2"
     assert transport["requests"][2]["input"] == transport["requests"][3]["input"]
-    assert [call[0] for call in context.calls] == ["profile", "read"]
-    assert transport["paths"] == ["/v1/responses"] * 4
+    last = transport["requests"][-1]
+    assert last["previous_response_id"] == "resp-searched"
+    assert [item["call_id"] for item in last["input"]] == ["search-3"]
+    assert all(body["prompt_cache_key"] == last["prompt_cache_key"] for body in transport["requests"])
+    assert [call[0] for call in context.calls] == ["profile", "read", "search"]
+    assert transport["paths"] == ["/v1/responses"] * 5
 
 
 @pytest.mark.asyncio
@@ -1225,7 +1275,7 @@ async def test_flex_transient_failure_retries_only_current_request_with_standard
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_kind", ["http", "408", "response", "timeout"])
-async def test_standard_is_sticky_without_restarting_or_repeating_tools(transport, failure_kind):
+async def test_next_model_call_returns_to_flex_without_restarting_or_repeating_tools(transport, failure_kind):
     failed = completion(None, status="failed", response_id="resp-failed")
     failed["error"] = {"code": "server_error", "message": "Temporary failure"}
     failure = {"http": http_failure(429), "408": http_failure(408), "response": failed,
@@ -1238,7 +1288,16 @@ async def test_standard_is_sticky_without_restarting_or_repeating_tools(transpor
     ]
     context = Context()
     plan = await run_loop(context)
-    assert [body["service_tier"] for body in transport["requests"]] == ["flex", "flex", "default", "default"]
+    bodies = transport["requests"]
+    assert [body["service_tier"] for body in bodies] == ["flex", "flex", "default", "flex"]
+    assert [item["requested_service_tier"] for item in transport["accounting_metadata"]] == [
+        "flex", "flex", "default", "flex"]
+    assert all(body["prompt_cache_key"] == bodies[0]["prompt_cache_key"] and
+               body["instructions"] == module.MAINTENANCE_INSTRUCTIONS and
+               body["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}
+               for body in bodies)
+    assert {k: v for k, v in bodies[1].items() if k != "service_tier"} == {
+        k: v for k, v in bodies[2].items() if k != "service_tier"}
     assert [call[0] for call in context.calls] == ["read", "profile"]
     assert len((plan.profiles + plan.events)) == 1 and plan.usage.turns == 4
     assert transport["requests"][1]["input"] == transport["requests"][2]["input"]
@@ -1247,6 +1306,24 @@ async def test_standard_is_sticky_without_restarting_or_repeating_tools(transpor
     assert [item["type"] for item in transport["requests"][2]["input"]] == ["function_call_output"]
     assert transport["requests"][2]["input"][0]["call_id"] == "read-1"
     assert transport["requests"][3]["input"][0]["call_id"] == "change-1"
+
+
+@pytest.mark.asyncio
+async def test_each_model_call_can_fall_back_without_advancing_to_a_failed_response(transport):
+    transport["outcomes"] = [
+        http_failure(429),
+        completion(None, calls=[tool("read_memory", {"collection": "facts"}, "read-1")], response_id="resp-read"),
+        http_failure(503), completion(response_id="resp-done"),
+    ]
+    context = Context()
+    plan = await run_loop(context)
+    bodies = transport["requests"]
+    assert [body["service_tier"] for body in bodies] == ["flex", "default", "flex", "default"]
+    assert [body.get("previous_response_id") for body in bodies] == [None, None, "resp-read", "resp-read"]
+    for first, retry in (bodies[:2], bodies[2:]):
+        assert {k: v for k, v in first.items() if k != "service_tier"} == {
+            k: v for k, v in retry.items() if k != "service_tier"}
+    assert plan.usage.turns == 4 and len(context.calls) == 1 and context.plans == 1
 
 
 @pytest.fixture
@@ -1289,7 +1366,7 @@ async def test_sdk_lock_retry_exhaustion_switches_same_request_to_standard(trans
     plan = await run_loop(context)
     bodies = transport["requests"]
     assert plan.usage.turns == 7 and lock_backoff == [1, 2, 4, 0]
-    assert [body["service_tier"] for body in bodies] == ["flex"] * 5 + ["default"] * 2
+    assert [body["service_tier"] for body in bodies] == ["flex"] * 5 + ["default", "flex"]
     assert [call[0] for call in context.calls] == ["read", "profile"]
     assert context.plans == 1 and len(plan.profiles) == 1
     for body in bodies[1:6]:

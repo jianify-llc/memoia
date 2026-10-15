@@ -11,7 +11,7 @@ from typing import Annotated, Literal, Protocol
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from agents import (Agent, ModelSettings, OpenAIResponsesModel, RunConfig,
+from agents import (Agent, ModelSettings, OpenAIResponsesModel, RunConfig, ToolExecutionConfig,
                     RunContextWrapper, RunHooks, Runner, function_tool, set_tracing_disabled,
                     ModelRetryAdvice, ModelRetryAdviceRequest, ModelRetrySettings, retry_policies)
 from agents import _debug
@@ -260,6 +260,9 @@ class _StrictMaintenanceModel(OpenAIResponsesModel):
             LOG.info("Maintenance response: operation=%s request=%s tier=%s tools=%s elapsed_ms=%s",
                      getattr(self.context, "operation_id", None), self.turns, self.service_tier,
                      names, round((time.monotonic() - requested_at) * 1000))
+            # Only a valid response ends this call; its SDK retries retain the tier.
+            # The next model call starts with Flex again, on the same response chain.
+            self.service_tier = "flex"
             return response
 
     async def _record_usage(self, usage, requested_at: float, *, actual_model=None, service_tier=None) -> bool:
@@ -406,8 +409,10 @@ def _maintenance_tools():
                           limit: PageLimit = 100) -> dict:
         """Read current-user entries. ids must be exact returned UUIDs, never names/labels.
 
-        Use query for text/name matching; ids=null pages through matching entries,
-        or entries linked to this flush's changes when query is also null.
+        query is a literal, case-insensitive substring within one field, not a
+        keyword list or semantic query. Use a known name, topic or text fragment;
+        use search_memory for discovery. ids=null pages through matches, or entries
+        linked to this flush's changes when query is also null.
         All pages preserve complete entry text. Follow next_cursor.
         The memory cursor is the last returned ID, not an offset; byte-sized pages
         may contain fewer than limit. pending_delete entries remain visible for
@@ -437,9 +442,10 @@ def _maintenance_tools():
                             limit: SearchLimit = 20) -> dict:
         """Search current-user facts by meaning and words, with related profiles/events.
 
+        Use natural-language questions or multiple keywords to discover relevant memory.
         Results are complete current entries, already registered for version checks;
         do not read the same entries again. Use read_memory only for additional exact
-        IDs, paging or profile/event text filters. Empty results need no confirmation.
+        IDs, paging or literal text filters. Empty results need no confirmation.
         Supporting Facts are shared once across facts/evidence; fetch missing support only if needed.
         """
         if not query.strip() or len(query) > 500 or not 1 <= limit <= MAX_SEARCH_RESULTS:
@@ -573,7 +579,9 @@ async def run_loop(context: MaintenanceContext) -> LoopPlan:
                              auto_previous_response_id=True,
                              hooks=_ToolUsageHooks(model),
                              run_config=RunConfig(tracing_disabled=True,
-                                                  trace_include_sensitive_data=False))
+                                                  trace_include_sensitive_data=False,
+                                                  tool_execution=ToolExecutionConfig(
+                                                      max_function_tool_concurrency=4)))
             await context.assert_active()
             return context.get_plan(LoopUsage(
                 turns=model.turns, input_tokens=model.input_tokens,
