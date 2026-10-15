@@ -169,7 +169,8 @@ async def test_new_input_during_run_is_not_acknowledged(source_user):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("removed", [False, True], ids=["current-support", "deleted-support"])
-async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(source_user, removed):
+@pytest.mark.parametrize("support_error", [False, True], ids=["valid-support", "corrected-support"])
+async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(source_user, removed, support_error):
     bid, fid = batch(source_user)
     old = maintenance.flush(source_user, "__root__", "old")
     claim = claim_for(source_user)
@@ -204,6 +205,12 @@ async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(so
                 assert [item["id"] for item in linked["items"]] == [str(ident)]
                 assert linked["items"][0]["fact_ids"] == []
                 assert linked["items"][0]["invalid_fact_ids"] == [str(fid)]
+            if support_error:
+                for kind, ident, factory in (("profile", profile_id, ProfileMutation), ("event", event_id, EventMutation)):
+                    fields = dict(topic=context.allowed_topics[0], sub_topic="fixture") if kind == "profile" else {}
+                    rejected = await context.stage_batch([factory(action="upsert", id=str(ident),
+                        content="Must not restore deleted evidence", fact_ids=[str(fid)], **fields)], kind)
+                    assert rejected["staged"] is False
             await context.stage_profile(ProfileMutation(action="remove", id=str(profile_id)))
             await context.stage_event(EventMutation(action="remove", id=str(event_id)))
             return context.get_plan(LoopUsage())
@@ -211,6 +218,12 @@ async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(so
         found = await context.search("Supported fact")
         assert [item["id"] for item in found["profiles"]] == [str(profile_id)]
         assert [item["id"] for item in found["events"]] == [str(event_id)]
+        if support_error:
+            for kind, ident, factory in (("profile", profile_id, ProfileMutation), ("event", event_id, EventMutation)):
+                fields = dict(topic=context.allowed_topics[0], sub_topic="fixture") if kind == "profile" else {}
+                rejected = await context.stage_batch([factory(action="upsert", id=str(ident),
+                    content="Must correct the support ID", fact_ids=[str(uuid4())], **fields)], kind)
+                assert rejected["staged"] is False
         await context.stage_profile(ProfileMutation(action="upsert", id=str(profile_id),
             content=found["profiles"][0]["content"], topic=context.allowed_topics[0],
             sub_topic="fixture", fact_ids=[str(fid)]))

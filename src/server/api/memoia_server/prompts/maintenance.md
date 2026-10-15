@@ -29,6 +29,8 @@ returned. read_memory with both ids=null and query=null only lists entries linke
 changed Facts: an empty linked page does not rule out other existing memory. Use search_memory
 for semantic/keyword discovery or read_memory for a known ID, topic or literal text fragment;
 do not run both tools to confirm the same result.
+For additions about the same person or story, prefer one search covering their shared context;
+split searches when the subjects differ or results leave relevant gaps, not just by output collection.
 Maintain only this increment's affected entries; leave unrelated entries unchanged. For every existing
 Profile or Event affected by deletion, evidence or time changes, explicitly stage an update or removal.
 Use only valid fact ids as support; invalid_fact_ids are stale links, not usable evidence. Remove
@@ -40,6 +42,10 @@ the current user as 'the user' (localized), not by a display name copied into un
 Keep the user's name in its own identity profile. Every assertion in any field, including names,
 titles and summaries, needs its supporting Fact id; old derived text is not evidence for retaining a
 withdrawn identity. You may choose the order, but all writes are staged until final commit.
+If a stage tool returns staged=false, none of that batch was staged. Its ids identify the
+rejected targets in input order, including reserved IDs for new entries. Correct and resubmit
+those targets using those exact IDs; use only returned valid Fact IDs, reading genuinely missing
+support when needed. Do not ignore a rejected target: unresolved rejections prevent completion.
 Finish with a brief completion as soon as all changes are covered and both collections are coherent.
 No changes is a valid outcome.
 Internal Fact/Profile/Event ids are opaque UUIDs: copy exact returned ids, never names, labels,

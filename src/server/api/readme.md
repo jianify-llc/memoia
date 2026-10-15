@@ -11,6 +11,11 @@ Source extraction only reads the current valid batch, never historical Facts.
 Supported historical statements may conflict; only Profile/Event organize the
 current understanding. Source has no cumulative Fact limit. Extraction deduplicates
 conclusions inside the batch, not independent message support.
+Maintenance stages each tool batch only after validating all its support. Unread
+Fact IDs return a bounded error result for correction within the same Loop; all
+rejected targets must be resolved before a plan can complete. No automatic lookup,
+new task, retry budget or partial database commit is introduced. Related additions
+prefer one discovery search; independent queries remain concurrent.
 An undated confirmation still supports a fact when a dated message is deleted;
 the removed message's event time must not survive. Repeated messages across Blobs
 retain their original message identity and do not become independent evidence.

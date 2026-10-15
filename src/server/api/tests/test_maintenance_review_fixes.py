@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 import ast
 import asyncio
+import json
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -24,6 +25,113 @@ from memoia_server.models.source import (
     memory_operations,
 )
 from memoia_server.models.utils import Promise
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["profile", "event"])
+@pytest.mark.parametrize("new", [False, True], ids=["existing", "create"])
+@pytest.mark.parametrize("repair", [False, True], ids=["ignored", "corrected"])
+async def test_unread_support_can_be_corrected_but_never_ignored(search_users, transport, caplog, kind, new, repair):
+    uid, other, _, _ = search_users
+    old, current = seed_facts(uid, ["Enjoys hiking", "Prefers Sunday hiking"])
+    foreign = seed_facts(other, ["Protected foreign fact"])[0]
+    eid, pid = seed_derived(uid, [old], content="Original hiking memory")
+    with Session.begin() as session:
+        session.execute(update(UserProfile).where(UserProfile.id == pid).values(content="Original hiking memory"))
+    batch(uid, fact=False, changes=[{"kind": "added", "fact_id": str(current)}])
+    operation = maintenance.flush(uid, "__root__", "support-repair")
+    target = pid if kind == "profile" else eid
+    change = {"action": "upsert", "id": None if new else str(target),
+              "content": "protected-staging-content", "fact_ids": [str(old), str(current)]}
+    if kind == "profile":
+        change.update(topic="interests_preferences", sub_topic="hiking")
+    other_kind = "event" if kind == "profile" else "profile"
+    other_change = {"action": "upsert", "id": str(eid if kind == "profile" else pid),
+                    "content": "Updated hiking memory", "fact_ids": [str(old), str(current)]}
+    if other_kind == "profile":
+        other_change.update(topic="interests_preferences", sub_topic="hiking")
+    corrected = completion(None, calls=[tool("stage_" + kind, {"changes": [change]}, "repair")], response_id="resp-repair")
+    transport["responses"] = [
+        completion(None, calls=[tool("read_changes", {})], response_id="resp-changes"),
+        completion(None, calls=[tool("search_memory", {"query": "hiking"}, "search")], response_id="resp-search"),
+        completion(None, calls=[
+            tool("stage_" + kind, {"changes": [{**change, "fact_ids": [str(foreign)]}]}, "rejected"),
+            tool("stage_" + other_kind, {"changes": [other_change]}, "independent"),
+        ], response_id="resp-rejected"),
+        *([corrected] if repair else []), completion(),
+    ]
+    rejection = {}
+    def use_returned_identity():
+        if len(transport["requests"]) != 4:
+            return
+        output = next(item["output"] for item in transport["requests"][-1]["input"]
+                      if item.get("call_id") == "rejected")
+        rejection.update(ast.literal_eval(output))
+        if repair:
+            args = json.loads(corrected["output"][0]["arguments"])
+            args["changes"][0]["id"] = rejection["ids"][0]
+            corrected["output"][0]["arguments"] = json.dumps(args)
+    transport["after_response"] = use_returned_identity
+    assert await maintenance.execute_claim(claim_for(uid)) is repair
+    assert rejection["staged"] is False
+    assert rejection["error"] == {"code": "maintenance_support_unread", "unread_fact_ids": [str(foreign)]}
+    assert str(foreign) in caplog.text and "protected-staging-content" not in caplog.text
+    assert "Protected foreign fact" not in caplog.text
+    assert len(transport["requests"]) == (5 if repair else 4)
+    assert all(request["service_tier"] == "flex" for request in transport["requests"])
+    with Session() as session:
+        row = session.execute(select(memory_operations).where(memory_operations.c.id == operation.operation_id)).mappings().one()
+        assert row["attempts"] == 1
+        assert row["status"] == ("completed" if repair else "failed")
+        assert row["error"] == (None if repair else {"code": "maintenance_unresolved_staging", "retryable": False})
+        assert session.scalar(select(memory_facts.c.id).where(memory_facts.c.id == foreign)) == foreign
+        for table, ident in ((UserProfile, pid), (UserEvent, eid)):
+            original = session.get(table, (ident, "__root__"))
+            content = original.content if table is UserProfile else original.event_data["content"]
+            if not repair or (new and ((kind == "profile") == (table is UserProfile))):
+                assert content == "Original hiking memory"
+        if repair:
+            table = UserProfile if kind == "profile" else UserEvent
+            changed = session.get(table, (UUID(rejection["ids"][0]), "__root__"))
+            data = changed.attributes if kind == "profile" else changed.event_data
+            assert set(data["fact_ids"]) == {str(old), str(current)}
+            assert session.query(table).filter_by(user_id=uid).count() == (2 if new else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["profile", "event"])
+async def test_rejected_batch_stages_nothing_and_each_target_must_be_resolved(search_users, kind):
+    uid, _, _, _ = search_users
+    fid = seed_facts(uid, ["Enjoys hiking"])[0]
+    eid, pid = seed_derived(uid, [fid], content="Original hiking memory")
+    batch(uid, fact=False, changes=[{"kind": "added", "fact_id": str(fid)}])
+    factory = maintenance_agent.ProfileMutation if kind == "profile" else maintenance_agent.EventMutation
+    fields = dict(topic="interests_preferences", sub_topic="hiking") if kind == "profile" else {}
+    existing = factory(action="upsert", id=str(pid if kind == "profile" else eid),
+                       content="Updated hiking memory", fact_ids=[str(fid)], **fields)
+    new = factory(action="upsert", content="A supported new memory", fact_ids=[str(UUID(int=77))], **fields)
+    async def runner(context):
+        await context.read_changes()
+        await context.read("profiles" if kind == "profile" else "events", ids=[existing.id])
+        rejected = await context.stage_batch([existing, new], kind)
+        assert rejected["staged"] is False
+        assert not context._staged["profiles"] and not context._staged["events"]
+        assert rejected["ids"][0] == existing.id
+        await context.stage_batch([existing], kind)
+        with pytest.raises(source.SourceError, match="must be corrected"):
+            context.get_plan(maintenance_agent.LoopUsage())
+        # A successful, unrelated create must not clear the rejected create.
+        unrelated = await context.stage_batch([new.model_copy(update={"fact_ids": [str(fid)]})], kind)
+        with pytest.raises(source.SourceError, match="must be corrected"):
+            context.get_plan(maintenance_agent.LoopUsage())
+        await context.stage_batch([factory(action="remove", id=unrelated["ids"][0])], kind)
+        fixed = new.model_copy(update={"id": rejected["ids"][1], "fact_ids": [str(fid)]})
+        assert (await context.stage_batch([fixed], kind))["staged"] is True
+        return context.get_plan(maintenance_agent.LoopUsage())
+    assert await maintain(uid, runner)
+    with Session() as session:
+        table = UserProfile if kind == "profile" else UserEvent
+        assert session.query(table).filter_by(user_id=uid).count() == 2
 
 
 @pytest.mark.asyncio
@@ -71,8 +179,9 @@ async def test_addition_discovery_reuses_unlinked_entries_and_old_support(search
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mixed", [False, True], ids=["deletion", "mixed"])
 @pytest.mark.parametrize("skip_last_page", [False, True], ids=["complete", "missing-page"])
+@pytest.mark.parametrize("support_error", [False, True], ids=["valid-support", "corrected-support"])
 async def test_changed_evidence_requires_all_linked_pages_even_after_discovery(
-        search_users, transport, mixed, skip_last_page):
+        search_users, transport, mixed, skip_last_page, support_error):
     uid, _, _, _ = search_users
     withdrawn = seed_facts(uid, ["An old dawn excursion."])[0]
     kept = seed_facts(uid, ["The user enjoys forest trails."])[0]
@@ -119,6 +228,11 @@ async def test_changed_evidence_requires_all_linked_pages_even_after_discovery(
         profile_changes.append({"action": "upsert", "id": str(pid), "topic": "interests_preferences",
                                 "sub_topic": "hiking", "content": content, "fact_ids": support})
         event_changes.append({"action": "upsert", "id": str(eid), "content": content, "fact_ids": support})
+    if support_error:
+        responses.append(completion(None, calls=[
+            tool("stage_profile", {"changes": [{**change, "fact_ids": [str(withdrawn)]} for change in profile_changes]}, "profiles-rejected"),
+            tool("stage_event", {"changes": [{**change, "fact_ids": [str(withdrawn)]} for change in event_changes]}, "events-rejected"),
+        ], response_id="resp-rejected"))
     responses.extend([
         completion(None, calls=[tool("stage_profile", {"changes": profile_changes}, "profiles"),
                                 tool("stage_event", {"changes": event_changes}, "events")],
@@ -129,6 +243,10 @@ async def test_changed_evidence_requires_all_linked_pages_even_after_discovery(
     assert await maintenance.execute_claim(claim_for(uid)) == (not skip_last_page)
     outputs = {item["call_id"]: ast.literal_eval(item["output"])
                for request in transport["requests"][1:] for item in request["input"]}
+    if support_error:
+        for name in ("profiles-rejected", "events-rejected"):
+            assert outputs[name]["staged"] is False
+            assert outputs[name]["error"]["unread_fact_ids"] == [str(withdrawn)]
     for collection, index in (("profiles", 1), ("events", 0)):
         first = outputs[collection + "-first"]
         assert first["next_cursor"] == str(targets[0][index])

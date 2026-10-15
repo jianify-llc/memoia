@@ -176,6 +176,8 @@ class MaintenanceContext(Protocol):
 
     async def stage_event(self, change: EventMutation) -> str: ...
 
+    async def stage_batch(self, changes: list[ProfileMutation] | list[EventMutation], kind: Literal["profile", "event"]) -> dict: ...
+
     def get_plan(self, usage: LoopUsage) -> LoopPlan: ...
 
     async def read_changes(self, *, cursor: str | None = None, limit: int = 100) -> dict: ...
@@ -476,9 +478,9 @@ def _maintenance_tools():
             await ctx.context.assert_active()
             if any(change.action == "upsert" and change.topic not in ctx.context.allowed_topics for change in changes):
                 raise MaintenanceRunError("MAINTENANCE_PROFILE_TOPIC")
-            ids = [await ctx.context.stage_profile(ProfileMutation(**change.model_dump())) for change in changes]
+            result = await ctx.context.stage_batch([ProfileMutation(**change.model_dump()) for change in changes], "profile")
             await ctx.context.assert_active()
-            return {"staged": True, "ids": ids}
+            return result
 
     @function_tool(failure_error_function=None)
     async def stage_event(ctx: RunContextWrapper[MaintenanceContext],
@@ -492,9 +494,9 @@ def _maintenance_tools():
             allowed_tags = {definition["name"] for definition in ctx.context.event_tag_definitions}
             if any(tag.tag not in allowed_tags for change in changes for tag in change.event_tags):
                 raise MaintenanceRunError("MAINTENANCE_EVENT_TAG")
-            ids = [await ctx.context.stage_event(change) for change in changes]
+            result = await ctx.context.stage_batch(changes, "event")
             await ctx.context.assert_active()
-            return {"staged": True, "ids": ids}
+            return result
 
     @function_tool(failure_error_function=None)
     async def read_changes(ctx: RunContextWrapper[MaintenanceContext],
@@ -532,8 +534,9 @@ class _ToolUsageHooks(RunHooks):
 
     async def on_tool_end(self, context, agent, tool, result):
         counts = {key: len(value) for key, value in result.items() if isinstance(value, list)} if isinstance(result, dict) else {}
-        LOG.info("Maintenance tool: operation=%s request=%s tool=%s status=completed counts=%s",
-                 getattr(context.context, "operation_id", None), self.model.turns, tool.name, counts)
+        status = "rejected" if isinstance(result, dict) and result.get("staged") is False else "completed"
+        LOG.info("Maintenance tool: operation=%s request=%s tool=%s status=%s counts=%s",
+                 getattr(context.context, "operation_id", None), self.model.turns, tool.name, status, counts)
 
 
 async def run_loop(context: MaintenanceContext) -> LoopPlan:

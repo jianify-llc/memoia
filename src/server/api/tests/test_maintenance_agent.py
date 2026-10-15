@@ -56,6 +56,10 @@ class Context:
         self.staged.append(change)
         return change.id or "new-event"
 
+    async def stage_batch(self, changes, kind):
+        stage = self.stage_profile if kind == "profile" else self.stage_event
+        return {"staged": True, "ids": [await stage(change) for change in changes]}
+
     async def search(self, query, *, limit=20):
         self.calls.append(("search", query, limit))
         self.readset["facts"]["fact-1"] = 2

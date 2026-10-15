@@ -414,6 +414,7 @@ class DBMaintenanceContext:
         self.reasoning_effort = rules["reasoning_effort"]
         self.readset = {"facts": {}, "profiles": {}, "events": {}}
         self._staged = {"profiles": {}, "events": {}}
+        self._unresolved_staging = set()
         self._seen_changes = set()
         self._prepare_unsupported()
 
@@ -691,19 +692,15 @@ class DBMaintenanceContext:
         await self.assert_active()
         return collections
 
-    async def _stage(self, change, kind):
-        await self.assert_active()
+    def _validate_stage(self, change, kind):
         collection = "profiles" if kind == "profile" else "events"
         staged = self._staged[collection]
-        if change.id is None:
-            ident = str(uuid4())
-            change = change.model_copy(update={"id": ident})
-            self.readset[collection][ident] = None
-        else:
+        if change.id is not None:
             ident = str(_uuid(change.id))
             if ident not in self.readset[collection]:
                 raise SourceError("maintenance_target_unread", "Read the target entry before changing it", 502)
-            if self.readset[collection][ident] is None and ident not in staged:
+            if (self.readset[collection][ident] is None and ident not in staged
+                    and (kind, ident) not in self._unresolved_staging):
                 raise SourceError("maintenance_target_absent", "Cannot replace an absent entry with a supplied id", 502)
         if change.action == "upsert":
             if kind == "profile" and change.topic not in self.allowed_topics:
@@ -712,10 +709,44 @@ class DBMaintenanceContext:
                 allowed_tags = {definition["name"] for definition in self.event_tag_definitions}
                 if any(tag.tag not in allowed_tags for tag in change.event_tags):
                     raise SourceError("maintenance_invalid_tag", "Event tag is outside the configured tags", 502)
-            for fact_id in change.fact_ids:
-                if self.readset["facts"].get(str(_uuid(fact_id))) is None:
-                    raise SourceError("maintenance_support_unread", "Read valid supporting facts before staging memory", 502)
-        staged[ident] = change
+            return {str(_uuid(fid)) for fid in change.fact_ids
+                    if self.readset["facts"].get(str(_uuid(fid))) is None}
+        return set()
+
+    async def stage_batch(self, changes, kind):
+        """Reject the whole batch before staging; only unread support is repairable."""
+        from ..env import LOG
+        await self.assert_active()
+        unread = set().union(*(self._validate_stage(change, kind) for change in changes))
+        if unread:
+            collection = "profiles" if kind == "profile" else "events"
+            ids = []
+            for change in changes:
+                ident = str(_uuid(change.id)) if change.id is not None else str(uuid4())
+                if change.id is None:
+                    # Reserve only a run-local identity for correcting this create;
+                    # no draft or database row is saved.
+                    self.readset[collection][ident] = None
+                ids.append(ident)
+                self._unresolved_staging.add((kind, ident))
+            LOG.warning("Maintenance support rejected: operation=%s kind=%s target_ids=%s unread_fact_ids=%s unread_count=%s read_fact_count=%s",
+                        self.operation_id, kind, ids[:20], sorted(unread)[:20], len(unread), len(self.readset["facts"]))
+            return {"staged": False, "ids": ids,
+                    "error": {"code": "maintenance_support_unread", "unread_fact_ids": sorted(unread)}}
+        stage = self.stage_profile if kind == "profile" else self.stage_event
+        return {"staged": True, "ids": [await stage(change) for change in changes]}
+
+    async def _stage(self, change, kind):
+        await self.assert_active()
+        if self._validate_stage(change, kind):
+            raise SourceError("maintenance_support_unread", "Read valid supporting facts before staging memory", 502)
+        collection = "profiles" if kind == "profile" else "events"
+        ident = str(_uuid(change.id)) if change.id is not None else str(uuid4())
+        if change.id is None:
+            change = change.model_copy(update={"id": ident})
+            self.readset[collection][ident] = None
+        self._staged[collection][ident] = change
+        self._unresolved_staging.discard((kind, ident))
         return ident
 
     async def stage_profile(self, change):
@@ -775,6 +806,8 @@ class DBMaintenanceContext:
 
     def get_plan(self, usage):
         from ..maintenance_agent import LoopPlan
+        if self._unresolved_staging:
+            raise SourceError("maintenance_unresolved_staging", "Rejected memory changes must be corrected before completion", 502)
         if any(index not in self._seen_changes for index, change in enumerate(self.changes)
                if change.get("kind") != "noop"):
             raise SourceError("maintenance_incomplete", "Not all fixed Fact changes were reviewed", 502, True)

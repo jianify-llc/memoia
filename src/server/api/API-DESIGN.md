@@ -60,7 +60,7 @@ Operation(kind=flush) 是唯一调度和恢复身份，source_id/blob_id 为 nul
 
 Operation.status 是终态真相源：待领取、执行及自动退避均为 processing，退避可携带 retryable 的末次错误；不可恢复或四次耗尽才为 failed，提交回执后才为 completed。flush.status 对应 pending/running、failed、completed，不独立猜终态。Worker 每轮独立回收过期租约，第四次崩溃也收敛到 failed；重复恢复 processing 不重置预算。
 
-维护校验拒绝使用具体安全错误码（例如 maintenance_invalid_identifier、maintenance_target_unread、maintenance_support_unread）；回执和 Worker 日志保留原 operation_id、次数及是否可重试，不记录模型参数、正文或异常文本。验收探针在清理自己的临时用户前持久化首次错误码，不用后续成功覆盖首次失败。
+维护校验使用具体安全错误码。未读 Fact 支撑返回 `staged=false`、整批目标 `ids` 和 `error.unread_fact_ids`，不暂存该批任何修改，也不自动查询这些 ID；模型可在同一 Loop 和原时间预算内修正。返回 ID 与输入顺序一致，新建目标仅预留本轮 UUID，修正必须复用。上下文仅保存未解决目标集合；同一目标成功暂存或显式移除才解除，读取或其它目标成功均不能解除，仍有未解决目标时以 `maintenance_unresolved_staging` 拒绝完成。格式、归属、配置、失租、读冲突和数据库错误仍终止执行，不能作为可忽略的工具反馈。日志只记录操作身份、错误码、计数及最多 20 个目标／未读 Fact ID，不记录正文、凭据或完整工具参数。验收保留首次失败，不用后续成功覆盖。
 
 Loop 工具中的 Fact/Profile/Event ID 只能复制读取或暂存工具实际返回的 UUID，不能用人名、消息 ID 或模型自造标识；查询名字用 query/search，新建画像或 Event 传 id=null，由服务端生成 ID。提示词与工具 Schema 同时说明，非法标识仍严格拒绝。
 
@@ -70,7 +70,7 @@ Fact 用 Standard（service_tier=default）；Loop 每次模型调用先 Flex，
 
 初始仅批次概况。read_changes 返回固定变更及当前有效 Fact（不存在时为 null），代码登记实际返回页的读集和覆盖范围；遗漏任一非 noop 变更不能完成，全部检查后不生成派生修改可合法完成。read_memory 用于已知 ID、分页和单字段内不区分大小写的连续文本片段过滤，不拆分关键词；search_memory 用于语义/关键词探索，复用同用户混合搜索。已有完整结果直接使用，不要求两个工具互相确认；stage_profile/stage_event 批量暂存。读取/修改工具以完整条目分页，单页/批最多 64 KiB、200 条，读取默认 100 条，混合搜索最多 20 条；超限不截断正文。取消全局 100 个暂存目标限制。工具读当前数据并登记版本，不按旧 flush 水位过滤，不接受 project/user，不加载全部历史。覆盖校验不能证明模型语义判断正确，真实样例仍需验收。
 
-先读 read_changes 再按实际变更选工具，不固定预查两类派生条目。新增陈述优先 search_memory 发现相关旧记忆；删除、证据或时间变化使用完整关联分页，不能以有排名上限的搜索替代受影响条目的覆盖。混合批次兼顾两者并复用已得结果。read_memory 的 ids/query 均为空时，仅返回关联本批变更 Fact 的条目；空页不代表用户没有其它相关记忆。创建前须发现相关已有条目，已返回完整候选时直接复用，不重复确认。旧 flush 恢复按当前数据发现已有条目，不能因旧 added 标记跳过发现；当前 Fact 已不存在时，仍按关联定位失效派生条目。
+先读 read_changes 再按实际变更选工具，不固定预查两类派生条目。新增陈述优先 search_memory 发现相关旧记忆；同一人物／故事的相关变化优先合并搜索，不按 Profile/Event 拆查询；不同主题或结果不足时仍可独立并行搜索，不设固定搜索次数。删除、证据或时间变化使用完整关联分页，不能以有排名上限的搜索替代受影响条目的覆盖。混合批次兼顾两者并复用已得结果。read_memory 的 ids/query 均为空时，仅返回关联本批变更 Fact 的条目；空页不代表用户没有其它相关记忆。创建前须发现相关已有条目，已返回完整候选时直接复用，不重复确认。旧 flush 恢复按当前数据发现已有条目，不能因旧 added 标记跳过发现；当前 Fact 已不存在时，仍按关联定位失效派生条目。
 
 每轮模型请求串行；同轮独立工具通过 SDK 原生配置最多并发 4 个，其余在本轮排队；相同集合、相同目标 ID 的暂存写入仍按序执行。工具上限不等于 Worker 的用户 Loop 并发数（现有默认每进程 2 个，其余用户等待数据库领取）。SQL 线程使用私有读集/暂存快照，返回后由事件循环先校验再合并读集；并发读取版本不一致或返回项的暂存内容已变化，整轮失败而非覆盖检查。read_changes/search 已返回完整条目，不强制再次读取；仅补查缺少的相关历史，批量查询和暂存，预留最终完成请求。工具 schema 分开表达 upsert/remove：前者必填正文和非空 Fact 支撑，画像还必填分类；后者只接受现有 ID。运行日志仅记录 Operation、请求轮次、服务等级、工具名称、数量、状态及耗时，不记录参数/正文，不启用外部 tracing。脚本化模型测试证明执行边界，真实模型验收另证规划效率与语义效果。
 
@@ -80,11 +80,11 @@ Fact 用 Standard（service_tier=default）；Loop 每次模型调用先 Flex，
 
 同步 SQLAlchemy 保留；每个完整 SQL 工作单元在线程内创建、使用和关闭 Session，不跨线程传 ORM 对象。异步层负责模型与 Redis 等待。请求取消时等待 SQL 结果后才释放写租约，不将响应取消解释成事务失败；鉴权仍逐请求读数据库，不缓存权限。
 
-所有修改先保存在本轮内存，最终短事务验证执行权、项目配置、读过的 Fact revision 和目标条目 revision，用既有 Redis renewable lease + SQL generation/version 写入保护。Profile、Event 与 flush completed 回执一起提交；失败两类全部回滚。相关删除、证据变化或人工编辑使旧计划失败，无关新增不废弃本轮；旧 flush 恢复重新读取当前事实，不能按历史快照覆盖新结果。永久遗忘立即阻断工具读取及最终提交。日志仅状态、轮数、Token、耗时和安全错误码。
+所有修改先保存在本轮内存，最终短事务验证执行权、项目配置、读过的 Fact revision 和目标条目 revision，用既有 Redis renewable lease + SQL generation/version 写入保护。Profile、Event 与 flush completed 回执一起提交；失败两类全部回滚。相关删除、证据变化或人工编辑使旧计划失败，无关新增不废弃本轮；旧 flush 恢复重新读取当前事实，不能按历史快照覆盖新结果。永久遗忘立即阻断工具读取及最终提交。常规日志仅状态、轮数、Token、耗时和安全错误码；未读支撑错误的有限 ID 诊断遵循上文边界。
 
 ## 默认画像目录与三类初始背景
 
-维护工具向模型声明与执行检查一致的读取范围：目录／变更页 1–200、搜索 1–20、精确读取最多 200 个 ID、查询最多 500 字符。超限仍失败，不静默放宽；诊断只记录工具名、数量及长度，不记录查询正文或 ID。Schema 声明不保证模型永不超限，真实模型失败须保留原操作证据。
+维护工具向模型声明与执行检查一致的读取范围：目录／变更页 1–200、搜索 1–20、精确读取最多 200 个 ID、查询最多 500 字符。超限仍失败，不静默放宽；容量诊断只记录工具名、数量及长度，不记录查询正文或 ID。Schema 声明不保证模型永不超限，真实模型失败须保留原操作证据。
 
 默认一级分类为 `user_profile`、`personal_background`、`work`、`education`、`interests_preferences`、`lifestyle`、`goals_values`、`relationships`。中英文使用相同英文标识，描述与画像正文按项目语言输出；详细边界由 `prompts/user_profile_topics.py` 的双语目录统一维护。二级分类仍由现有 Loop 创建和复用，不新增人物表或单例约束。
 
