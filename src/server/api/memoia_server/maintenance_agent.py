@@ -413,6 +413,8 @@ def _maintenance_tools():
         keyword list or semantic query. Use a known name, topic or text fragment;
         use search_memory for discovery. ids=null pages through matches, or entries
         linked to this flush's changes when query is also null.
+        An empty linked page does not rule out other existing entries; discover
+        related memory before creating a new entry unless it was already returned.
         All pages preserve complete entry text. Follow next_cursor.
         The memory cursor is the last returned ID, not an offset; byte-sized pages
         may contain fewer than limit. pending_delete entries remain visible for

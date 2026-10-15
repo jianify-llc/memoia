@@ -232,6 +232,7 @@ async def test_unified_runner_reads_stages_and_returns_only_after_final(transpor
     descriptions = {entry["name"]: " ".join(entry["description"].split()) for entry in first["tools"]}
     assert "literal, case-insensitive substring" in descriptions["read_memory"]
     assert "not a keyword list or semantic query" in descriptions["read_memory"]
+    assert "An empty linked page does not rule out other existing entries" in descriptions["read_memory"]
     assert "natural-language questions or multiple keywords" in descriptions["search_memory"]
     tools = {entry["name"]: entry["parameters"] for entry in first["tools"]}
     assert set(tools) == {"read_memory", "stage_profile", "stage_event", "search_memory", "read_changes"}
@@ -286,6 +287,8 @@ def test_prompt_consolidates_shared_rules_without_losing_domain_constraints():
                   "do not fetch it again by id",
                   "returned Facts are already registered for use as support",
                   "reuse matching entries already returned",
+                  "discover related existing entries unless already returned",
+                  "an empty linked page does not rule out other existing memory",
                   "do not run both tools to confirm the same result",
                   "read only missing Facts needed for your changes"]),
         (profiles, ["participation in an event does not transfer another participant's attributes",

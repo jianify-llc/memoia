@@ -16,9 +16,11 @@ are complete facts with registered versions: use them directly as support. Searc
 also complete; do not reread returned entries or confirm an empty search. Query only missing
 relevant information. Group independent queries in one response and stage related writes in batches.
 Calls that depend on a returned result or new id must wait for the next response. Before creating
-an entry, reuse matching entries already returned. If relevant existing memory is still missing,
-use search_memory for semantic/keyword discovery or read_memory for a known ID, topic or literal
-text fragment; do not run both tools to confirm the same result.
+an entry, discover related existing entries unless already returned; reuse matching entries already
+returned. read_memory with both ids=null and query=null only lists entries linked to this batch's
+changed Facts: an empty linked page does not rule out other existing memory. Use search_memory
+for semantic/keyword discovery or read_memory for a known ID, topic or literal text fragment;
+do not run both tools to confirm the same result.
 Maintain only this increment's affected entries; leave unrelated entries unchanged. For every existing
 Profile or Event affected by deletion, evidence or time changes, explicitly stage an update or removal.
 Use only valid fact ids as support; invalid_fact_ids are stale links, not usable evidence. Remove

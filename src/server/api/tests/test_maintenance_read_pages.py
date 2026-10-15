@@ -118,6 +118,28 @@ async def test_read_query_is_a_literal_substring_not_multi_keyword_discovery(sea
 
 
 @pytest.mark.asyncio
+async def test_empty_batch_linked_pages_do_not_mean_no_related_memory_exists(search_users):
+    uid, _, _, _ = search_users
+    old, new = seed_facts(uid, ["The user enjoys hiking.", "The user prefers Sunday hiking."])
+    eid, pid = seed_derived(uid, [old], content="A hiking plan")
+    with Session.begin() as session:
+        session.execute(update(UserProfile).where(UserProfile.user_id == uid).values(content="Enjoys hiking"))
+    batch(uid, fact=False, changes=[{"kind": "added", "fact_id": str(new)}])
+    maintenance.flush(uid, "__root__", "discover-unlinked-memory")
+    claim = claim_for(uid)
+    async with maintenance.TaskLease(claim) as lease:
+        context = maintenance.DBMaintenanceContext(claim, lease)
+        await context.read_changes()
+        for collection in ("profiles", "events"):
+            page = await context.read(collection)
+            assert page["items"] == [] and page["next_cursor"] is None
+        found = await context.search("hiking")
+        assert [item["id"] for item in found["profiles"]] == [str(pid)]
+        assert [item["id"] for item in found["events"]] == [str(eid)]
+        assert str(old) in context.readset["facts"]
+
+
+@pytest.mark.asyncio
 async def test_keyset_pages_merge_staged_add_update_and_delete_without_skipping(source_user, monkeypatch):
     _, fid = batch(source_user)
     profiles(source_user, fid, [(10, "needle first"), (30, "old text")])

@@ -199,6 +199,9 @@ discovery. Reuse existing complete results before querying again; neither tool i
 mandatory confirmation step for the other. Search hydrates the three result collections concurrently using
 private SQL sessions and joins all reads before returning a failure; staged-state
 and final commit checks remain unchanged.
+With both `ids` and `query` null, the reader lists only entries linked to this batch's
+changed Facts. An empty page is not a global absence check: discover related existing
+entries before creating a new one unless suitable entries have already been returned.
 The SDK limits each Loop to four concurrent function-tool calls, queuing the rest
 within the same model turn. Independent tools remain parallel; overlapping staged
 writes retain their target locks. Model calls remain serial. This limit is distinct
