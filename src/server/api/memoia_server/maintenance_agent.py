@@ -412,7 +412,9 @@ def _maintenance_tools():
         query is a literal, case-insensitive substring within one field, not a
         keyword list or semantic query. Use a known name, topic or text fragment;
         use search_memory for discovery. ids=null pages through matches, or entries
-        linked to this flush's changes when query is also null.
+        linked to this flush's changes when query is also null. Use linked pages
+        to cover deletion/evidence/time changes, not as a routine first step for additions.
+        Also use them when recovery finds that an originally added Fact is now absent.
         An empty linked page does not rule out other existing entries; discover
         related memory before creating a new entry unless it was already returned.
         All pages preserve complete entry text. Follow next_cursor.
@@ -444,7 +446,9 @@ def _maintenance_tools():
                             limit: SearchLimit = 20) -> dict:
         """Search current-user facts by meaning and words, with related profiles/events.
 
-        Use natural-language questions or multiple keywords to discover relevant memory.
+        Use natural-language questions or multiple keywords to discover relevant memory,
+        including existing entries related to added statements before creating new ones.
+        Ranked results do not replace complete linked paging for deletion/evidence/time changes.
         Results are complete current entries, already registered for version checks;
         do not read the same entries again. Use read_memory only for additional exact
         IDs, paging or literal text filters. Empty results need no confirmation.

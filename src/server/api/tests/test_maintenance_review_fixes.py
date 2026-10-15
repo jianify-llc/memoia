@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import ast
 import asyncio
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import numpy as np
 import pytest
@@ -24,6 +24,146 @@ from memoia_server.models.source import (
     memory_operations,
 )
 from memoia_server.models.utils import Promise
+
+
+@pytest.mark.asyncio
+async def test_addition_discovery_reuses_unlinked_entries_and_old_support(search_users, transport):
+    uid, _, _, _ = search_users
+    old, new = seed_facts(uid, ["The user enjoys hiking.", "The user prefers Sunday hiking."])
+    eid, pid = seed_derived(uid, [old], content="A hiking plan")
+    with Session.begin() as session:
+        session.execute(update(UserProfile).where(UserProfile.id == pid, UserProfile.user_id == uid)
+                        .values(content="Enjoys hiking"))
+    batch(uid, fact=False, changes=[{"kind": "added", "fact_id": str(new)}])
+    operation = maintenance.flush(uid, "__root__", "discover-before-create")
+    support = [str(old), str(new)]
+    transport["responses"] = [
+        completion(None, calls=[tool("read_changes", {})], response_id="resp-changes"),
+        completion(None, calls=[tool("search_memory", {"query": "hiking", "limit": 20}, "discover")],
+                   response_id="resp-discover"),
+        completion(None, calls=[
+            tool("stage_profile", {"changes": [{"action": "upsert", "id": str(pid),
+                "topic": "interests_preferences", "sub_topic": "hiking",
+                "content": "Enjoys hiking, preferably on Sundays.", "fact_ids": support}]}, "profile"),
+            tool("stage_event", {"changes": [{"action": "upsert", "id": str(eid),
+                "content": "The user's hiking plan favors Sundays.", "fact_ids": support}]}, "event"),
+        ], response_id="resp-staged"),
+        completion(),
+    ]
+    # The actual SDK executes a scripted plan over real SQL/tools; this is not a
+    # claim that a provider will always choose this two-read plan from the Prompt.
+    assert await maintenance.execute_claim(claim_for(uid))
+    changes = ast.literal_eval(transport["requests"][1]["input"][0]["output"])
+    assert [item["current_fact"]["id"] for item in changes["items"]] == [str(new)]
+    found = ast.literal_eval(transport["requests"][2]["input"][0]["output"])
+    assert [item["id"] for item in found["profiles"]] == [str(pid)]
+    assert [item["id"] for item in found["events"]] == [str(eid)]
+    assert str(old) in {item["id"] for item in found["facts"]}
+    with Session() as session:
+        profile = session.query(UserProfile).filter_by(user_id=uid).one()
+        event = session.query(UserEvent).filter_by(user_id=uid).one()
+        assert profile.id == pid and event.id == eid
+        assert set(profile.attributes["fact_ids"]) == set(event.event_data["fact_ids"]) == set(support)
+        assert session.scalar(select(memory_operations.c.status).where(
+            memory_operations.c.id == operation.operation_id)) == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mixed", [False, True], ids=["deletion", "mixed"])
+@pytest.mark.parametrize("skip_last_page", [False, True], ids=["complete", "missing-page"])
+async def test_changed_evidence_requires_all_linked_pages_even_after_discovery(
+        search_users, transport, mixed, skip_last_page):
+    uid, _, _, _ = search_users
+    withdrawn = seed_facts(uid, ["An old dawn excursion."])[0]
+    kept = seed_facts(uid, ["The user enjoys forest trails."])[0]
+    targets = [seed_derived(uid, [withdrawn, kept], story_id=UUID(int=100 + index),
+                           profile_id=UUID(int=200 + index), content="Old expedition") for index in range(2)]
+    with Session.begin() as session:
+        sid = session.scalar(select(memory_blobs.c.source_id).join(
+            memory_facts, memory_facts.c.blob_id == memory_blobs.c.id).where(memory_facts.c.id == withdrawn))
+        session.execute(update(UserProfile).where(UserProfile.user_id == uid,
+            UserProfile.id.in_([pid for _, pid in targets])).values(content="Old expedition"))
+    result = await source.delete_messages(uid, "__root__", sid,
+        DeleteMessages(message_ids=["m1"], idempotency_key="delete-before-maintenance"))
+    assert result.status == "completed"
+    discovered = []
+    if mixed:
+        old, new = seed_facts(uid, ["The user enjoys coastal hiking.", "Coastal hiking is preferred on Sundays."],
+                              ids=[UUID(int=401, version=4), UUID(int=400, version=4)])
+        eid, pid = seed_derived(uid, [old], content="Coastal hiking plan")
+        discovered = [(eid, pid)]
+        batch(uid, 2, fact=False, changes=[{"kind": "added", "fact_id": str(new)}])
+    operation = maintenance.flush(uid, "__root__", "cover-evidence")
+
+    def linked(collection, cursor, call_id):
+        return tool("read_memory", {"collection": collection, "ids": None, "query": None,
+                                   "cursor": cursor, "limit": 1}, call_id)
+
+    first_reads = [linked("profiles", None, "profiles-first"), linked("events", None, "events-first")]
+    if mixed:
+        first_reads.append(tool("search_memory", {"query": "coastal", "limit": 20}, "discover"))
+    responses = [
+        completion(None, calls=[tool("read_changes", {})], response_id="resp-changes"),
+        completion(None, calls=first_reads, response_id="resp-first-page"),
+    ]
+    if not skip_last_page:
+        responses.append(completion(None, calls=[
+            linked("profiles", str(targets[0][1]), "profiles-last"),
+            linked("events", str(targets[0][0]), "events-last"),
+        ], response_id="resp-last-page"))
+    resolved = targets[:1] if skip_last_page else targets
+    profile_changes, event_changes = [], []
+    for eid, pid in [*resolved, *discovered]:
+        support = [str(old), str(new)] if (eid, pid) in discovered else [str(kept)]
+        content = "Coastal hiking on Sundays." if (eid, pid) in discovered else "Enjoys forest trails."
+        profile_changes.append({"action": "upsert", "id": str(pid), "topic": "interests_preferences",
+                                "sub_topic": "hiking", "content": content, "fact_ids": support})
+        event_changes.append({"action": "upsert", "id": str(eid), "content": content, "fact_ids": support})
+    responses.extend([
+        completion(None, calls=[tool("stage_profile", {"changes": profile_changes}, "profiles"),
+                                tool("stage_event", {"changes": event_changes}, "events")],
+                   response_id="resp-staged"),
+        completion(),
+    ])
+    transport["responses"] = responses
+    assert await maintenance.execute_claim(claim_for(uid)) == (not skip_last_page)
+    outputs = {item["call_id"]: ast.literal_eval(item["output"])
+               for request in transport["requests"][1:] for item in request["input"]}
+    for collection, index in (("profiles", 1), ("events", 0)):
+        first = outputs[collection + "-first"]
+        assert first["next_cursor"] == str(targets[0][index])
+        assert [item["id"] for item in first["items"]] == [str(targets[0][index])]
+        assert first["items"][0]["invalid_fact_ids"] == [str(withdrawn)]
+        assert first["items"][0]["fact_ids"] == [str(kept)]
+        if not skip_last_page:
+            last = outputs[collection + "-last"]
+            assert last["next_cursor"] is None
+            assert [item["id"] for item in last["items"]] == [str(targets[1][index])]
+        if mixed:
+            # Discovery sees the unlinked old target, but not the affected entries:
+            # completing search is no substitute for following their linked cursor.
+            assert [item["id"] for item in outputs["discover"][collection]] == [str(discovered[0][index])]
+    with Session() as session:
+        error = session.scalar(select(memory_operations.c.error).where(memory_operations.c.id == operation.operation_id))
+        if skip_last_page:
+            assert error == {"code": "maintenance_unresolved_entries", "retryable": False}
+        else:
+            assert error is None
+        profiles = {row.id: row for row in session.query(UserProfile).filter_by(user_id=uid)}
+        events = {row.id: row for row in session.query(UserEvent).filter_by(user_id=uid)}
+        assert set(profiles) == {pid for _, pid in [*targets, *discovered]}
+        assert set(events) == {eid for eid, _ in [*targets, *discovered]}
+        for eid, pid in targets:
+            if skip_last_page:
+                assert profiles[pid].content == events[eid].event_data["content"] == "Old expedition"
+            else:
+                assert profiles[pid].content == events[eid].event_data["content"] == "Enjoys forest trails."
+                assert profiles[pid].attributes["fact_ids"] == events[eid].event_data["fact_ids"] == [str(kept)]
+        if mixed:
+            eid, pid = discovered[0]
+            expected = [str(old)] if skip_last_page else [str(old), str(new)]
+            # Profile canonicalizes ID order; Event may retain the supplied order.
+            assert sorted(profiles[pid].attributes["fact_ids"]) == sorted(events[eid].event_data["fact_ids"]) == sorted(expected)
 
 
 @pytest.mark.asyncio

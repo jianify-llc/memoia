@@ -13,7 +13,7 @@ from memoia_server.controllers import maintenance, source
 from memoia_server.controllers.source import SourceError
 from memoia_server.models.database import User, UserProfile, UserEvent
 from memoia_server.models.source import (memory_operations as operations, memory_blobs as blobs,
-    memory_sources, memory_messages, memory_facts, FlushInput)
+    memory_sources, memory_messages, memory_facts, FlushInput, DeleteMessages)
 from memoia_server.maintenance_agent import ProfileMutation, EventMutation, LoopUsage, MaintenanceRunError, run_loop
 from tests.maintenance_support import derive, claim_for
 from tests.test_maintenance_agent import transport, completion, tool, http_failure
@@ -168,7 +168,8 @@ async def test_new_input_during_run_is_not_acknowledged(source_user):
 
 
 @pytest.mark.asyncio
-async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(source_user):
+@pytest.mark.parametrize("removed", [False, True], ids=["current-support", "deleted-support"])
+async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(source_user, removed):
     bid, fid = batch(source_user)
     old = maintenance.flush(source_user, "__root__", "old")
     claim = claim_for(source_user)
@@ -185,13 +186,52 @@ async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(so
     assert await maintenance.execute_claim(claim_for(source_user), runner=derive())
     assert row(new.operation_id)["status"] == "completed"
     assert row(old.operation_id)["status"] == "failed"
+    with Session() as session:
+        profile_id = session.scalar(select(UserProfile.id).where(UserProfile.user_id == source_user))
+        event_id = session.scalar(select(UserEvent.id).where(UserEvent.user_id == source_user))
+        sid = session.scalar(select(blobs.c.source_id).where(blobs.c.id == bid))
+    if removed:
+        await source.delete_messages(source_user, "__root__", sid,
+            DeleteMessages(idempotency_key="delete-before-old-recovery", message_ids=["m1"]))
+
+    async def discover_current(context):
+        page = await context.read_changes()
+        assert page["items"][0]["kind"] == "added"  # The original change kind did not become "evidence".
+        if removed:
+            assert page["items"][0]["current_fact"] is None
+            for collection, ident in (("profiles", profile_id), ("events", event_id)):
+                linked = await context.read(collection)
+                assert [item["id"] for item in linked["items"]] == [str(ident)]
+                assert linked["items"][0]["fact_ids"] == []
+                assert linked["items"][0]["invalid_fact_ids"] == [str(fid)]
+            await context.stage_profile(ProfileMutation(action="remove", id=str(profile_id)))
+            await context.stage_event(EventMutation(action="remove", id=str(event_id)))
+            return context.get_plan(LoopUsage())
+        assert datetime.fromisoformat(page["items"][0]["current_fact"]["occurred_at"]) == current_time
+        found = await context.search("Supported fact")
+        assert [item["id"] for item in found["profiles"]] == [str(profile_id)]
+        assert [item["id"] for item in found["events"]] == [str(event_id)]
+        await context.stage_profile(ProfileMutation(action="upsert", id=str(profile_id),
+            content=found["profiles"][0]["content"], topic=context.allowed_topics[0],
+            sub_topic="fixture", fact_ids=[str(fid)]))
+        await context.stage_event(EventMutation(action="upsert", id=str(event_id),
+            content=found["events"][0]["content"], time=found["events"][0]["time"], fact_ids=[str(fid)]))
+        return context.get_plan(LoopUsage())
+
     maintenance.retry_flush(source_user, "__root__", old.operation_id)
     recovered = claim_for(source_user)
     assert recovered.operation_id == old.operation_id
-    assert await maintenance.execute_claim(recovered, runner=derive())
+    assert await maintenance.execute_claim(recovered, runner=discover_current)
     with Session() as session:
+        if removed:
+            assert session.query(UserProfile).filter_by(user_id=source_user).count() == 0
+            assert session.query(UserEvent).filter_by(user_id=source_user).count() == 0
+            assert session.scalar(select(memory_facts.c.id).where(memory_facts.c.id == fid)) is None
+            return
         assert list(session.scalars(select(UserProfile.content).where(UserProfile.user_id == source_user))) == ["Supported fact 1"]
+        assert session.scalar(select(UserProfile.id).where(UserProfile.user_id == source_user)) == profile_id
         assert session.query(UserEvent).filter_by(user_id=source_user).count() == 1
+        assert session.scalar(select(UserEvent.id).where(UserEvent.user_id == source_user)) == event_id
         assert session.scalar(select(UserEvent.event_data).where(UserEvent.user_id == source_user))["time"] == current_time.isoformat()
 
 

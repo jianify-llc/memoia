@@ -199,6 +199,11 @@ discovery. Reuse existing complete results before querying again; neither tool i
 mandatory confirmation step for the other. Search hydrates the three result collections concurrently using
 private SQL sessions and joins all reads before returning a failure; staged-state
 and final commit checks remain unchanged.
+Read changes before choosing queries: additions prefer discovery, not two routine linked scans.
+Deletion/evidence/time changes still require complete linked paging, not ranked search alone;
+mixed batches need both kinds of coverage and should reuse results. An old added change may
+already have derived entries when its flush recovers, so discovery uses current memory;
+if that Fact is now absent, linked pages still locate stale entries without guessing a query.
 With both `ids` and `query` null, the reader lists only entries linked to this batch's
 changed Facts. An empty page is not a global absence check: discover related existing
 entries before creating a new one unless suitable entries have already been returned.

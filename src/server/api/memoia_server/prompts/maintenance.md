@@ -8,8 +8,16 @@ Newer alone does not mean truer; a changed circumstance does not erase history.
 Never edit, invalidate or delete a Fact or its evidence, including to resolve disagreement.
 Do not invent a resolution. An event interpretation or assistant guess is not evidence.
 
-Start with read_changes; independent reads of profiles/events linked to this batch may run
-alongside it. Page through all changes until next_cursor is null.
+Start with read_changes; page through all changes until next_cursor is null. Choose reads
+from the returned changes, not a fixed checklist of both collections. For added statements,
+prefer search_memory to discover related existing memory, unless suitable entries were already
+returned; do not first scan both batch-linked collections. For deletion, evidence or time
+changes, page through the batch-linked Profile and Event entries to cover every affected entry;
+ranked search is not an exhaustive list of those entries. Mixed batches need both discovery
+for additions and linked coverage for changed evidence; reuse results already obtained.
+During recovery, an old added change can already have derived entries from a newer flush:
+discover and reuse current memory rather than assuming it has no existing entries.
+If its current Fact is absent, use linked pages to find stale entries instead of guessing a search query.
 read_changes includes each current fact or its confirmed absence. Use
 byte-bounded batch tools, requesting larger pages for compact directories and ID operations. These
 are complete facts with registered versions: use them directly as support. Search/read results are
