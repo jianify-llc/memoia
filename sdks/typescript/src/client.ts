@@ -16,6 +16,8 @@ type HistoryQuery = NonNullable<paths["/api/users/{user_id}/history"]["get"]["pa
 type OperationsQuery = NonNullable<paths["/api/users/{user_id}/operations"]["get"]["parameters"]["query"]>;
 export type BlobImport = RequestBody<paths["/api/users/{user_id}/blobs"]["post"]>;
 export type MessageDeletion = RequestBody<paths["/api/users/{user_id}/sources/{source_id}/messages"]["delete"]>;
+export type UpdateFact = RequestBody<paths["/api/users/{user_id}/facts/{fact_id}"]["put"]>;
+export type DeleteFact = RequestBody<paths["/api/users/{user_id}/facts/{fact_id}"]["delete"]>;
 export type Blob = ResponseBody<paths["/api/users/{user_id}/blobs/{blob_id}"]["get"]>;
 export type Profiles = ResponseBody<paths["/api/users/{user_id}/profiles"]["get"]>;
 export type Sources = ResponseBody<paths["/api/users/{user_id}/sources"]["get"]>;
@@ -46,7 +48,7 @@ export type ProfileId = ResponseBody<paths["/api/users/{user_id}/profiles"]["pos
 export type ProfileConfig = ResponseBody<paths["/api/project/config"]["get"]>;
 export type Usage = ResponseBody<paths["/api/project/usage"]["get"]>;
 export type UsageQuery = NonNullable<paths["/api/project/usage"]["get"]["parameters"]["query"]>;
-export type EventTime = components["schemas"]["EventTime"];
+export type FactTime = components["schemas"]["FactTime"];
 export type Evidence = components["schemas"]["Evidence"];
 export type Projects = ResponseBody<paths["/api/projects"]["get"]>;
 export type ManagedProject = ResponseBody<paths["/api/projects"]["post"]>;
@@ -200,6 +202,27 @@ export class MemoiaClient {
       (value) => operationValidator(value) && (value as Operation).source_id === sourceId, options, input);
   }
 
+  updateFact(userId: string, factId: string, input: UpdateFact, options?: RequestOptions): Promise<Operation> {
+    if (!validators.validateUpdateFact(input)) throw new MemoiaError("INVALID_INPUT", null, false);
+    return this.request("PUT", `${this.userPath(userId)}/facts/${segment(factId)}`,
+      (value) => this.validCorrection(value, factId), options, input);
+  }
+
+  deleteFact(userId: string, factId: string, input: DeleteFact, options?: RequestOptions): Promise<Operation> {
+    if (!validators.validateDeleteFact(input)) throw new MemoiaError("INVALID_INPUT", null, false);
+    return this.request("DELETE", `${this.userPath(userId)}/facts/${segment(factId)}`,
+      (value) => this.validCorrection(value, factId), options, input);
+  }
+
+  private validCorrection(value: unknown, factId: string): boolean {
+    if (!operationValidator(value)) return false;
+    const operation = value as Operation;
+    if (operation.kind !== "correct" || operation.blob_id === null) return false;
+    if (operation.result === null) return true;
+    return "fact_ids" in operation.result && operation.result.fact_ids?.length === 1 &&
+      operation.result.fact_ids[0].toLowerCase() === factId.toLowerCase();
+  }
+
   /** 永久遗忘只接受同一 UUID 的提交回执；未知结果由调用方显式再次确认。 */
   forgetUser(userId: string, options?: RequestOptions): Promise<ForgottenUser> {
     if (!validators.validateForgetUserPath({ user_id: userId })) throw new MemoiaError("INVALID_INPUT", null, false);
@@ -342,7 +365,7 @@ export class MemoiaClient {
     return encoded ? `${path}?${encoded}` : path;
   }
 
-  private async request<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, validate: Validator, options: RequestOptions = {}, body?: unknown, successStatus?: number, readOnly = method === "GET"): Promise<T> {
+  private async request<T>(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, validate: Validator, options: RequestOptions = {}, body?: unknown, successStatus?: number, readOnly = method === "GET"): Promise<T> {
     const limit = readOnly ? this.readTimeout : this.writeTimeout;
     const deadline = options.deadline ?? Date.now() + limit;
     if (!Number.isFinite(deadline)) throw new TypeError("deadline must be a finite Unix timestamp");

@@ -18,7 +18,7 @@ from memoia_server.models.source import ImportSource, DeleteMessages, memory_blo
 from memoia_server.env import CONFIG
 from memoia_server.models.utils import Promise
 from memoia_server.controllers import maintenance
-from tests.maintenance_support import maintain, derive, status
+from tests.maintenance_support import maintain, derive, stage_derived, status
 from tests.test_maintenance import ready
 
 
@@ -242,7 +242,7 @@ async def test_event_tags_rebuild_uses_only_configured_remaining_evidence(source
         return extracted
     calls = []
     async def regenerate(context):
-        await derive(kinds=("profile",))(context)
+        await stage_derived(context, kinds=("profile",))
         assert {item["name"] for item in context.event_tag_definitions} == {"city", "hobby"}
         existing = (await context.read("events"))["items"]
         facts = {f["id"]: f for f in (await context.read("facts"))["items"]}
@@ -416,19 +416,26 @@ event_tags: []
         import json
         from xml.etree import ElementTree
         data = json.loads(ElementTree.fromstring(prompt).text)
+        assert "history" not in kwargs
+        assert model is source.MessageExtraction and system == source.EXTRACT_SYSTEM
+        assert set(data) == {"messages"}
+        assert data["messages"][0]["content"] == "I live in Tokyo"
+        result = model.model_validate({"messages": [
+            {"message_id": "1", "facts": [{"content": "Tokyo", "subject": "user", "reporter": "user",
+                "certainty": "asserted", "any_of": [{"all_of": ["1"]}], "fact_time": None}]},
+            {"message_id": "2", "facts": []}]})
         seen.append(data)
-        assert data["configuration"]["language"] == "zh"
-        if model is source.Extraction:
-            assert set(data["configuration"]) == {"language"}
-            return source.Extraction(facts=[source.ExtractedFact(content="Tokyo", subject="user", reporter="user",
-                certainty="asserted", support_groups=[["1"]], event_time=None)])
-        raise AssertionError("Fact import must not call a derived model")
+        return result
     monkeypatch.setattr(source, "_structured", structured)
     monkeypatch.setattr(CONFIG, "enable_event_embedding", False)
+    derive_memory = derive()
+    async def maintain_in_project_language(context):
+        assert context.language == "zh"
+        return await derive_memory(context)
     try:
         inserted = await source.import_source(source_user, "__root__", request())
         assert inserted.status == "completed" and len(seen) == 1
-        assert await maintain(source_user)
+        assert await maintain(source_user, runner=maintain_in_project_language)
         rows = (await profile.get_user_profiles(source_user, "__root__")).data().profiles
         assert rows and all(row.attributes["topic"] == "custom" for row in rows)
     finally:

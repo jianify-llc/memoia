@@ -41,6 +41,8 @@ const targets = {
   validateImport: ["post", `${route}/blobs`, "request"],
   validateBlob: ["get", `${route}/blobs/{blob_id}`, "response"],
   validateMessageDeletion: ["delete", `${route}/sources/{source_id}/messages`, "request"],
+  validateUpdateFact: ["put", `${route}/facts/{fact_id}`, "request"],
+  validateDeleteFact: ["delete", `${route}/facts/{fact_id}`, "request"],
   validateSources: ["get", `${route}/sources`, "response"],
   validateSource: ["get", `${route}/sources/{source_id}`, "response"],
   validateSourceQuery: ["get", `${route}/sources/{source_id}`, "query"],
@@ -92,7 +94,7 @@ const bundled = await build({
   bundle: true, platform: "neutral", format: "esm", target: "es2022", write: false,
 });
 const generated = {
-  "openapi.ts": astToString(await openapiTS(api)),
+  "openapi.ts": astToString(await openapiTS(api, { defaultNonNullable: false })),
   "validators.js": `// Generated from server OpenAPI; do not edit.\n${bundled.outputFiles[0].text}`,
   "manifest.json": `${JSON.stringify({ sdkVersion, openapiSha256: createHash("sha256").update(apiText).digest("hex") }, null, 2)}\n`,
 };

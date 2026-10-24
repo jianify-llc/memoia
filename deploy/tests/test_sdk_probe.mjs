@@ -9,8 +9,10 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { runProbe } from "../sdk-probe.mjs";
 
+const sdkManifest = JSON.parse(await readFile(new URL("../../sdks/typescript/package.json", import.meta.url), "utf8"));
+
 // These deterministic adapters test the acceptance tool, not Memoia or a model.
-async function fixture(mode = "complete", version = "0.10.1") {
+async function fixture(mode = "complete", version = sdkManifest.version) {
   const directory = await mkdtemp(join(tmpdir(), "memoia-probe-"));
   const symbol = `memoia-probe-${randomUUID()}`;
   let sourceId = randomUUID();
@@ -213,9 +215,10 @@ for (const offset of ["next_message_offset", "next_blob_offset", "next_evidence_
   });
 }
 
-test("fixed SDK completes original checks before permanent forget, repeat receipt and rejected late import", async () => {
+test("current SDK manifest version completes original checks before permanent forget, repeat receipt and rejected late import", async () => {
   const { result, counters } = await probe("complete");
   assert.equal(result.success, true);
+  assert.equal(result.checks.sdk_version, true);
   assert.equal(result.checks.cleanup, true);
   assert.equal(result.checks.operation_replay, true);
   assert.equal(result.checks.forget_user, true);
@@ -275,7 +278,7 @@ test("partial deletion checks synchronous Fact removal but does not accept stale
 
 test("flush failure code is checkpointed before fixture cleanup without error text", async () => {
   const records = [];
-  const { result } = await probe("maintenance-failed", "0.10.1", async record => records.push(record));
+  const { result } = await probe("maintenance-failed", undefined, async record => records.push(record));
   const receipt = records.find(record => record.stage === "import_flush.receipt");
   assert.equal(receipt.maintenance.import.error_code, "model_unavailable");
   assert.equal(receipt.maintenance.import.retryable, true);
@@ -342,7 +345,7 @@ test("history exposing withdrawn evidence fails even when the mutation succeeded
 
 test("partial deletion preserves payload-free failure diagnostics before cleanup", async () => {
   const records = [];
-  const { result } = await probe("partial-name-leak", "0.10.1", async record => records.push(record));
+  const { result } = await probe("partial-name-leak", undefined, async record => records.push(record));
   assert.equal(result.success, false);
   assert.equal(result.checks.cleanup, true);
   const partial = records.find(record => record.stage === "partial.validation");
@@ -376,9 +379,14 @@ test("DELETE success without confirming user absence is not accepted cleanup", a
 });
 
 test("wrong SDK version and missing auth isolation stop before any write", async () => {
-  const wrong = await probe("complete", "0.2.1");
-  assert.equal(wrong.result.success, false);
-  assert.equal(wrong.counters.calls, 0);
+  for (const version of ["0.10.1", "0.2.1", "0.11.1"]) {
+    const wrong = await probe("complete", version);
+    assert.equal(wrong.result.success, false, version);
+    assert.equal(wrong.result.checks.sdk_version, false, version);
+    assert.equal(wrong.counters.calls, 0, version);
+    assert.deepEqual([wrong.counters.imports, wrong.counters.retracts, wrong.counters.forgets,
+      wrong.counters.deletes], [0, 0, 0, 0], version);
+  }
   const bypass = await probe("auth-bypass");
   assert.equal(bypass.result.success, false);
   assert.equal(bypass.counters.imports, 0);
@@ -593,7 +601,7 @@ test("CLI regular-file boundary survives process exit inside the first mutation"
   try {
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     await mkdir(join(directory, "dist"));
-    await writeFile(join(directory, "package.json"), JSON.stringify({ name: "@jianify/memoia", version: "0.10.1", type: "module" }));
+    await writeFile(join(directory, "package.json"), JSON.stringify({ name: "@jianify/memoia", version: sdkManifest.version, type: "module" }));
     await writeFile(join(directory, "dist/index.js"), `export class MemoiaError extends Error {}
       export class MemoiaClient {
         async getProfiles() { return { profiles: [] }; }

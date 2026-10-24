@@ -56,7 +56,10 @@ CASES = (
                     alternative_groups=(
                         (("u-old", "u-correct"),),
                         (("u-correct",), ("u-old", "u-correct")),
-                    )),)),
+                    )),
+        ExpectedFact((("coffee",), ("originally", "previously", "initially"), ("stated", "said", "reported", "claimed")),
+                     (("u-old",),), required=False),
+    )),
     QualityCase("joint_reference", (
         ("u-preference", "user", "The tea you suggested is my favorite drink."),
         ("a-option", "assistant", "The tea I suggested was rooibos tea."),

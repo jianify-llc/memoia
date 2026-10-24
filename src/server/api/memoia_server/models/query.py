@@ -13,7 +13,7 @@ class MemoryQuery(StrictModel):
     ids: list[UUID] = Field(default_factory=list, max_length=500)
     exclude_ids: list[UUID] = Field(default_factory=list, max_length=500)
     limit: int = Field(default=10, ge=1, le=100)
-    max_token_size: int = Field(default=4000, ge=1, le=10000)
+    max_token_size: int = Field(default=8192, ge=1, le=10000)
 
 
 class FactQuery(MemoryQuery):

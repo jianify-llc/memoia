@@ -1,0 +1,53 @@
+{
+  "frozen_before_prompt_edit": "2026-10-21",
+  "purpose": "First-result acceptance; never copy these cases into runtime Prompt examples.",
+  "cases": [
+    {
+      "id": "unspecified_then_explicit_attributes",
+      "output_language": "en",
+      "source_id": "family-gift",
+      "steps": [
+        {"action": "import", "messages": [
+          {"message_id": "g1", "role": "user", "content": "我的名字是林安。", "occurred_at": "2026-10-20T09:00:00+08:00", "time_zone": "Asia/Shanghai"},
+          {"message_id": "g2", "role": "user", "content": "我一直喜欢刺绣。2026年10月18日我在松石工坊绣完了一块蓝色手帕，打算下周送给姐姐，完成时很开心。", "occurred_at": "2026-10-20T09:01:00+08:00", "time_zone": "Asia/Shanghai"}
+        ]},
+        {"action": "import", "messages": [
+          {"message_id": "g3", "role": "user", "content": "补充一下，我是男性，英文代词用 he/him。", "occurred_at": "2026-10-20T09:02:00+08:00", "time_zone": "Asia/Shanghai"}
+        ]}
+      ],
+      "must_preserve": [
+        "Step 0: name and lasting embroidery preference; completed blue handkerchief at Songshi workshop on October 18, happiness at completion, future gift for older sister next week (October 26–November 1).",
+        "Step 0: the user's gender is unspecified in Facts, Profiles and Events. The sister's female kinship is supported; it must not transfer to the user.",
+        "Step 1: the explicit male identity and he/him preference are retained; the existing gift plan, completion and happiness remain supported."
+      ],
+      "must_not": ["Infer gender from name, embroidery or sister; claim the gift has already been delivered; make one workshop visit a habitual routine."],
+      "acceptable_variations": ["Use the user, their or equivalent neutral English at step 0; afterward he is allowed but not required. Supported gift timing may use exact week bounds or an unambiguous week description."]
+    },
+    {
+      "id": "assistant_context_and_unnecessary_dependency",
+      "output_language": "zh",
+      "source_id": "neighbor-and-tea",
+      "steps": [
+        {"action": "import", "messages": [
+          {"message_id": "c1", "role": "user", "content": "My neighbor Bela has been working late.", "occurred_at": "2026-10-20T09:00:00Z", "time_zone": "Europe/London"},
+          {"message_id": "c2", "role": "assistant", "content": "Maybe they are planning a career change.", "occurred_at": "2026-10-20T09:00:02Z", "time_zone": "Europe/London"},
+          {"message_id": "c3", "role": "user", "content": "I don't know whether they are changing jobs. I worry they are exhausted.", "occurred_at": "2026-10-20T09:01:00Z", "time_zone": "Europe/London"},
+          {"message_id": "c4", "role": "assistant", "content": "Which is your usual favorite drink: rooibos tea or hot chocolate?", "occurred_at": "2026-10-20T09:02:00Z", "time_zone": "Europe/London"},
+          {"message_id": "c5", "role": "user", "content": "The first one is my usual favorite.", "occurred_at": "2026-10-20T09:02:02Z", "time_zone": "Europe/London"},
+          {"message_id": "c6", "role": "user", "content": "Separately, I worry Bela is exhausted.", "occurred_at": "2026-10-20T09:03:00Z", "time_zone": "Europe/London"}
+        ]},
+        {"action": "delete", "message_ids": ["c2"]},
+        {"action": "delete", "message_ids": ["c4"]},
+        {"action": "delete", "message_ids": ["c1"]}
+      ],
+      "must_preserve": [
+        "中文输出；Bela 是邻居、加班；用户担心其疲惫，但换工作未知，不把疲惫断言为事实。",
+        "路易波士茶/南非红茶是用户长期喜欢的饮品，必要联合支撑包含 c4+c5，不因为 c4 是助手消息就丢掉用户明确选择。",
+        "担心 Bela 的结论保留 c6 的独立支撑；基于 c3 的具名结论有身份前提，不需要 c2 的猜测。",
+        "删除 c2 后既有结论不丢失；删除 c4 后饮品偏好及对应画像退出，其他内容保持；删除 c1 后邻居和加班属性退出，c6 的独立担心保留。"
+      ],
+      "must_not": ["把助手猜测当确认事实；无依据使用男性或女性代词；把必要助手上下文全部剔除；将无关消息捆入其他支持组。"],
+      "acceptable_variations": ["独立支撑可以合并成替代组或拆为独立 Fact；未知换工作可保留为不确定陈述；中性表达可用 Bela 或对方。"]
+    }
+  ]
+}

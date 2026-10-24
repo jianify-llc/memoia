@@ -134,7 +134,7 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 
 ## Schema 维护与来源模型升级
 
-现有库升级是显式维护，不是普通 `prepare`。当前 Alembic head 为 `0011_retire_gists`，整条前向链及数据范围见[迁移说明](../src/server/api/migrations/README)。0011 删除旧 Gist 索引表（不转换为 Fact），保留 Event 正文、Fact 和回执，并添加 Blob 消息成员 GIN 索引。0010 只删除旧隐藏 Fact、纠正图及 active，不复活历史、不重置消息状态或原回执；受影响派生内容由已有 flush 异步修复。需在发布前检查并单独处理退役配置键，不能静默改共享配置。保持原备份／授权和停写边界，不重新抽取已清除正文，不 stamp 或手填 schema 指纹。不可兼容升级不能通过切回旧 API 撤销，数据契约见 [API-DESIGN](../src/server/api/API-DESIGN.md)。
+现有库升级是显式维护，不是普通 `prepare`。当前 Alembic head 为 `0015_event_time`，整条前向链及数据范围见[迁移说明](../src/server/api/migrations/README)。0015 将 Event 的 time 改名为 event_time；0014 将 Fact 时间和已知恢复字段改名为 fact_time，均保留原值与恢复身份。0013 的历史 flush guard 原样保留；当前 Fact 与 maintenance 固定 Standard，不再保存／继承模式，不新增 JSON 清洗迁移。0012 添加 Fact 持久化时间列（旧行保持 null，新写入默认 now()），扩展 Operation／Blob 的 `correct` 类型及对应约束、唯一索引。0011 删除旧 Gist 索引表（不转换为 Fact），保留 Event 正文、Fact 和回执，并添加 Blob 消息成员 GIN 索引。0010 只删除旧隐藏 Fact、纠正图及 active，不复活历史、不重置消息状态或原回执；受影响派生内容由已有 flush 异步修复。需在发布前检查并单独处理退役配置键，不能静默改共享配置。保持原备份／授权和停写边界，不重新抽取已清除正文，不 stamp 或手填 schema 指纹。不可兼容升级不能通过切回旧 API 撤销，数据契约见 [API-DESIGN](../src/server/api/API-DESIGN.md)。
 
 首次增加 Worker 也走这次显式 schema 维护：旧 API／Redis／数据库／网络契约必须与已验收基线相同，且没有旧 Worker。备份策略只允许在旧配套恢复证明上增加同镜像 Worker，不放宽配置或基础设施校验；迁移暂存新的 Worker 指纹，只有两个进程及业务验收通过才接纳。普通 prepare／finalize 仍拒绝拓扑漂移。
 
@@ -216,7 +216,7 @@ ShellCheck/actionlint/Bash 语法仅静态验证。test_workflow.py 解析真实
 
 ### TypeScript SDK 真实探针
 
-`sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.10.1 已构建产物，不安装依赖或重新打包。stdin 是 JSON：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 是整体预算，默认 360000、上限 900000；地址和 token 不放 argv／日志。输入输出保存为 root:root 0600 受保护文件。两消息专用来源必须确认消息／Blob／证据的 next_*_offset 全为 null，不能用部分页证明完整性。Fact 回执确认后单次调用 flush 并查询原操作；核对固定 Blob 归属和两类派生结果，未知回执不重发，不自动恢复失败直到凑绿。
+`sdk-probe.mjs PATH_TO_UNPACKED_SDK/dist/index.js` 只加载固定 `@jianify/memoia` 0.11.0 已构建产物，不安装依赖或重新打包。stdin 是 JSON：`origin` 为 HTTPS origin（服务器本机也允许 loopback HTTP），`token` 为独立项目 Bearer，`deadline_ms` 是整体预算，默认 360000、上限 900000；地址和 token 不放 argv／日志。输入输出保存为 root:root 0600 受保护文件。两消息专用来源必须确认消息／Blob／证据的 next_*_offset 全为 null，不能用部分页证明完整性。Fact 回执确认后单次调用 flush 并查询原操作；核对固定 Blob 归属和两类派生结果，未知回执不重发，不自动恢复失败直到凑绿。
 
 导入／删除 completed 只确认 Fact。探针先验证无需 Event 的 Fact 召回，再单次 flush 并查询该原 Operation，确认固定 Blob 集合完成后才检查画像／Event／历史。超时、失败或退避中的原错误均验收失败，保留原 Operation 和批次，不自动重导入或调用维护恢复；新 flush 的成功不能替代原批次验收。
 

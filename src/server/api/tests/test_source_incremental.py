@@ -47,11 +47,11 @@ async def test_withdrawal_recomputes_time_from_remaining_independent_support(sou
     with Session() as session:
         row = session.execute(select(memory_facts).where(memory_facts.c.blob_id == imported.blob_id)).mappings().one()
         assert row["support_groups"] == [["old"]] and row["occurred_at"] == day(1)
-        assert session.query(UserEvent).filter_by(user_id=source_user).one().event_data["time"] == day(3).isoformat()
+        assert session.query(UserEvent).filter_by(user_id=source_user).one().event_data["event_time"] == day(3).isoformat()
     assert status(source_user, "__root__")["status"] == "pending"
     assert await maintain(source_user)
     with Session() as session:
-        assert session.query(UserEvent).filter_by(user_id=source_user).one().event_data["time"] == day(1).isoformat()
+        assert session.query(UserEvent).filter_by(user_id=source_user).one().event_data["event_time"] == day(1).isoformat()
 
 
 @pytest.mark.asyncio
@@ -259,7 +259,7 @@ async def test_capacity_maintenance_keeps_fact_delete_completed_and_only_explici
     assert any("Tokyo" in p.content for p in (await profile.get_user_profiles(source_user, "__root__")).data().profiles)
     assert all("Tokyo" not in f.content for f in source.get_source(source_user, "__root__", source_id=imported.source_id).evidence)
     maintenance.retry_flush(source_user, "__root__", state["operation_id"])
-    assert await maintain(source_user)
+    assert await maintain(source_user, derive(queries=("chess",)))
     assert [p.content for p in (await profile.get_user_profiles(source_user, "__root__")).data().profiles] == ["I enjoy chess"]
 
 

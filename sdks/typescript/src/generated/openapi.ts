@@ -1,4 +1,22 @@
 export interface paths {
+    "/api/users/{user_id}/facts/{fact_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Update Fact */
+        put: operations["updateFact"];
+        post?: never;
+        /** Delete Fact */
+        delete: operations["deleteFact"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/project/identity": {
         parameters: {
             query?: never;
@@ -582,7 +600,7 @@ export interface components {
              * @default import
              * @enum {string}
              */
-            kind: "import" | "retract";
+            kind?: "import" | "retract" | "correct";
             flush?: components["schemas"]["FlushProgress"] | null;
         };
         /** Context */
@@ -600,7 +618,7 @@ export interface components {
              * Max Token Size
              * @default 500
              */
-            max_token_size: number;
+            max_token_size?: number;
         };
         /** DailyUsage */
         DailyUsage: {
@@ -612,33 +630,37 @@ export interface components {
             /**
              * Total Insert
              * @description The total insert
-             * @default 0
              */
             total_insert: number;
             /**
              * Total Success Insert
              * @description The total update
-             * @default 0
              */
             total_success_insert: number;
             /**
              * Total Input Token
              * @description The total input token
-             * @default 0
              */
             total_input_token: number;
             /**
              * Total Output Token
              * @description The total output token
-             * @default 0
              */
             total_output_token: number;
             /**
              * Usage Complete
              * @description False when recorded calls lacked token usage. Totals are approximate recorded usage, not a billing ledger; outages or expired counters can lose statistics.
-             * @default true
              */
             usage_complete: boolean;
+        };
+        /** DeleteFact */
+        DeleteFact: {
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Expected Revision */
+            expected_revision: number;
+            /** Reason */
+            reason: string;
         };
         /** DeleteMessages */
         DeleteMessages: {
@@ -655,8 +677,11 @@ export interface components {
             summary?: string | null;
             /** Keywords */
             keywords?: string | null;
-            /** Time */
-            time?: string | null;
+            /**
+             * Event Time
+             * @description Story occurrence time in prose; not a storage timestamp
+             */
+            event_time?: string | null;
             /** Location */
             location?: string | null;
             /** Content */
@@ -697,12 +722,12 @@ export interface components {
              * Limit
              * @default 10
              */
-            limit: number;
+            limit?: number;
             /**
              * Max Token Size
-             * @default 4000
+             * @default 8192
              */
-            max_token_size: number;
+            max_token_size?: number;
             /** Fact Ids */
             fact_ids?: string[];
             /** Created After */
@@ -746,20 +771,6 @@ export interface components {
              */
             value: string;
         };
-        /** EventTime */
-        EventTime: {
-            /** Start */
-            start: string | null;
-            /** End */
-            end: string | null;
-            /**
-             * Precision
-             * @enum {string}
-             */
-            precision: "year" | "month" | "day" | "range" | "unknown";
-            /** Evidence */
-            evidence: components["schemas"]["TimeEvidence"][];
-        };
         /** Events */
         Events: {
             /** Events */
@@ -789,18 +800,18 @@ export interface components {
             reporter?: string | null;
             /**
              * Certainty
-             * @default legacy
              * @enum {string}
              */
             certainty: "asserted" | "reported" | "uncertain" | "legacy";
-            /**
-             * Revision
-             * @default 1
-             */
+            /** Revision */
             revision: number;
+            /** Created At */
+            created_at?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
             /** Support Groups */
             support_groups: string[][];
-            event_time?: components["schemas"]["EventTime"] | null;
+            fact_time?: components["schemas"]["FactTime"] | null;
             /** Source Messages */
             source_messages?: components["schemas"]["SourceObservation"][];
         };
@@ -816,12 +827,12 @@ export interface components {
              * Limit
              * @default 10
              */
-            limit: number;
+            limit?: number;
             /**
              * Max Token Size
-             * @default 4000
+             * @default 8192
              */
-            max_token_size: number;
+            max_token_size?: number;
             /** Source Ids */
             source_ids?: string[];
             /** Recorded After */
@@ -832,6 +843,20 @@ export interface components {
             event_after?: string | null;
             /** Event Before */
             event_before?: string | null;
+        };
+        /** FactTime */
+        FactTime: {
+            /** Start */
+            start: string | null;
+            /** End */
+            end: string | null;
+            /**
+             * Precision
+             * @enum {string}
+             */
+            precision: "year" | "month" | "day" | "range" | "unknown";
+            /** Evidence */
+            evidence: components["schemas"]["TimeEvidence"][];
         };
         /** FlushInput */
         FlushInput: {
@@ -895,7 +920,7 @@ export interface components {
              * Status
              * @default ok
              */
-            status: string;
+            status?: string;
         };
         /** HistoricalProfile */
         HistoricalProfile: {
@@ -1060,7 +1085,7 @@ export interface components {
              * @default import
              * @enum {string}
              */
-            kind: "import" | "retract" | "legacy_import" | "flush";
+            kind?: "import" | "retract" | "correct" | "legacy_import" | "flush";
             /**
              * Status
              * @enum {string}
@@ -1154,12 +1179,12 @@ export interface components {
              * Limit
              * @default 10
              */
-            limit: number;
+            limit?: number;
             /**
              * Max Token Size
-             * @default 4000
+             * @default 8192
              */
-            max_token_size: number;
+            max_token_size?: number;
             /** Topic */
             topic?: string | null;
             /** Sub Topic */
@@ -1250,8 +1275,11 @@ export interface components {
             summary?: string | null;
             /** Keywords */
             keywords?: string | null;
-            /** Time */
-            time?: string | null;
+            /**
+             * Event Time
+             * @description Story occurrence time in prose; not a storage timestamp
+             */
+            event_time?: string | null;
             /** Location */
             location?: string | null;
             /** Content */
@@ -1327,8 +1355,11 @@ export interface components {
             interpretation?: string | null;
             /** Keywords */
             keywords?: string | null;
-            /** Time */
-            time?: string | null;
+            /**
+             * Event Time
+             * @description Story occurrence time in prose; not a storage timestamp
+             */
+            event_time?: string | null;
             /** Location */
             location?: string | null;
             /** Fact Ids */
@@ -1357,6 +1388,10 @@ export interface components {
              * Format: date-time
              */
             occurred_at: string;
+            /** Created At */
+            created_at?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
             evidence: components["schemas"]["Evidence"];
         };
         /** SearchInput */
@@ -1367,12 +1402,12 @@ export interface components {
              * Limit
              * @default 10
              */
-            limit: number;
+            limit?: number;
             /**
              * Max Token Size
              * @default 4000
              */
-            max_token_size: number;
+            max_token_size?: number;
             /** Exclude Fact Ids */
             exclude_fact_ids?: string[];
             /** Exclude Event Ids */
@@ -1385,7 +1420,7 @@ export interface components {
              * Include Events
              * @default true
              */
-            include_events: boolean;
+            include_events?: boolean;
             /** Event Max Tokens */
             event_max_tokens?: number | null;
         };
@@ -1520,6 +1555,29 @@ export interface components {
             /** Expression */
             expression: string;
         };
+        /** UpdateFact */
+        UpdateFact: {
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Expected Revision */
+            expected_revision: number;
+            /** Reason */
+            reason: string;
+            /** Content */
+            content: string;
+            /** Subject */
+            subject: string;
+            /** Reporter */
+            reporter: string;
+            /**
+             * Certainty
+             * @enum {string}
+             */
+            certainty: "asserted" | "reported" | "uncertain";
+            /** Support Groups */
+            support_groups: string[][];
+            fact_time: components["schemas"]["FactTime"] | null;
+        };
         /** Usage */
         Usage: {
             /** Usages */
@@ -1575,6 +1633,96 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    updateFact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+                fact_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateFact"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Operation"];
+                };
+            };
+            /** @description Still processing; query the original operation. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Operation"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    deleteFact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+                fact_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeleteFact"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Operation"];
+                };
+            };
+            /** @description Still processing; query the original operation. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Operation"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     getProjectIdentity: {
         parameters: {
             query?: never;

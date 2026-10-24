@@ -10,12 +10,85 @@ const source = { idempotency_key: "luvel:batch:1", source_id: sourceId, messages
 const json = (body, status = 200) => Response.json(body, { status });
 const client = (fetch, options = {}) => new MemoiaClient({ baseUrl: "https://memoia.example", apiKey: "private-project-token", fetch, ...options });
 
+describe("Standard-only Fact imports", () => {
+  it("accepts the current import shape without a mode field", async () => {
+    const api = client(async (url, init) => {
+      assert.equal(url, `https://memoia.example/api/users/${user}/blobs`);
+      assert.deepEqual(JSON.parse(init.body), source);
+      return json(complete);
+    });
+    await api.importBlob(user, source);
+  });
+
+  it("rejects every retired mode locally before fetching", () => {
+    const api = client(() => { throw new Error("must not fetch"); });
+    assert.equal(api.setReasoningPolicy, undefined);
+    for (const reasoning_mode of ["standard", "pro", "plus", null, true, 1]) {
+      assert.throws(() => api.importBlob(user, { ...source, reasoning_mode }),
+        error => error.code === "INVALID_INPUT");
+    }
+  });
+});
+
+describe("targeted Fact correction", () => {
+  const replacement = { idempotency_key: "correct:1", expected_revision: 2, reason: "Verified original message",
+    content: "The user plans to move to Tokyo.", subject: "the user", reporter: "the user", certainty: "asserted",
+    support_groups: [["1"]], fact_time: null };
+  const receipt = { ...complete, kind: "correct", result: { fact_ids: [eventId], event_ids: [], profile_ids: [], memory_version: 8 } };
+
+  it("sends one bounded edit/delete and preserves completed or processing receipts", async () => {
+    for (const status of [200, 202]) {
+      const expected = status === 200 ? receipt : { ...receipt, status: "processing", result: null };
+      const calls = [];
+      const api = client(async (url, init) => { calls.push({ url, method: init.method, body: JSON.parse(init.body) }); return json(expected, status); });
+      assert.deepEqual(await api.updateFact(user, eventId, replacement), expected);
+      const deletion = { idempotency_key: "delete:1", expected_revision: 3, reason: "Unsupported extraction" };
+      assert.deepEqual(await api.deleteFact(user, eventId, deletion), expected);
+      assert.deepEqual(calls.map(call => call.method), ["PUT", "DELETE"]);
+      assert.ok(calls.every(call => call.url.endsWith(`/facts/${eventId}`)));
+      assert.deepEqual(calls.map(call => call.body), [replacement, deletion]);
+    }
+  });
+
+  it("rejects forged ownership, partial replacements and unusable revisions before transport", () => {
+    const api = client(() => { throw new Error("Must not fetch"); });
+    const { support_groups: _groups, ...partial } = replacement;
+    for (const input of [partial, { ...replacement, expected_revision: 0 }, { ...replacement, source_id: "forged" }, { ...replacement, event_time: null }]) {
+      assert.throws(() => api.updateFact(user, eventId, input), error => error.code === "INVALID_INPUT");
+    }
+  });
+
+  it("does not retry an uncertain correction and requires the target receipt identity", async () => {
+    let calls = 0;
+    const api = client(async () => { calls++; return json({ detail: { code: "unavailable", retryable: true } }, 503); });
+    await assert.rejects(api.updateFact(user, eventId, replacement), error => error.outcome === "unknown");
+    assert.equal(calls, 1);
+    for (const invalid of [{ ...receipt, kind: "import" },
+      { ...receipt, result: { ...receipt.result, fact_ids: [user] } }]) {
+      await assert.rejects(client(async () => json(invalid)).updateFact(user, eventId, replacement), error => error.code === "INVALID_RESPONSE");
+    }
+  });
+});
+
 describe("independent read queries", () => {
   it("preserves queried event Fact links and rejects a silently incomplete response", async () => {
-    const row = { id: eventId, event_data: { title: "Story", fact_ids: [sourceId], evidence: [] },
+    const row = { id: eventId, event_data: { title: "Story", event_time: "Saturday", fact_ids: [sourceId], evidence: [] },
       score: 0.1, created_at: "2026-10-12T00:00:00Z", updated_at: "2026-10-12T00:00:00Z" };
     const api = client(async () => json({ events: [row] }));
     assert.deepEqual((await api.queryEvents(user)).events[0].event_data.fact_ids, [sourceId]);
+    assert.equal((await api.queryEvents(user)).events[0].event_data.event_time, "Saturday");
+    const { score, ...listedRow } = row;
+    assert.equal((await client(async () => json({ events: [listedRow] })).getEvents(user)).events[0].event_data.event_time, "Saturday");
+    for (const event_time of [null, "Saturday"]) {
+      const current = { ...row, event_data: { ...row.event_data, event_time } };
+      assert.deepEqual((await client(async () => json({ events: [current] })).queryEvents(user)).events[0], current);
+    }
+    const { event_time, ...legacyData } = row.event_data;
+    for (const method of ["queryEvents", "getEvents"]) {
+      const legacy = { ...(method === "queryEvents" ? row : listedRow), event_data: { ...legacyData, time: event_time } };
+      const returned = (await client(async () => json({ events: [legacy] }))[method](user)).events[0];
+      assert.equal(returned.event_data.event_time, undefined);
+    }
     const missing = client(async () => json({ events: [{ ...row, event_data: { title: "Story" } }] }));
     await assert.rejects(missing.queryEvents(user), error => error.code === "INVALID_RESPONSE");
   });
@@ -131,13 +204,13 @@ describe("fixed Blob flush contract", () => {
 
 describe("structured bounded search contract", () => {
   const evidence = { fact_id: eventId, blob_id: complete.blob_id, content: "Zhou cancelled hiking because of work.",
-    support_groups: [["1"]], certainty: "asserted", source_messages: [] };
+    support_groups: [["1"]], certainty: "asserted", revision: 1, source_messages: [] };
   const response = {
     facts: [{ id: eventId, content: evidence.content, source_id: sourceId, blob_id: complete.blob_id,
       score: .04, occurred_at: "2026-10-07T00:00:00Z", evidence }],
     events: [{ id: sourceId, content: "The hiking plan changed after Zhou had to work.", source_id: null,
       blob_id: null, score: .04, occurred_at: "2026-10-07T00:00:00Z", title: "Cancelled hiking",
-      summary: "Work prevented the planned trip.", keywords: "hiking, work", time: "Saturday", location: null,
+      summary: "Work prevented the planned trip.", keywords: "hiking, work", event_time: "Saturday", location: null,
       interpretation: null, fact_ids: [eventId], evidence: [evidence] }],
     profiles: [{ id: complete.blob_id, content: "Zhou is the user's colleague.", topic: "relationships",
       sub_topic: "Zhou", fact_ids: [eventId], source_ids: [sourceId], score: .04,
@@ -154,6 +227,17 @@ describe("structured bounded search contract", () => {
     assert.equal(calls[0].init.method, "POST");
     assert.deepEqual(JSON.parse(calls[0].init.body), { query: "Why was hiking cancelled?", limit: 5,
       max_token_size: 1500, exclude_fact_ids: [eventId], exclude_event_ids: [sourceId], exclude_profile_ids: [complete.blob_id] });
+  });
+
+  it("accepts nullable story event_time and rejects the retired time key or a FactTime object", async () => {
+    const row = response.events[0];
+    const nullable = { ...response, events: [{ ...row, event_time: null }] };
+    assert.deepEqual(await client(async () => json(nullable)).search(user, "hiking"), nullable);
+    const { event_time, ...withoutTime } = row;
+    for (const invalid of [{ ...withoutTime, time: event_time }, { ...row, event_time: { precision: "unknown" } }]) {
+      await assert.rejects(client(async () => json({ ...response, events: [invalid] })).search(user, "hiking"),
+        error => error.code === "INVALID_RESPONSE");
+    }
   });
 
   for (const field of ["exclude_fact_ids", "exclude_event_ids", "exclude_profile_ids"]) {
@@ -225,13 +309,17 @@ describe("event time evidence contract", () => {
 
   it("preserves precision, original time expression and source recording evidence", async () => {
     const evidence = { fact_id: eventId, blob_id: complete.blob_id, content: "Kyoto hotel", topic: "life_event", sub_topic: "travel", support_groups: [["1"]],
-      event_time: { start: "2025-04-01", end: "2025-04-30", precision: "month", evidence: [{ message_id: "1", expression: "去年四月" }] },
+      certainty: "asserted", revision: 1,
+      fact_time: { start: "2025-04-01", end: "2025-04-30", precision: "month", evidence: [{ message_id: "1", expression: "去年四月" }] },
       source_messages: [{ message_id: "1", recorded_at: "2026-01-01T00:30:00+08:00", time_zone: "Asia/Shanghai" }] };
     const body = { facts: [], profiles: [], events: [{ id: eventId, content: "Kyoto hotel", source_id: "dialog-1", blob_id: complete.blob_id,
       score: .03, occurred_at: "2026-01-01T00:30:00+08:00", evidence: [evidence] }] };
     const api = client(async () => json(body));
     assert.deepEqual(await api.search(user, "Kyoto hotel 2025-04"), body);
-    evidence.event_time.start = "invented-date";
+    const { fact_time: oldTime, ...withoutTime } = evidence;
+    const legacyBody = { ...body, events: [{ ...body.events[0], evidence: [{ ...withoutTime, event_time: oldTime }] }] };
+    await assert.rejects(client(async () => json(legacyBody)).search(user, "Kyoto"), (error) => error.code === "INVALID_RESPONSE");
+    evidence.fact_time.start = "invented-date";
     await assert.rejects(api.search(user, "Kyoto"), (error) => error instanceof MemoiaError);
   });
 });
@@ -511,11 +599,21 @@ describe("permanent account forgetting", () => {
 });
 
 describe("usage completeness", () => {
-  it("preserves unknown usage while retaining the previous additive response contract", async () => {
-    for (const extra of [{ usage_complete: false }, {}]) {
+  it("preserves explicit complete or partial subtotals", async () => {
+    for (const usage_complete of [false, true]) {
       const usage = { usages: [{ date: "2026-10-09", total_insert: 0, total_success_insert: 0,
-        total_input_token: 10, total_output_token: 5, ...extra }] };
+        total_input_token: 10, total_output_token: 5, usage_complete }] };
       assert.deepEqual(await client(async () => json(usage)).getUsage(1), usage);
+    }
+  });
+  it("rejects missing counters or completeness rather than supplying defaults", async () => {
+    const day = { date: "2026-10-09", total_insert: 0, total_success_insert: 0,
+      total_input_token: 10, total_output_token: 5, usage_complete: false };
+    for (const field of Object.keys(day)) {
+      const incomplete = { ...day };
+      delete incomplete[field];
+      await assert.rejects(client(async () => json({ usages: [incomplete] })).getUsage(1),
+        error => error.code === "INVALID_RESPONSE" && error.outcome === "rejected");
     }
   });
 });

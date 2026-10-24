@@ -110,6 +110,24 @@ class LocalVerificationContract(unittest.TestCase):
         dependencies.assert_not_called()
         tree.assert_not_called()
 
+    def test_runtime_prompt_markdown_selects_business_but_documentation_does_not(self):
+        for path, business in (
+            ("src/server/api/memoia_server/prompts/fact_extraction.md", True),
+            ("src/server/api/memoia_server/prompts/maintenance.md", True),
+            ("README.md", False),
+            ("src/server/api/readme.md", False),
+            ("docs/prompts/maintenance.md", False),
+            ("docs/guide.mdx", False),
+        ):
+            with self.subTest(path=path):
+                def run(command, **_):
+                    return path + "\0" if "--name-only" in command else ""
+
+                with patch.object(module, "run", side_effect=run):
+                    selected = module.selections("full", "a" * 40)
+                self.assertEqual(selected, dict(business=business, hook=False,
+                                               deploy=False, legacy=False, schema=False))
+
     def test_hook_only_full_does_not_run_api_database_or_sdk_tests(self):
         @contextmanager
         def tree(*_):

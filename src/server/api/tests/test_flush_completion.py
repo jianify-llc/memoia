@@ -1,6 +1,9 @@
 """Completion, capacity and crash counterexamples using isolated SQL/Redis."""
+import ast
+import json
 from uuid import uuid4
 from datetime import timedelta
+from xml.etree import ElementTree
 
 import pytest
 from sqlalchemy import delete, select, update, func
@@ -14,6 +17,11 @@ from memoia_server.connectors import Session
 from memoia_server.controllers import maintenance, source
 from memoia_server.models.database import UserProfile, UserEvent
 from memoia_server.models.source import DeleteMessages, memory_facts, memory_blobs, memory_operations
+
+
+def initial_batch(transport):
+    text = transport["requests"][0]["input"][1]["content"][0]["text"]
+    return json.loads(ElementTree.fromstring(text).text)
 
 
 def test_flush_reads_candidate_facts_once_not_once_per_blob(source_user):
@@ -35,15 +43,27 @@ def test_flush_reads_candidate_facts_once_not_once_per_blob(source_user):
 
 
 @pytest.mark.asyncio
-async def test_model_final_without_review_cannot_acknowledge_twenty_five_blobs(source_user, transport):
+@pytest.mark.parametrize("large", [False, True], ids=["complete-first-page", "missing-byte-tail"])
+async def test_model_final_can_acknowledge_only_changes_in_the_initial_page(source_user, transport, large):
     for version in range(25):
-        batch(source_user, version + 1)
+        _, fid = batch(source_user, version + 1)
+        if large:
+            with Session.begin() as session:
+                session.execute(update(memory_facts).where(memory_facts.c.id == fid).values(content="K" * 4096))
     operation = maintenance.flush(source_user, "__root__", "no-read")
     transport["responses"] = [completion()]
-    assert not await maintenance.execute_claim(claim_for(source_user), runner=maintenance_agent.run_loop)
+    assert await maintenance.execute_claim(claim_for(source_user), runner=maintenance_agent.run_loop) is not large
+    initial = initial_batch(transport)
+    assert initial["change_count"] == 25
+    assert (initial["next_cursor"] is not None) is large
+    assert (len(initial["items"]) == 25) is not large
     saved = source.get_operation(source_user, "__root__", operation_id=operation.operation_id)
-    assert saved.status == "processing" and saved.flush.status == "pending"
-    assert saved.result is None and saved.error.code == "maintenance_incomplete"
+    if large:
+        assert saved.status == "processing" and saved.flush.status == "pending"
+        assert saved.result is None and saved.error.code == "maintenance_incomplete"
+    else:
+        assert saved.status == saved.flush.status == "completed"
+        assert len(saved.result.blob_ids) == 25 and saved.error is None
     assert len(transport["requests"]) == 1
 
 
@@ -51,19 +71,78 @@ async def test_model_final_without_review_cannot_acknowledge_twenty_five_blobs(s
 @pytest.mark.parametrize("read_all", [False, True])
 async def test_repeated_first_page_does_not_cover_the_missing_tail(source_user, transport, read_all):
     for version in range(25):
-        batch(source_user, version + 1)
+        _, fid = batch(source_user, version + 1)
+        with Session.begin() as session:
+            session.execute(update(memory_facts).where(memory_facts.c.id == fid).values(content="K" * 4096))
     operation = maintenance.flush(source_user, "__root__", "pages")
+    continuation = tool("read_changes", {"limit": 200}, "next")
+    def choose_page():
+        if len(transport["requests"]) != 1:
+            return
+        initial = initial_batch(transport)
+        assert initial["next_cursor"] and len(initial["items"]) < 25
+        continuation["arguments"] = json.dumps({"limit": 200,
+            "cursor": initial["next_cursor"] if read_all else "0"})
+    transport["after_response"] = choose_page
     transport["responses"] = [
-        completion(None, calls=[tool("read_changes", {"limit": 20}, "first")]),
-        completion(None, calls=[tool("read_changes", {"limit": 20, "cursor": "20" if read_all else "0"}, "next")]),
+        completion(None, calls=[continuation]),
         completion(),
     ]
     assert await maintenance.execute_claim(claim_for(source_user), runner=maintenance_agent.run_loop) is read_all
+    initial = initial_batch(transport)
+    page = ast.literal_eval(transport["requests"][1]["input"][0]["output"])
+    initial_refs = {item["fact_id"] for item in initial["items"]}
+    continued_refs = {item["fact_id"] for item in page["items"]}
+    if read_all:
+        assert page["next_cursor"] is None
+        assert initial_refs.isdisjoint(continued_refs)
+        assert len(initial_refs | continued_refs) == 25
+    else:
+        assert initial_refs == continued_refs and page["next_cursor"] == initial["next_cursor"]
     saved = row(operation.operation_id)
     assert (saved["status"] == "completed") is read_all
     if read_all:
         assert len(saved["result"]["blob_ids"]) == 25
         assert saved["result"]["profile_ids"] == saved["result"]["event_ids"] == []
+    else:
+        assert saved["result"] is None and saved["error"]["code"] == "maintenance_incomplete"
+    assert len(transport["requests"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", [False, True], ids=["current-fact", "changed-after-preload"])
+async def test_initial_fact_support_is_staged_then_checked_at_final_commit(source_user, transport, changed):
+    _, fid = batch(source_user)
+    operation = maintenance.flush(source_user, "__root__", "preloaded-support")
+    transport["responses"] = [completion(None, calls=[tool("stage_profile", {"changes": [{
+        "action": "upsert", "content": "Supported fact 1", "topic": "interests_preferences",
+        "sub_topic": "fixture", "fact_ids": ["f1"]}]}, "stage")]), completion()]
+    def before_commit():
+        assert row(operation.operation_id)["status"] == "processing"
+        with Session() as session:
+            assert session.query(UserProfile).filter_by(user_id=source_user).count() == 0
+        if changed and len(transport["requests"]) == 2:
+            with Session.begin() as session:
+                session.execute(update(memory_facts).where(memory_facts.c.id == fid)
+                                .values(content="Changed after preload", revision=2))
+    transport["after_response"] = before_commit
+    assert await maintenance.execute_claim(claim_for(source_user), runner=maintenance_agent.run_loop) is not changed
+    initial = initial_batch(transport)
+    assert initial["next_cursor"] is None and len(initial["items"]) == 1
+    assert initial["items"][0]["fact_id"] == initial["items"][0]["current_fact"]["id"] == "f1"
+    staged = ast.literal_eval(transport["requests"][1]["input"][0]["output"])
+    assert staged["staged"] is True
+    saved = row(operation.operation_id)
+    with Session() as session:
+        profiles = session.query(UserProfile).filter_by(user_id=source_user).all()
+        if changed:
+            assert profiles == [] and saved["result"] is None
+            assert saved["error"]["code"] == "maintenance_read_conflict"
+        else:
+            assert len(profiles) == 1 and profiles[0].content == "Supported fact 1"
+            assert profiles[0].attributes["fact_ids"] == [str(fid)]
+            assert saved["status"] == "completed" and len(saved["result"]["profile_ids"]) == 1
+    assert len(transport["requests"]) == 2
 
 
 @pytest.mark.asyncio
@@ -211,19 +290,20 @@ async def test_one_fact_can_clean_102_derived_entries_atomically(search_users, t
     manual_profile, manual_event = uuid4(), uuid4()
     with Session.begin() as session:
         sid = session.scalar(select(memory_blobs.c.source_id).where(memory_blobs.c.user_id == uid))
+        # Standalone manual entries explicitly have no Fact ancestry.
         session.execute(UserProfile.__table__.insert().values(id=manual_profile, user_id=uid, project_id="__root__",
-            content="Manual profile", attributes={"topic": "interest", "sub_topic": "manual"}))
+            content="Manual profile", attributes={"topic": "interest", "sub_topic": "manual", "_impact_fact_ids": []}))
         session.execute(UserEvent.__table__.insert().values(id=manual_event, user_id=uid, project_id="__root__",
-            event_data={"content": "Legacy event", "event_tip": "Legacy event"}))
+            event_data={"content": "Manual event", "event_tip": "Manual event", "_impact_fact_ids": []}))
     await source.delete_messages(uid, "__root__", sid,
         DeleteMessages(message_ids=["m1"], idempotency_key="delete-support"))
     transport["responses"] = [completion(None, calls=[tool("read_changes", {})]), completion()]
     if fail_commit:
         apply = maintenance._apply_plan
-        def reject_events(session, claim, plan, kind, event_embeddings):
+        def reject_events(session, claim, plan, kind, event_embeddings, impact):
             if kind == "event":
                 raise source.SourceError("model_unavailable", "safe", 503, True)
-            return apply(session, claim, plan, kind, event_embeddings)
+            return apply(session, claim, plan, kind, event_embeddings, impact)
         monkeypatch.setattr(maintenance, "_apply_plan", reject_events)
     assert await maintain(uid, maintenance_agent.run_loop) is not fail_commit
     with Session() as session:
@@ -241,7 +321,7 @@ async def test_one_fact_can_clean_102_derived_entries_atomically(search_users, t
 
 
 @pytest.mark.asyncio
-async def test_surviving_support_is_never_mechanically_removed(search_users):
+async def test_affected_entry_can_be_rebuilt_from_surviving_support(search_users):
     uid, _, _, _ = search_users
     deleted, surviving = seed_facts(uid, ["First evidence", "Independent evidence"])
     eid, pid = seed_derived(uid, [deleted, surviving])
@@ -264,3 +344,4 @@ async def test_surviving_support_is_never_mechanically_removed(search_users):
     with Session() as session:
         assert session.scalar(select(UserProfile.content).where(UserProfile.id == pid)) == "Independent evidence"
         assert session.scalar(select(UserEvent.event_data).where(UserEvent.id == eid))["fact_ids"] == [str(surviving)]
+        assert session.scalar(select(memory_facts.c.id).where(memory_facts.c.id == surviving)) == surviving

@@ -61,7 +61,7 @@ def seed_derived(uid, ids, *, pid="__root__", story_id=None, profile_id=None, co
     with Session.begin() as session:
         session.execute(UserEvent.__table__.insert().values(**scope, id=story_id, event_data={"memoia_v2": True,
             "event_tip": content, "content": content, "title": "Kyoto visit", "summary": "Stayed at Sakura",
-            "keywords": "hotel travel", "time": "2026-09", "location": "Kyoto", "interpretation": None,
+            "keywords": "hotel travel", "event_time": "2026-09", "location": "Kyoto", "interpretation": None,
             "fact_ids": [str(ident) for ident in ids]}))
         session.execute(insert(memory_event_facts), [dict(scope, event_id=story_id, fact_id=ident) for ident in ids])
         session.execute(UserProfile.__table__.insert().values(**scope, id=profile_id, content="Enjoys Kyoto hotels",
@@ -104,7 +104,8 @@ async def test_bundle_returns_related_objects_once_with_full_fields_and_no_new_r
     assert [story.id for story in bundle.events] == [eid] and [item.id for item in bundle.profiles] == [profile]
     assert set(bundle.events[0].fact_ids) == set(ids) == {proof.fact_id for proof in bundle.events[0].evidence}
     assert set(bundle.profiles[0].fact_ids) == set(ids)
-    assert bundle.events[0].title == "Kyoto visit" and bundle.events[0].time == "2026-09"
+    assert bundle.events[0].title == "Kyoto visit" and bundle.events[0].event_time == "2026-09"
+    assert "time" not in bundle.events[0].model_dump()
     assert bundle.events[0].location == "Kyoto" and bundle.events[0].keywords == "hotel travel"
     assert token_size(bundle) <= 4000
     assert all("revision" not in item.model_dump() for item in [*bundle.facts, *bundle.events, *bundle.profiles])

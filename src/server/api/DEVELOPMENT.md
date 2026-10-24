@@ -15,6 +15,19 @@ is `@jianify/memoia` under `sdks/typescript/`; upstream SDKs have been retired.
 
 Memoia is a user memory system derived from Memobase. Sources and evidence are the truth; profiles and events are derived memories. This guide describes the module layout; API-DESIGN defines the current processing contracts.
 
+Derived `fact_ids` are actual evidence, not a complete influence map. The existing read set also
+produces an internal JSON influence scope, inherited through read Profile/Event text. Fact
+corrections/deletions invalidate affected derived revisions in their transaction; the existing flush
+must resolve that scope with explicit keep/update/remove decisions before committing, not default
+deletion. Keep preserves the original row and requires its complete, valid support to be read.
+Tools mark this prepared scope with `review_required` and expose bounded `remaining_review`
+counts/IDs in initial changes, reads and staging receipts. Optional reads do not expand it;
+an ID in this list is not permission to mutate unread text. Accepted decisions advance the
+list, while final database scope and version checks remain the concurrency backstop.
+Only known support that has entirely disappeared permits automatic removal.
+Missing legacy scope stays unknown, never guessed from
+incomplete evidence. See API-DESIGN for conservative legacy/history handling; no new task or schema.
+
 ## System Architecture
 
 ```mermaid
@@ -83,6 +96,8 @@ sequenceDiagram
     Controller->>Redis: Acquire renewable user lease
     Controller->>DB: Register generation and snapshot; end transaction
     Controller->>LLM: Bounded Fact extraction
+    Controller->>Controller: Validate statements, evidence and time together
+    Controller->>DB: Save complete extraction under original operation and expiry
     Controller->>DB: CAS Fact/index/receipt/Blob changes commit and raw-input purge
     Controller->>API: Response
     API->>Client: Result
@@ -122,6 +137,8 @@ sequenceDiagram
 2. Inspect the Fact operation with `GET /api/users/{user_id}/operations/by-key/{key}`.
 3. `POST /api/users/{user_id}/flush` seals completed Blobs with a stable key; default timed flush is 30s quiet / 120s maximum. Read `/maintenance` and query/retry the original flush Operation.
 4. Get Profile: `GET /api/users/{user_id}/profiles`. Old derived text can remain readable while maintenance is pending/failed; invalid Fact evidence cannot.
+5. Explicit manual Fact corrections retain the Fact ID, original Blob and evidence provenance. Their own idempotent operation records an `updated` change; the same unified maintenance path rewrites affected Profiles/Events from the current revision. Fact `created_at`/`updated_at` are storage lifecycle timestamps, independent of message recording and event occurrence; unknown legacy values remain null.
+   Repeating a failed correction PUT/DELETE returns its original receipt. Resubmitting the identical request with its original key only restores expired temporary input; execution requires an explicit retry of the original Operation and revalidates the expected Fact revision.
 
 ## Configuration Points
 
@@ -153,6 +170,12 @@ reasoning_effort: high
 
 Fact 抽取和后台统一 AgentLoop 均使用该项目配置；工具循环使用 Responses，
 不为适配协议静默降低思考等级。项目密钥与可选 Playground 的模型配置仍独立。
+
+Fact 抽取和统一 Profile/Event AgentLoop 固定 Responses `reasoning.mode=standard`，
+包括工具轮、Flex 恢复、失败重试和重新执行。公开导入字段 `reasoning_mode` 已撤回；
+不再保存最近 Fact 模式，也不从用户资料或 Operation 继承模式。模型、effort、服务等级
+继续按各自合同配置。历史 0013→0014→0015 迁移原样保留，不新增 JSON 清洗迁移；
+撤回前单独核查旧模式的在途／可恢复请求。实际供应商与部署验收独立于本地测试。
 
 配置只接受当前支持字段；未知或退役键明确拒绝，不静默过滤。旧严格模式、值校验、
 Event 主题、摘要模型与 Buffer 调度参数均退出。发布前只检查退役字段名，另行授权处理
@@ -189,10 +212,38 @@ graph LR
 4. Update response types
 
 ### 2. Modifying Memory Processing
-1. Fact extraction and its structured prompt live in `controllers/source.py`; the unified Profile/Event prompt and scoped tools live in `maintenance_agent.py`. These are the two business generation paths.
-2. `prompts/` retains English/Chinese topic defaults, project configuration helpers and reference-data assembly. Retired extraction, merge, summary and roleplay pipelines/parsers are removed.
-3. Verify replay, deletion, per-user serial takeover and atomic flush recovery using isolated PostgreSQL/Redis. Historical `buffer.py` adapts Chat/Summary inputs into the same Fact import; it does not run another model pipeline.
-4. Follow the [company Prompt/cache contract](https://github.com/jianify-llc/Jianify-LLC/blob/main/docs/engineering/llm-prompt-cache.md). Scenario mapping and numerical accounting are defined in [Prompt caching and numerical usage](readme.md#prompt-caching-and-numerical-usage); use the locked SDK and MockTransport to verify wire payloads before real-provider acceptance. Do not move reference materials or batch metadata into fake User messages.
+
+Prompt ownership is intentionally small: `fact_extraction.md` objectively records what the user
+described and links supporting messages, without adding the extractor's judgments;
+`maintenance.md` organizes and draws reasonable inferences from current Facts for Profile/Event
+updates. Task goals, input descriptions, judgment rules and
+output requirements are distinct sections within each complete file, not separately loaded
+templates. There is no extra "statement" entity. Output shape/bounds belong to Pydantic,
+tool parameters/paging to tool descriptions, and topic meanings to `profile_topics`.
+Do not repeat default topic definitions in maintenance instructions, where they can conflict
+with project overrides. Assembly supplies escaped data; controllers own validation, recovery
+and commit. These boundaries do not establish semantic model quality.
+
+Maintenance preloads one bounded change page through the existing context read path.
+`maintenance_batch.items/next_cursor` and later tool pages share run-local references,
+read-version checks and coverage tracking. Only overflow requires `read_changes`;
+existing memories are queried as needed. Backend completion watermarks and Blob counts are not
+model input. Event `event_time` is a narrative occurrence description; Fact `fact_time` retains
+its structured date range and evidence. The final unified save is unchanged.
+
+Local Chinese reading copies may live in the Git-ignored
+`.local-ci-results/prompt-reference-zh/` at the repository root. They mirror the two English
+files, retain examples in their original language, and are never loaded by runtime or CI.
+Runtime Prompt Markdown is a business change in `verify_local.py`, not documentation-only.
+
+1. The two business paths are Fact import (`controllers/source.py`) and unified Profile/Event maintenance (`maintenance_agent.py`). Fact import uses `fact_extraction.md` and one structured call. Each returned Fact contains its memory text, supporting messages (`any_of`/`all_of`) and occurrence time; output items are grouped by user message. The entrypoint checks message coverage and normalizes evidence to the existing `support_groups`; it validates the whole extraction before saving that canonical recovery candidate or generating embeddings. Recovery reuses it under the original operation and expiry (API-DESIGN). Topic defaults and input assembly remain in `prompts/`; historical Buffer uses this same import path.
+   Fact content, subject and reporter follow the owning user message's main language; a brief confirmation or emoji with no clear language follows the content it confirms. Extraction receives only `source_material.messages`, not project language or topic configuration; original names and evidence quotations remain unchanged. Project language still controls Profile/Event prose and topic configuration. Existing Facts and saved recovery candidates are not retranslated.
+   `fact_time` separates complete ISO date ranges from double-null `unknown`, sharing the canonical calendar validator. Ongoing/recurring or unresolved time stays in Fact text and verbatim time evidence, not invented end dates; date filters do not match unknown time. Code computes each message's `local_recorded_date` before extraction, without sending the IANA zone again. The 0014 field rename preserves values and durable recovery identities; see API-DESIGN and migrations/README.
+2. Follow the [company Prompt/cache contract](https://github.com/jianify-llc/Jianify-LLC/blob/main/docs/engineering/llm-prompt-cache.md) and local [request/usage mapping](readme.md#prompt-caching-and-numerical-usage). Use the locked SDK and MockTransport to verify changed wire contracts; keep reference materials and batch metadata out of fake User messages.
+3. Code handles addressing; the model judges content. Tools assign `f/p/e` references within one Loop execution for identity/association fields, not citations in user-facing prose. Mapping, recovery and validation rules live in [API design](API-DESIGN.md#固定-blobflush-与统一-agentloop); do not bypass reference errors by guessing IDs, rewriting prose or dropping useful content.
+4. Trace messages → Facts → tool arguments/results → derived memory to locate the first divergence. Test references and semantic coverage separately using the [frozen normal-chain cases and scoring protocol](../../../docs/experiments/prompt-quality/README.md): preserve first results, compare meaning rather than exact wording, and assess total usage/latency rather than cache-hit ratio alone. One failure does not by itself justify another Prompt rule.
+   Decide each complete meaning and its evidence together; feelings/reasons may stay with their activity instead of becoming vague fragments. Independent sources may produce duplicate complete statements; do not force global merging or combine independently supported details into one fragile claim. Profile inferences use qualified prose grounded in linked Facts; Event explanations belong in `interpretation`, separate from factual story fields. Neither is independent evidence for other memories. Mock/schema success does not prove semantic fidelity: evaluate information retention, evidence errors and incomplete-operation rate together, including unseen scenes.
+5. Use isolated PostgreSQL/Redis for affected replay, manual correction, deletion, per-user takeover and atomic flush recovery tests. Cover stale Fact revisions, exhaustive linked-entry resolution, and pending old/new flush history filtering. These checks prove execution boundaries, not model quality.
 
 ### 3. Database Changes
 1. Update models and add a forward Alembic revision; never edit an executed migration.

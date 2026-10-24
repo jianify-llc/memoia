@@ -4,7 +4,7 @@ from .connectors import Session
 from .models.database import Project, UserEvent
 from .env import CONFIG
 
-EXPECTED_REVISION = "0011_retire_gists"
+EXPECTED_REVISION = "0015_event_time"
 
 
 def check_schema():

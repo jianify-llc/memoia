@@ -1,7 +1,9 @@
-"""Compute-only extraction regression, reusing the production structured protocol.
+"""Compute-only extraction regression, reusing the production protocol.
 
 Run in a separate process; scoped patches intentionally forbid database/Redis I/O
-and bypass accounting, not model validation. Fixed fixtures contain no real user data.
+and bypass accounting, not model validation. The single extraction call incurs
+provider usage and returns complete facts with evidence and event time.
+Fixed fixtures contain no real user data.
 """
 
 import argparse
@@ -43,19 +45,39 @@ def grade(case, facts):
     def matches(fact, expected):
         content = fact["content"].casefold()
         groups = {frozenset(group) for group in fact["support_groups"]}
-        event_time = fact.get("event_time") or {}
+        fact_time = fact.get("fact_time") or {}
+        certainty_matches = not expected.certainty or fact.get("certainty") in expected.certainty
+        if case.name == "reported_uncertainty" and expected.certainty:
+            # This fixture permits either the possible resignation or the user's
+            # stated doubt, not an arbitrary cross-product of subject/certainty.
+            user_doubt = content.startswith(("the user suspects", "the user is unsure",
+                                            "the user does not know", "the user is uncertain"))
+            subject = str(fact.get("subject", "")).casefold().strip()
+            certainty_matches = (
+                (user_doubt and subject in ("user", "the user") and fact.get("certainty") == "asserted")
+                or (not user_doubt and subject == "zhou" and fact.get("certainty") == "uncertain")
+            )
+        # Each Fact must express the complete claim and cite only sufficient groups;
+        # independent sources may repeat that claim in separate Facts.
         return (
             all(any(word in content for word in concept) for concept in expected.concepts)
             and not any(word in content for word in expected.forbidden)
             and (not expected.subject or any(word in str(fact.get("subject", "")).casefold() for word in expected.subject))
-            and (not expected.certainty or fact.get("certainty") in expected.certainty)
+            and certainty_matches
             and (not expected.event_dates or
-                 (event_time.get("start"), event_time.get("end")) == expected.event_dates)
-            and any(groups == {frozenset(group) for group in option}
-                    for option in (expected.groups, *expected.alternative_groups))
+                 (fact_time.get("start"), fact_time.get("end")) == expected.event_dates)
+            and bool(groups)
+            and groups <= {frozenset(group) for option in
+                           (expected.groups, *expected.alternative_groups) for group in option}
         )
 
-    found = [any(matches(fact, expected) for fact in facts) for expected in case.expected if expected.required]
+    def covers(expected):
+        groups = {frozenset(group) for fact in facts if matches(fact, expected)
+                  for group in fact["support_groups"]}
+        return any({frozenset(group) for group in option} <= groups
+                   for option in (expected.groups, *expected.alternative_groups))
+
+    found = [covers(expected) for expected in case.expected if expected.required]
     supported = [any(matches(fact, expected) for expected in case.expected) for fact in facts]
     return {"expected_concepts": all(found), "no_unexpected_facts": all(supported),
             "empty_when_expected": bool(facts) == bool(case.expected)}
@@ -78,14 +100,25 @@ async def run_quality(settings, *, cases=CASES, client=None):
     rows = []
     report = {"compute_only": True, "model": settings["model"],
               "extract_system_sha256": hashlib.sha256(system.encode()).hexdigest(),
-              "schema_sha256": hashlib.sha256(json.dumps(source.Extraction.model_json_schema(), sort_keys=True).encode()).hexdigest(),
+              "extract_system_override_scope": "fact_extraction_only" if "extract_system" in settings else None,
+              "extract_schema_sha256": hashlib.sha256(json.dumps(source.MessageExtraction.model_json_schema(), sort_keys=True).encode()).hexdigest(),
               "trials": settings["trials"], "cases": rows, "human_review_required": True,
+              "evaluation_scope": "extraction_heuristic_screen_not_semantic_acceptance",
+              "usage_scope": "provider_usage_unknown_values_are_null",
               "budgets": {key: getattr(CONFIG, key) for key in
                           ("source_max_input_tokens", "source_context_window_tokens", "source_output_reserve_tokens")}}
 
-    async def no_accounting(*args, **kwargs):
-        # Vendor charges still occur; only Memoia's business/accounting writes are disabled.
-        return None
+    async def no_accounting(project_id, input_tokens, output_tokens, latency_ms, *,
+                            kind, model=None, service_tier=None, requested_service_tier=None,
+                            cached_tokens=None, cache_write_tokens=None):
+        # Retain provider observations without business/accounting writes.
+        rows[-1]["model_calls"].append({
+            "kind": kind, "model": model, "service_tier": service_tier,
+            "requested_service_tier": requested_service_tier,
+            "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens, "cache_write_tokens": cache_write_tokens,
+            "latency_ms": latency_ms,
+        })
 
     try:
         with ExitStack() as stack:
@@ -101,21 +134,20 @@ async def run_quality(settings, *, cases=CASES, client=None):
             stack.enter_context(patch.object(AbstractConnection, "connect", side_effect=RuntimeError("Compute-only Redis is forbidden")))
             for trial in range(1, settings["trials"] + 1):
                 for case in cases:
-                    row = {"case": case.name, "trial": trial, "facts": []}
+                    row = {"case": case.name, "trial": trial, "facts": [], "model_calls": []}
                     rows.append(row)
                     request = ImportSource(idempotency_key=f"quality-{case.name}", source_id=f"quality-{case.name}", messages=[
                         {"message_id": mid, "role": role, "content": content, "occurred_at": f"2026-01-01T00:00:{index:02d}Z"}
                         for index, (mid, role, content) in enumerate(case.messages)
                     ])
-                    rules = {"language": "en"}
                     remaining = settings["deadline_seconds"] - (time.monotonic() - started)
                     if remaining <= 0:
                         row.update(passed=False, error={"code": "quality_deadline"})
                         continue
                     try:
-                        extracted = await asyncio.wait_for(source.extract_source(request, rules=rules, project_id="quality-only"), remaining)
+                        extracted = await asyncio.wait_for(source.extract_source(request, project_id="quality-only"), remaining)
                         row["facts"] = [{key: fact[key] for key in (
-                            "content", "subject", "reporter", "certainty", "support_groups", "event_time")}
+                            "content", "subject", "reporter", "certainty", "support_groups", "fact_time")}
                             for fact in extracted.facts]
                         row["checks"] = grade(case, row["facts"])
                         row["passed"] = all(row["checks"].values())

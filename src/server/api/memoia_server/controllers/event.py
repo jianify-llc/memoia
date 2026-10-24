@@ -14,6 +14,7 @@ from uuid import UUID
 from sqlalchemy import select, or_, literal_column, literal, union_all, exists, and_, case, cast, String
 from sqlalchemy.sql import func
 from ..env import TRACE_LOG, CONFIG
+from .derived_impact import public_data
 
 QUERY_EMBEDDING_TIMEOUT_SECONDS = 8
 
@@ -36,26 +37,28 @@ def facts_evidence(session, facts):
     return {fact["id"]: Evidence(fact_id=fact["id"], blob_id=fact["blob_id"], content=fact["content"],
         topic=fact["topic"], sub_topic=fact["sub_topic"], subject=fact["subject"], reporter=fact["reporter"],
         certainty=fact["certainty"], revision=fact["revision"], support_groups=fact["support_groups"],
-        event_time=fact["event_time"], source_messages=source_observations(fact["support_groups"],
+        created_at=fact["created_at"], updated_at=fact["updated_at"],
+        fact_time=fact["fact_time"], source_messages=source_observations(fact["support_groups"],
             observations[(fact["user_id"], fact["project_id"], fact["source_id"])])) for fact in facts}
 
 
-def event_view(session, event, *, include_fact_links=False):
-    return event_views(session, [event], user_id=event.user_id, project_id=event.project_id,
-                       include_fact_links=include_fact_links)[event.id]
+def event_view(session, event):
+    return event_views(session, [event], user_id=event.user_id, project_id=event.project_id)[event.id]
 
 
-def event_views(session, events, *, user_id, project_id, include_fact_links=False):
+def event_views(session, events, *, user_id, project_id):
     """Batch current evidence; delayed story text never validates stale support."""
     data = {}
     for event in events:
         if str(event.user_id) != str(user_id) or event.project_id != project_id:
             raise ValueError("Event owner mismatch")
-        data[event.id] = dict(event.event_data)
-    needed = [ident for ident, value in data.items() if include_fact_links or
-              value.get("blob_id") or value.get("memoia_v2") or value.get("evidence")]
-    if not needed:
+        data[event.id] = public_data(event.event_data)
+    if not data:
         return data
+    from .maintenance import pending_derived_fact_ids
+    linked_ids = select(cast(memory_event_facts.c.fact_id, String)).where(
+        memory_event_facts.c.user_id == user_id, memory_event_facts.c.project_id == project_id,
+        memory_event_facts.c.event_id.in_(data)).correlate(None)
     rows = session.execute(select(memory_facts, memory_blobs.c.source_id,
         memory_event_facts.c.event_id.label("linked_event_id")).join(
         memory_blobs, memory_facts.c.blob_id == memory_blobs.c.id).join(memory_event_facts, and_(
@@ -63,11 +66,12 @@ def event_views(session, events, *, user_id, project_id, include_fact_links=Fals
         memory_event_facts.c.user_id == memory_facts.c.user_id,
         memory_event_facts.c.project_id == memory_facts.c.project_id)).where(
         memory_facts.c.user_id == user_id, memory_facts.c.project_id == project_id,
-        memory_event_facts.c.event_id.in_(needed))
+        memory_event_facts.c.event_id.in_(data),
+        cast(memory_facts.c.id, String).notin_(pending_derived_fact_ids(user_id, project_id, linked_ids)))
         .order_by(memory_facts.c.id)).mappings().all()
     evidence = facts_evidence(session, {row["id"]: row for row in rows}.values())
-    for ident in needed:
-        data[ident]["evidence"], data[ident]["fact_ids"] = [], []
+    for entry in data.values():
+        entry["evidence"], entry["fact_ids"] = [], []
     for row in rows:
         entry = data[row["linked_event_id"]]
         entry["evidence"].append(evidence[row["id"]].model_dump(mode="json"))
@@ -83,6 +87,8 @@ async def get_user_events(
 ) -> Promise[UserEventsData]:
     def execute():
         with Session() as session:
+            # Derived text, flush state and proof must describe one committed view.
+            session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
             query = (
                 session.query(UserEvent)
                 .filter_by(user_id=user_id, project_id=project_id)
@@ -281,8 +287,9 @@ async def retrieve_user_facts(
                     if row is None:
                         continue
                     evidence = direct_evidence[ident]
-                    content = RetrievedContent(content=row["content"], event_time=row["event_time"],
+                    content = RetrievedContent(content=row["content"], fact_time=row["fact_time"],
                         source_id=row["source_id"], blob_id=row["blob_id"], fact_id=ident,
+                        created_at=row["created_at"], updated_at=row["updated_at"],
                         source_messages=evidence.source_messages)
                     result.append(RetrievedFact(None, row["occurred_at"], scores[key], content, evidence))
                     continue
@@ -304,8 +311,9 @@ def recent_user_facts(user_id, project_id, limit=100):
             memory_facts.c.occurred_at >= since)
             .order_by(memory_facts.c.occurred_at.desc(), memory_facts.c.id).limit(limit)).mappings().all()
         evidence = facts_evidence(session, rows)
-        recent = [(row["occurred_at"], str(row["id"]), RetrievedContent(content=row["content"], event_time=row["event_time"],
+        recent = [(row["occurred_at"], str(row["id"]), RetrievedContent(content=row["content"], fact_time=row["fact_time"],
             source_id=row["source_id"], blob_id=row["blob_id"], fact_id=row["id"],
+            created_at=row["created_at"], updated_at=row["updated_at"],
             source_messages=evidence[row["id"]].source_messages)) for row in rows]
         # Preserve non-source legacy reads without letting pending V2 stories stand
         # in for valid Facts, exactly as the ranked retrieval fallback does.
@@ -321,7 +329,7 @@ def recent_user_facts(user_id, project_id, limit=100):
 async def hybrid_search_user_events(user_id, project_id, query, limit=10, *, max_token_size=4000,
                                    exclude_fact_ids=(), exclude_event_ids=(), exclude_profile_ids=(),
                                    exclude_profile_topics=(), include_events=True, event_max_tokens=None,
-                                   through_version=None):
+                                   through_version=None, include_pending_derived=False):
     from ..models.source import SearchEvent, SearchFact, SearchProfile, SearchResult
     candidate_limit = min(500, max(50, limit * 5))
     result = await retrieve_user_facts(user_id, project_id, query, candidate_limit,
@@ -348,6 +356,7 @@ async def hybrid_search_user_events(user_id, project_id, query, limit=10, *, max
                     continue
                 found = SearchFact(id=fact.content.fact_id, content=fact.content.content,
                     source_id=fact.content.source_id, blob_id=fact.content.blob_id, score=fact.score,
+                    created_at=fact.content.created_at, updated_at=fact.content.updated_at,
                     occurred_at=fact.occurred_at, evidence=fact.evidence)
                 if fits(bundle.model_copy(update={"facts": [*bundle.facts, found]})):
                     bundle.facts.append(found)
@@ -356,6 +365,8 @@ async def hybrid_search_user_events(user_id, project_id, query, limit=10, *, max
             legacy[fact.event_id] = fact.score
         related_profiles, related_events = [], []
         with Session() as session:
+            # A flush may finish between reads; keep its text and proof atomic here.
+            session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
             if scores:
                 profile_matches = [(UserProfile.attributes.contains({"fact_ids": [str(ident)]}), score)
                                    for ident, score in scores.items()]
@@ -393,7 +404,12 @@ async def hybrid_search_user_events(user_id, project_id, query, limit=10, *, max
                         continue
                 profile_refs[row.id] = refs
             needed = set(scores) | {ident for _, ident in edges} | {ident for refs in profile_refs.values() for ident in refs}
-            valid_statement = select(memory_facts, memory_blobs.c.source_id).join(
+            from .maintenance import pending_derived_fact_ids
+            current_support = (literal(True) if include_pending_derived else
+                cast(memory_facts.c.id, String).notin_(
+                    pending_derived_fact_ids(user_id, project_id, list(map(str, needed)))))
+            valid_statement = select(memory_facts, memory_blobs.c.source_id,
+                current_support.label("derived_support_current")).join(
                 memory_blobs, memory_facts.c.blob_id == memory_blobs.c.id).where(memory_facts.c.user_id == user_id,
                 memory_facts.c.project_id == project_id, memory_facts.c.id.in_(needed))
             if through_version is not None:
@@ -410,17 +426,19 @@ async def hybrid_search_user_events(user_id, project_id, query, limit=10, *, max
                 if row is None:
                     continue
                 current = SearchFact(id=found.id, content=row["content"], source_id=row["source_id"],
-                    blob_id=row["blob_id"], score=found.score, occurred_at=row["occurred_at"], evidence=evidence[found.id])
+                    blob_id=row["blob_id"], score=found.score, occurred_at=row["occurred_at"],
+                    created_at=row["created_at"], updated_at=row["updated_at"], evidence=evidence[found.id])
                 if fits(bundle.model_copy(update={"facts": [*bundle.facts, current]})):
                     bundle.facts.append(current)
                     scores[current.id] = current.score
             event_refs = {}
             for event_id, fact_id in edges:
-                if fact_id in valid:
+                if fact_id in valid and valid[fact_id]["derived_support_current"]:
                     event_refs.setdefault(event_id, set()).add(fact_id)
             candidates = []
             for row, score in related_profiles:
-                refs = sorted(profile_refs[row.id] & valid.keys(), key=str)
+                refs = sorted((ident for ident in profile_refs[row.id] if ident in valid
+                    and valid[ident]["derived_support_current"]), key=str)
                 if not refs or not scores.keys() & set(refs):
                     continue
                 attributes = row.attributes or {}
@@ -436,7 +454,7 @@ async def hybrid_search_user_events(user_id, project_id, query, limit=10, *, max
                 sources = {valid[ident]["source_id"] for ident in refs}
                 blobs = {valid[ident]["blob_id"] for ident in refs}
                 candidates.append(("events", SearchEvent(id=row.id, content=data.get("content") or data.get("event_tip") or "",
-                    title=data.get("title"), summary=data.get("summary"), keywords=data.get("keywords"), time=data.get("time"),
+                    title=data.get("title"), summary=data.get("summary"), keywords=data.get("keywords"), event_time=data.get("event_time"),
                     location=data.get("location"), interpretation=data.get("interpretation"), fact_ids=refs,
                     source_id=next(iter(sources)) if len(sources) == 1 else None,
                     blob_id=next(iter(blobs)) if len(blobs) == 1 else None, score=score, occurred_at=row.created_at,
@@ -447,7 +465,7 @@ async def hybrid_search_user_events(user_id, project_id, query, limit=10, *, max
                     data, score = row.event_data, legacy[row.id]
                     candidates.append(("events", SearchEvent(id=row.id, content=data.get("event_tip") or "",
                         title=data.get("title"), summary=data.get("summary"), keywords=data.get("keywords"),
-                        time=data.get("time"), location=data.get("location"), interpretation=data.get("interpretation"),
+                        event_time=data.get("event_time"), location=data.get("location"), interpretation=data.get("interpretation"),
                         source_id=data.get("source_id"),
                         blob_id=data.get("blob_id"),
                         score=score, occurred_at=row.created_at, fact_ids=[], evidence=[])))

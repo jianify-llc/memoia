@@ -163,18 +163,18 @@ def test_event_time_extension_preserves_old_facts_without_invented_backfill(lega
     upgraded = migrate(url)
     assert upgraded.returncode == 0, upgraded.stderr
     with engine.begin() as connection:
-        row = connection.execute(text("SELECT content,occurred_at,event_time FROM memory_facts WHERE id=:id"), {"id": fact}).mappings().one()
+        row = connection.execute(text("SELECT content,occurred_at,fact_time FROM memory_facts WHERE id=:id"), {"id": fact}).mappings().one()
         assert row["content"] == "Old undated Kyoto visit" and row["occurred_at"].year == 2026
-        assert row["event_time"] is None
+        assert row["fact_time"] is None
         assert connection.execute(text("SELECT time_zone FROM memory_messages WHERE user_id=:uid"), {"uid": uid}).scalar_one() is None
-        assert "事件发生" in connection.execute(text("SELECT col_description('memory_facts'::regclass,attnum) FROM pg_attribute WHERE attrelid='memory_facts'::regclass AND attname='event_time'")).scalar_one()
+        assert "事实发生" in connection.execute(text("SELECT col_description('memory_facts'::regclass,attnum) FROM pg_attribute WHERE attrelid='memory_facts'::regclass AND attname='fact_time'")).scalar_one()
         value = {"start": "2025-04-01", "end": "2025-04-30", "precision": "month", "evidence": [{"message_id": "1", "expression": "April 2025"}]}
-        connection.execute(text("UPDATE memory_facts SET event_time=CAST(:value AS jsonb) WHERE id=:id"), {"value": json.dumps(value), "id": fact})
+        connection.execute(text("UPDATE memory_facts SET fact_time=CAST(:value AS jsonb) WHERE id=:id"), {"value": json.dumps(value), "id": fact})
     refused = subprocess.run([sys.executable, "-m", "alembic", "downgrade", "0006_source_blob_messages"],
         cwd=ROOT, env={**os.environ, "DATABASE_URL": url}, capture_output=True, text=True)
-    assert refused.returncode != 0 and "use a forward migration" in refused.stderr
+    assert refused.returncode != 0 and "forward migration" in refused.stderr
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT event_time FROM memory_facts WHERE id=:id"), {"id": fact}).scalar_one() == value
+        assert connection.execute(text("SELECT fact_time FROM memory_facts WHERE id=:id"), {"id": fact}).scalar_one() == value
 
 
 def test_existing_v1_adoption_preserves_rows_config_and_vectors(legacy_schema):

@@ -10,6 +10,43 @@ from memoia_server.models.source import SearchResult
 from memoia_server.models.utils import Promise
 from memoia_server.controllers import event
 
+
+def test_response_contract_requires_evidence_and_usage_values():
+    from pydantic import ValidationError
+    from memoia_server.models.source import Evidence
+    from memoia_server.models.response import DailyUsage
+
+    cases = [
+        (Evidence, {"fact_id": str(uuid4()), "blob_id": str(uuid4()), "content": "Likes chess",
+                    "certainty": "legacy", "revision": 3, "support_groups": [["m1"]]},
+         {"certainty", "revision"}),
+        (DailyUsage, {"date": "2026-10-23", "total_insert": 0, "total_success_insert": 0,
+                      "total_input_token": 10, "total_output_token": 5, "usage_complete": False},
+         {"total_insert", "total_success_insert", "total_input_token", "total_output_token", "usage_complete"}),
+    ]
+    schemas = __import__("api").app.openapi()["components"]["schemas"]
+    for model, payload, fields in cases:
+        result = model.model_validate(payload).model_dump(mode="json")
+        assert all(result[field] == payload[field] for field in fields)
+        assert fields <= set(schemas[model.__name__]["required"])
+        for field in fields:
+            with pytest.raises(ValidationError):
+                model.model_validate({key: value for key, value in payload.items() if key != field})
+    with pytest.raises(ValidationError):
+        Evidence.model_validate({**cases[0][1], "revision": 0})
+
+
+def test_request_defaults_remain_optional():
+    from memoia_server.models.source import ImportSource
+    from memoia_server.models.management import SearchInput
+
+    source = ImportSource.model_validate({"idempotency_key": "batch", "source_id": "dialog",
+        "messages": [{"message_id": "m1", "role": "user", "content": "Likes chess",
+                      "occurred_at": "2026-10-23T00:00:00Z"}]})
+    assert source.metadata == {}
+    query = SearchInput.model_validate({"query": "chess"})
+    assert query.limit == 10 and query.include_events is True
+
 @pytest_asyncio.fixture
 async def client(db_env):
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=__import__("api").app), base_url="http://test", headers={"Authorization": "Bearer " + os.environ["ACCESS_TOKEN"]})
@@ -115,17 +152,17 @@ async def test_read_only_posts_obey_read_scope(client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_context_counts_complete_fact_evidence_and_preserves_rank(client, monkeypatch):
-    from memoia_server.models.source import SearchEvent, Evidence, EventTime
+    from memoia_server.models.source import SearchEvent, Evidence, FactTime
     from memoia_server.models.response import RetrievedContent
     from memoia_server.temporal import render_memory_content
     from memoia_server.utils import get_encoded_tokens
     uid, fid, blob = str(uuid4()), uuid4(), uuid4()
     fact = Evidence(fact_id=fid, blob_id=blob, content="Kyoto hotel", topic="life_event", sub_topic="travel",
-        support_groups=[["1"]], event_time=EventTime(start="2026-04-01", end="2026-04-30", precision="month",
+        certainty="asserted", revision=1, support_groups=[["1"]], fact_time=FactTime(start="2026-04-01", end="2026-04-30", precision="month",
         evidence=[{"message_id": "1", "expression": "April 2026"}]), source_messages=[])
-    rendered = render_memory_content(RetrievedContent(content=fact.content, event_time=fact.event_time, source_id="dialog", blob_id=blob, fact_id=fid))
+    rendered = render_memory_content(RetrievedContent(content=fact.content, fact_time=fact.fact_time, source_id="dialog", blob_id=blob, fact_id=fid))
     budget = len(get_encoded_tokens(rendered))
-    content = RetrievedContent(content=fact.content, event_time=fact.event_time, source_id="dialog", blob_id=blob, fact_id=fid)
+    content = RetrievedContent(content=fact.content, fact_time=fact.fact_time, source_id="dialog", blob_id=blob, fact_id=fid)
     result = [event.RetrievedFact(uuid4(), datetime(2026, 10, 6, tzinfo=timezone.utc), .1,
         content.model_copy(update={"content": "oversized " * 1000})),
         event.RetrievedFact(uuid4(), datetime(2026, 10, 6, tzinfo=timezone.utc), .09, content),

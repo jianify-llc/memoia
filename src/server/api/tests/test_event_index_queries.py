@@ -46,7 +46,9 @@ async def test_loop_writes_searchable_event_and_real_creation_times(source_user,
         story = session.scalar(select(UserEvent).where(UserEvent.id == eid))
         profile = session.scalar(select(UserProfile).where(UserProfile.user_id == source_user))
         assert story.created_at >= before and profile.created_at >= before
-        assert story.event_data["time"].startswith("2024")
+        assert story.event_data["event_time"].startswith("2024")
+        assert result.events[0].event_data.event_time == story.event_data["event_time"]
+        assert "time" not in result.events[0].event_data.model_dump()
         assert story.embedding is not None
         created_at = story.created_at
     assert row(receipt.operation_id)["status"] == "completed"

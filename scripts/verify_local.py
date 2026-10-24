@@ -78,6 +78,8 @@ def selections(mode, base=None):
     except subprocess.CalledProcessError:
         return dict.fromkeys(groups, True)
     for name in changed:
+        if name.startswith("src/server/api/memoia_server/prompts/") and name.endswith(".md"):
+            groups["business"] = True
         if name.endswith((".md", ".mdx")):
             continue
         if name.startswith(("src/server/", "sdks/")):

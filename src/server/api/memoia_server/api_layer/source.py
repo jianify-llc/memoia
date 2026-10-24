@@ -6,13 +6,39 @@ from fastapi import APIRouter, Request, Query, HTTPException, Response
 from ..models.management import SearchInput
 from ..models.query import FactQuery, EventQuery, ProfileQuery, QueriedFacts, QueriedEvents, QueriedProfiles, ProjectIdentity
 from ..models.source import (
-    ImportSource, DeleteMessages, Operation, Operations, Source, Sources, Profiles, Profile, Blob,
+    ImportSource, DeleteMessages, UpdateFact, DeleteFact, Operation, Operations, Source, Sources, Profiles, Profile, Blob,
     SearchResult, SearchEvent, History, HistoryEntry,
     ForgottenUser,
     MaintenanceStatus, FlushInput,
 )
 
 router = APIRouter(prefix="/api", tags=["sources"])
+
+
+@router.put("/users/{user_id}/facts/{fact_id}", response_model=Operation, operation_id="updateFact", tags=["facts"],
+            responses={202: {"model": Operation, "description": "Still processing; query the original operation."}})
+async def update_fact(user_id: UUID, fact_id: UUID, body: UpdateFact, request: Request, response: Response):
+    from ..controllers import source
+    try:
+        result = await source.update_fact(user_id, project_id(request), fact_id, body)
+    except source.SourceError as error:
+        translate(error)
+    if result.status == "processing":
+        response.status_code = 202
+    return result
+
+
+@router.delete("/users/{user_id}/facts/{fact_id}", response_model=Operation, operation_id="deleteFact", tags=["facts"],
+               responses={202: {"model": Operation, "description": "Still processing; query the original operation."}})
+async def delete_fact(user_id: UUID, fact_id: UUID, body: DeleteFact, request: Request, response: Response):
+    from ..controllers import source
+    try:
+        result = await source.delete_fact(user_id, project_id(request), fact_id, body)
+    except source.SourceError as error:
+        translate(error)
+    if result.status == "processing":
+        response.status_code = 202
+    return result
 
 
 @router.get("/project/identity", response_model=ProjectIdentity, operation_id="getProjectIdentity", tags=["projects"])

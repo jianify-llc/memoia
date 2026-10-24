@@ -5,21 +5,28 @@ from ..models.database import UserProfile
 from ..models.response import CODE, IdsData, UserProfilesData, ProfileAttributes
 from ..connectors import Session, run_sql
 from ..env import TRACE_LOG
+from .derived_impact import IMPACT_KEY, public_data
 
 
 def _profile_attributes(supplied, previous=None):
-    reserved = {"memoia_v2", "fact_ids", "source_ids"}
+    reserved = {"memoia_v2", "fact_ids", "source_ids", IMPACT_KEY}
     attributes = {key: value for key, value in supplied.items() if key not in reserved}
     if previous and previous.get("memoia_v2"):
         attributes.update({key: previous[key] for key in reserved if key in previous})
+    if previous is None:
+        attributes[IMPACT_KEY] = []  # A new, purely manual entry has no inferred influence.
+    elif IMPACT_KEY in previous:
+        attributes[IMPACT_KEY] = previous[IMPACT_KEY]
     return attributes
 
 
 async def get_user_profiles(user_id: str, project_id: str) -> Promise[UserProfilesData]:
     def execute():
-        from sqlalchemy import select
-        from ..models.source import memory_facts
+        from sqlalchemy import select, cast, String
+        from ..models.source import memory_facts, memory_blobs
+        from .maintenance import pending_derived_fact_ids
         with Session() as session:
+            session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
             user_profiles = (
                 session.query(UserProfile)
                 .filter_by(user_id=user_id, project_id=project_id)
@@ -35,16 +42,21 @@ async def get_user_profiles(user_id: str, project_id: str) -> Promise[UserProfil
                         referenced.add(UUID(value))
                     except (ValueError, TypeError, AttributeError):
                         continue
-            valid_facts = {str(fid) for fid in session.scalars(select(memory_facts.c.id).where(
+            valid_facts = {str(fid): sid for fid, sid in session.execute(select(
+                memory_facts.c.id, memory_blobs.c.source_id).join(
+                memory_blobs, memory_facts.c.blob_id == memory_blobs.c.id).where(
                 memory_facts.c.id.in_(referenced), memory_facts.c.user_id == user_id,
-                memory_facts.c.project_id == project_id))} if referenced else set()
+                memory_facts.c.project_id == project_id,
+                cast(memory_facts.c.id, String).notin_(pending_derived_fact_ids(
+                    user_id, project_id, list(map(str, referenced))))))} if referenced else {}
             results = []
             for up in user_profiles:
-                attributes = dict(up.attributes or {})
-                if attributes.get("memoia_v2"):
+                attributes = public_data(up.attributes)
+                if "fact_ids" in attributes:
                     # Pending derived text remains visible by contract; invalid Fact
                     # references are not returned as evidence for that old text.
                     attributes["fact_ids"] = [fid for fid in attributes.get("fact_ids", []) if fid in valid_facts]
+                    attributes["source_ids"] = sorted({valid_facts[fid] for fid in attributes["fact_ids"]})
                 results.append(
                     {
                         "id": up.id,
@@ -107,7 +119,7 @@ async def update_user_profiles(
             db_profiles = []
             existing = {str(row.id): row for row in session.query(UserProfile).filter(
                 UserProfile.id.in_(profile_ids), UserProfile.user_id == user_id,
-                UserProfile.project_id == project_id)}
+                UserProfile.project_id == project_id).order_by(UserProfile.id).with_for_update()}
             for profile_id, content, attribute in zip(profile_ids, contents, attributes):
                 db_profile = existing.get(str(profile_id))
                 if db_profile is None:
@@ -121,7 +133,7 @@ async def update_user_profiles(
                 db_profile.revision += 1
                 if attribute is not None:
                     # Client edits cannot strip the evidence needed by a later withdrawal.
-                    db_profile.attributes = _profile_attributes(attribute, db_profile.attributes)
+                    db_profile.attributes = _profile_attributes(attribute, db_profile.attributes or {})
                 db_profiles.append(profile_id)
             session.commit()
         return Promise.resolve(IdsData(ids=db_profiles))

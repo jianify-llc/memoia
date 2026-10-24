@@ -114,7 +114,7 @@ class FlushResult(StrictModel):
 
 class Operation(StrictModel):
     operation_id: UUID
-    kind: Literal["import", "retract", "legacy_import", "flush"] = "import"
+    kind: Literal["import", "retract", "correct", "legacy_import", "flush"] = "import"
     status: Literal["processing", "completed", "failed"]
     source_id: str | None
     blob_id: UUID | None
@@ -154,7 +154,7 @@ class TimeEvidence(StrictModel):
     expression: str = Field(min_length=1, max_length=1024)
 
 
-class EventTime(StrictModel):
+class FactTime(StrictModel):
     start: date | None
     end: date | None
     precision: Literal["year", "month", "day", "range", "unknown"]
@@ -164,10 +164,10 @@ class EventTime(StrictModel):
     def valid_period(self):
         if self.precision == "unknown":
             if self.start is not None or self.end is not None:
-                raise ValueError("Unknown event time cannot carry invented dates")
+                raise ValueError("Unknown fact time cannot carry invented dates")
             return self
         if self.start is None or self.end is None or self.end < self.start:
-            raise ValueError("Known event time requires an ordered inclusive date range")
+            raise ValueError("Known fact time requires an ordered inclusive date range")
         if self.precision == "day" and self.start != self.end:
             raise ValueError("Day precision requires one day")
         if self.precision == "year" and (self.start != date(self.start.year, 1, 1) or self.end != date(self.start.year, 12, 31)):
@@ -183,6 +183,29 @@ class SourceObservation(StrictModel):
     time_zone: str | None = None
 
 
+class DeleteFact(StrictModel):
+    idempotency_key: str = Field(min_length=1, max_length=255, pattern=r"^[^/]+$")
+    expected_revision: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=1024)
+
+
+class UpdateFact(DeleteFact):
+    content: str = Field(min_length=1, max_length=4096)
+    subject: str = Field(min_length=1, max_length=512)
+    reporter: str = Field(min_length=1, max_length=512)
+    certainty: Literal["asserted", "reported", "uncertain"]
+    support_groups: list[list[Annotated[str, Field(min_length=1, max_length=255)]]] = Field(min_length=1, max_length=20)
+    fact_time: FactTime | None
+
+    @model_validator(mode="after")
+    def distinct_support(self):
+        if any(not group or len(group) != len(set(group)) for group in self.support_groups):
+            raise ValueError("Every evidence group must contain distinct message IDs")
+        if len({tuple(sorted(group)) for group in self.support_groups}) != len(self.support_groups):
+            raise ValueError("Repeated message groups are not independent evidence")
+        return self
+
+
 class Evidence(StrictModel):
     fact_id: UUID
     blob_id: UUID
@@ -191,10 +214,12 @@ class Evidence(StrictModel):
     sub_topic: str | None = None
     subject: str | None = None
     reporter: str | None = None
-    certainty: Literal["asserted", "reported", "uncertain", "legacy"] = "legacy"
-    revision: int = 1
+    certainty: Literal["asserted", "reported", "uncertain", "legacy"]
+    revision: int = Field(ge=1)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
     support_groups: list[list[str]]
-    event_time: EventTime | None = None
+    fact_time: FactTime | None = None
     source_messages: list[SourceObservation] = Field(default_factory=list)
 
 
@@ -205,7 +230,7 @@ class Blob(StrictModel):
     message_ids: list[str]
     event_ids: list[UUID]
     created_at: datetime
-    kind: Literal["import", "retract"] = "import"
+    kind: Literal["import", "retract", "correct"] = "import"
     flush: FlushProgress | None = None
 
 
@@ -256,7 +281,7 @@ class SearchEvent(StrictModel):
     summary: str | None = None
     interpretation: str | None = None
     keywords: str | None = None
-    time: str | None = None
+    event_time: str | None = Field(None, description="Story occurrence time in prose; not a storage timestamp")
     location: str | None = None
     fact_ids: list[UUID] = Field(default_factory=list)
 
@@ -268,6 +293,8 @@ class SearchFact(StrictModel):
     blob_id: UUID
     score: float
     occurred_at: datetime
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
     evidence: Evidence
 
 
@@ -408,7 +435,7 @@ memory_operations = Table(
     UniqueConstraint("id", "user_id", "project_id"),
     UniqueConstraint("id", "user_id", "project_id", "source_id"),
     Index("idx_memory_operations_user", "user_id", "project_id", "created_at", "id"),
-    Index("uq_memory_fact_operation_blob", "blob_id", unique=True, postgresql_where=text("kind IN ('import','retract')")),
+    Index("uq_memory_fact_operation_blob", "blob_id", unique=True, postgresql_where=text("kind IN ('import','retract','correct')")),
 )
 memory_facts = Table(
     "memory_facts", REG.metadata,
@@ -422,7 +449,9 @@ memory_facts = Table(
     Column("certainty", String(16), nullable=False, server_default="legacy"),
     Column("support_groups", JSONB, nullable=False),
     Column("occurred_at", TIMESTAMP(timezone=True), nullable=False),
-    Column("event_time", JSONB),
+    Column("created_at", TIMESTAMP(timezone=True), server_default=text("now()")),
+    Column("updated_at", TIMESTAMP(timezone=True), server_default=text("now()")),
+    Column("fact_time", JSONB),
     Column("included", Boolean, nullable=False, server_default="true"),
     Column("revision", BigInteger, nullable=False, server_default="1"),
     Column("created_version", BigInteger, nullable=False, server_default="0"),

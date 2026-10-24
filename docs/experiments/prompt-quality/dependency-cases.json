@@ -1,0 +1,128 @@
+{
+  "cases": [
+    {
+      "id": "self_contained_parcel_uncertainty_and_required_hobby_choice_en",
+      "source_id": "sacha-parcel-and-weekend-hobby",
+      "output_language": "en",
+      "frozen_on": "2026-10-21",
+      "purpose": "独立正常场景；先冻结输入与语义预期，不进入运行时 Prompt。对照自足用户陈述旁的多余助手猜测与真实第一选项选择所必需的助手上下文。",
+      "steps": [
+        {
+          "action": "import",
+          "messages": [
+            {
+              "message_id": "p1",
+              "role": "assistant",
+              "content": "Maybe Sacha's parcel has already cleared customs.",
+              "occurred_at": "2026-10-20T11:00:00Z",
+              "time_zone": "Europe/London"
+            },
+            {
+              "message_id": "p2",
+              "role": "user",
+              "content": "My cousin Sacha sent me a parcel of hand-painted mugs. I don't know whether that parcel has cleared customs.",
+              "occurred_at": "2026-10-20T11:01:00Z",
+              "time_zone": "Europe/London"
+            },
+            {
+              "message_id": "p3",
+              "role": "assistant",
+              "content": "For an ongoing weekend hobby, which would you rather practice: watercolor painting or wood carving?",
+              "occurred_at": "2026-10-20T11:02:00Z",
+              "time_zone": "Europe/London"
+            },
+            {
+              "message_id": "p4",
+              "role": "user",
+              "content": "The first option. That's the hobby I'd like to practice regularly on weekends.",
+              "occurred_at": "2026-10-20T11:02:02Z",
+              "time_zone": "Europe/London"
+            }
+          ]
+        },
+        {
+          "action": "delete",
+          "message_ids": [
+            "p1"
+          ]
+        }
+      ],
+      "must_preserve": [
+        "Step 0: Sacha is the user's cousin and sent the user a parcel of hand-painted mugs. The user does not know whether that parcel has cleared customs. p2 independently supplies the person, relationship, parcel identity, completed sending and uncertainty; p1 is unnecessary to establish this meaning.",
+        "Step 0: The unknown-clearance conclusion must remain understandable by itself, identifying Sacha and the parcel of hand-painted mugs rather than relying on an unresolved ‘they’ or ‘that parcel’ whose referent exists only in another Fact. The main assertion is the user's lack of knowledge, not confirmed clearance or detention.",
+        "Step 0: The user would prefer watercolor painting as a hobby to practice regularly on weekends. Resolving p4's first option requires p3+p4; the assistant's options alone do not establish the user's preference. Preserve the wish or intended practice rather than asserting an already established routine.",
+        "Step 1 after deleting p1: The self-contained parcel statements, cousin relationship and user's lack of knowledge remain supported by p2; the watercolor preference remains supported by p3+p4. Deleting the irrelevant guess must not remove or weaken these contributions.",
+        "Each support group must be sufficient and necessary for its actual body. A self-contained parcel conclusion does not need p1 or the hobby messages; the specific watercolor choice needs the option context and does not need the parcel discussion."
+      ],
+      "must_not": [
+        "Treat p1 as evidence that customs clearance occurred, claim the parcel was detained, received or delivered, or convert the user's lack of knowledge into a known clearance result.",
+        "Bind p1 as a required dependency of p2's self-contained parcel conclusion, or let deleting p1 remove a user statement already fully supported by p2.",
+        "Exclude p3 merely because it is an assistant message, interpret the first option as wood carving, or supply watercolor from the user message p4 alone.",
+        "Assert that the user already paints every weekend, has started classes, or has a fixed frequency beyond wanting regular weekend practice.",
+        "Invent gender for Sacha or the user, an exact cousin subtype, a date of sending or clearance, or a start date for the lack of knowledge; use message recording dates as those occurrence dates."
+      ],
+      "acceptable_variations": [
+        "Facts may split or combine relationship, sending and unknown clearance while retaining their meaning and deletion behavior; no exact Fact/Profile/Event count or wording is required.",
+        "Use Sacha, the cousin, or a neutral reference whose antecedent is established within the same conclusion. Do not require an otherwise unnecessary message just to justify a replaceable pronoun.",
+        "The preference can appear in a concise Profile, with parcel details in Facts/Events; temporary clearance uncertainty need not become a relationship Profile. No separate Event for the hobby is required.",
+        "The unknown clearance can be expressed as the user's reported lack of knowledge or an explicitly unresolved clearance status, preserving the user's perspective. No explicit date or as-of expression is supplied for that main assertion."
+      ]
+    },
+    {
+      "id": "distinct_policy_objects_and_independent_retraction_zh",
+      "source_id": "two-travel-policy-cancellation-requests",
+      "output_language": "zh",
+      "frozen_on": "2026-10-21",
+      "purpose": "独立正常场景；先冻结输入与语义预期，不进入运行时 Prompt。两份以不同生效日期识别的旅行保险保单有不同退保审批状态，检验逐条自足识别、对象日期与主断言时间的区分，以及删除一份消息时另一份独立结论保留。",
+      "steps": [
+        {
+          "action": "import",
+          "messages": [
+            {
+              "message_id": "i1",
+              "role": "user",
+              "content": "2025年3月8日生效的旅行保险保单，保险公司已经批准了我的退保申请。",
+              "occurred_at": "2026-10-20T14:00:00+08:00",
+              "time_zone": "Asia/Shanghai"
+            },
+            {
+              "message_id": "i2",
+              "role": "user",
+              "content": "我不知道保险公司是否已批准2026年1月12日生效的旅行保险保单的退保申请。",
+              "occurred_at": "2026-10-20T14:01:00+08:00",
+              "time_zone": "Asia/Shanghai"
+            }
+          ]
+        },
+        {
+          "action": "delete",
+          "message_ids": [
+            "i1"
+          ]
+        }
+      ],
+      "must_preserve": [
+        "Step 0：用户对2025年3月8日生效的旅行保险保单提出的退保申请已被保险公司批准；这是已知的批准结果，不等于已经退回保费或完成全部退保流程。",
+        "Step 0：用户不知道保险公司是否已批准2026年1月12日生效的旅行保险保单的退保申请；该未知状态与前一份保单已批准的结果分别对应。i2本身给足完整对象身份与用户不知情，不需要借i1识别对象。",
+        "Step 0：单条Fact被独立检索时，其正文中的审批结果或不知情状态都必须能分辨所指保单。保留各自的旅行保险类型及生效日期，不能只写‘这份保单’或‘另一份申请’而要求读取组外Fact才能补全对象。",
+        "Step 0：2025年3月8日及2026年1月12日分别是保单生效日，用于识别两个对象，不是退保申请获批日，也不是用户不知情的发生日。以批准结果或用户不知情为主断言的Fact应使用fact_time=null，正文仍保留对应对象日期；两条原文没有明确的as-of或相对日期表达。",
+        "Step 1删除i1后：先核对有效Fact，再核对正常flush后的Profile/Event。2025年3月8日生效保单的退保获批结论退出；i2独立支持的2026年1月12日生效保单及其审批结果未知继续保留，并仍可从正文单独识别对象。",
+        "所有支持组须完整证明实际正文。i1独立支持第一份保单的已批准结果，i2独立支持第二份保单的用户不知情；不能将两条消息捆成所有结论共同必需的依赖，或把各自日期互作另一结论的证据。"
+      ],
+      "must_not": [
+        "混淆两份保单，交换生效日期或审批状态，把一份已批准概括成两份均已批准，或把第二份未知变成明确未批准、被拒绝或尚在审核。",
+        "把对象生效日期写成退保获批日期、退保申请提交日期、用户不知情起始日或其fact_time；用消息记录日补出上述日期。",
+        "为得到fact_time=null而从正文删去仍有原文支撑且用于区分对象的保单生效日期；仅在邻接Fact、Event标题或工具上下文中留下身份，正文自身却无法识别对象。",
+        "删除i1后继续保留第一份保单已获批的历史结论，或因多余联合支撑而连带删除i2独立支持的第二份保单未知状态。",
+        "猜测退款金额、到账状态、保单号、承保公司、用户性别或两次退保的原因。"
+      ],
+      "acceptable_variations": [
+        "允许拆分或组合有意义的结论，不规定Fact或Event数量及逐字措辞；每个实际保留的结论须有充分必要的支持，且删除一份自足消息后仍保留另一份的独立贡献。",
+        "同一Event可以明确分句叙述两份保单，也可以分开维护；标题、摘要、正文和删除后结果不能混合各自对象与审批状态。",
+        "可直接保留用户不知道的陈述，或用明确未获知结果的措辞表达；主语、确定性与正文须一致，不能将用户不知情误写为保险公司没有批准。",
+        "若另行保留真正断言某份保单生效的Fact，其fact_time可为该生效日；该Fact不能代替审批状态/不知情断言中的自足对象身份，也不能把生效时间传给后者。",
+        "不要求为临时退保审批状态建立长期Profile；允许使用规范日期格式或等价中文日期，只要对象身份与时间含义明确。"
+      ]
+    }
+  ]
+}

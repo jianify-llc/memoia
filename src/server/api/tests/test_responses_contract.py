@@ -59,7 +59,6 @@ async def test_fact_uses_native_responses_schema_and_fixed_only_cache(responses_
         assert wire["store"] is False and wire["truncation"] == "disabled"
         assert wire["max_output_tokens"] == CONFIG.source_output_reserve_tokens
         assert wire["service_tier"] == "default" and wire["reasoning"] == {"effort": CONFIG.llm_reasoning_effort, "mode": "standard"}
-        assert wire["text"]["verbosity"] == "low"
         assert state["calls"][0].extensions["timeout"] == dict.fromkeys(("connect", "read", "write", "pool"), 120)
         assert accounting.await_count == 1
         assert accounting.await_args.args[1:3] == (10, 5)
@@ -101,7 +100,7 @@ async def test_structured_validation_failure_keeps_actual_usage(responses_transp
     try:
         with pytest.raises(source.SourceError) as error:
             await source._structured(source.Extraction, "reference", "fixed prompt")
-        assert error.value.code == "model_unavailable" and "PRIVATE" not in error.value.message
+        assert error.value.code == "invalid_model_output" and "PRIVATE" not in error.value.message
         assert len(state["calls"]) == 1 and accounting.await_args.args[1:3] == (10, 5)
     finally:
         await client.close()

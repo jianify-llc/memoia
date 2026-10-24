@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "3f3c3fd35aec24de1ddfecdcf573ab0803d8c3bf",
+  "cases": [
+    {
+      "id": "preferences_and_episode",
+      "split": "development",
+      "language": "zh",
+      "source_id": "preferences",
+      "steps": [
+        {"action": "import", "messages": [
+          {"message_id": "p1", "role": "user", "content": "我平时喜欢读历史书，周末常骑车。今天去市图书馆把借的书还了，顺便读完了讲丝绸之路的一章，感觉很满足。今天赶时间，这次回答短一点就好。", "occurred_at": "2026-09-12T10:00:00+08:00", "time_zone": "Asia/Shanghai"}
+        ]}
+      ],
+      "must_preserve": ["Fact：历史书偏好、周末骑车习惯、还书、丝绸之路阅读与满足感；事件日期为9月12日。", "Profile：长期阅读与骑车偏好。Event：图书馆经历中的行为和感受。"],
+      "must_not": ["把这次要求简短写成长期沟通偏好。", "把读完一章写成读完一本书，或补造同行者。"],
+      "acceptable_variations": ["偏好和经历可拆成多条；临时回答请求可省略。"]
+    },
+    {
+      "id": "subjects_and_assistant",
+      "split": "development",
+      "language": "zh",
+      "source_id": "colleague",
+      "steps": [
+        {"action": "import", "messages": [
+          {"message_id": "s1", "role": "user", "content": "同事小周的母亲有糖尿病，小周一直照顾她。最近小周很忙。", "occurred_at": "2026-09-13T09:00:00+08:00", "time_zone": "Asia/Shanghai"},
+          {"message_id": "s2", "role": "assistant", "content": "他可能正在换工作，也许觉得很内疚。", "occurred_at": "2026-09-13T09:00:03+08:00", "time_zone": "Asia/Shanghai"},
+          {"message_id": "s3", "role": "user", "content": "换工作我不知道。我只是担心他太累了。", "occurred_at": "2026-09-13T09:01:00+08:00", "time_zone": "Asia/Shanghai"}
+        ]}
+      ],
+      "must_preserve": ["母亲患病、小周长期照顾母亲、用户与小周的同事关系、用户担心小周疲劳。", "Profile中的他人属性归到关系人物，不归到用户。"],
+      "must_not": ["小周或用户患糖尿病。", "把换工作、内疚或疲劳当已证实状态。", "助手猜测成为独立支撑。"],
+      "acceptable_variations": ["可用关系条目组织母子背景；不必为背景单独创建一个故事。"]
+    },
+    {
+      "id": "two_hikes",
+      "split": "holdout",
+      "language": "zh",
+      "source_id": "hikes",
+      "steps": [
+        {"action": "import", "messages": [
+          {"message_id": "h1", "role": "user", "content": "2026年四月，朋友阿岚因为脚踝扭伤取消了和我的徒步，我有点担心她。", "occurred_at": "2026-09-14T12:00:00+08:00", "time_zone": "Asia/Shanghai"},
+          {"message_id": "h2", "role": "user", "content": "2026年八月，同事阿哲又因临时加班取消了和我的另一次徒步，我很失望。", "occurred_at": "2026-09-14T12:01:00+08:00", "time_zone": "Asia/Shanghai"}
+        ]}
+      ],
+      "must_preserve": ["阿岚／朋友／四月／脚踝扭伤／用户担心对应；阿哲／同事／八月／临时加班／用户失望对应。", "两个Event区分两次经历，Profile保留人物关系。"],
+      "must_not": ["混合月份、原因或人物。", "把取消说成实际参加，补造改期或和解。", "推断人物总会失约。"],
+      "acceptable_variations": ["每次经历可以拆成关系事实和经历事实；月份用日期范围表达。"]
+    },
+    {
+      "id": "past_and_ended_relationship",
+      "split": "holdout",
+      "language": "en",
+      "source_id": "relationships",
+      "steps": [
+        {"action": "import", "messages": [
+          {"message_id": "r1", "role": "user", "content": "When Casey and I were dating in 2023, we cooked together on Sundays. I haven't said what our relationship is now.", "occurred_at": "2026-09-15T10:00:00Z", "time_zone": "Europe/London"},
+          {"message_id": "r2", "role": "user", "content": "Morgan is my former partner. We broke up in June 2025, but we are still friends.", "occurred_at": "2026-09-15T10:01:00Z", "time_zone": "Europe/London"}
+        ]}
+      ],
+      "must_preserve": ["Casey's relationship and Sunday cooking are historical; current status is unspecified.", "Morgan's explicit breakup in June 2025 and continuing friendship."],
+      "must_not": ["Infer Casey is a former or current partner.", "Transfer Morgan's breakup to Casey, or historical cooking into a current habit."],
+      "acceptable_variations": ["Separate relationship and activity Facts; retain historical qualifiers in Profiles and Events."]
+    },
+    {
+      "id": "incremental_clarification",
+      "split": "development",
+      "language": "en",
+      "source_id": "volunteer_day",
+      "steps": [
+        {"action": "import", "messages": [
+          {"message_id": "c1", "role": "user", "content": "On September 5, 2026, I helped at the neighborhood book drive with my friend Robin. We sorted donated children's books for the school. I thought Robin had organized it.", "occurred_at": "2026-09-16T09:00:00Z", "time_zone": "Europe/London"}
+        ]},
+        {"action": "import", "messages": [
+          {"message_id": "c2", "role": "user", "content": "A correction about the September 5 book drive: Sam organized it, not Robin. Robin and I still did the sorting. We finished two boxes, and I felt proud that the books would reach the school.", "occurred_at": "2026-09-16T10:00:00Z", "time_zone": "Europe/London"}
+        ]}
+      ],
+      "must_preserve": ["After step 1, organizer attribution remains the user's belief, not established truth.", "After step 2, Event reflects the explicit correction to Sam while preserving Robin, sorting children's books, school destination, two boxes and pride.", "Fact history can retain the original belief alongside the supported clarification."],
+      "must_not": ["Drop valid old background when adding new details.", "Treat latest ingestion alone as proof, infer Sam is the user's friend, or turn one volunteer day into a habit."],
+      "acceptable_variations": ["Correction can be one or several Facts; original belief need not be repeated as current truth in derived content."]
+    },
+    {
+      "id": "independent_support_and_delete",
+      "split": "holdout",
+      "language": "zh",
+      "source_id": "pottery",
+      "steps": [
+        {"action": "import", "messages": [
+          {"message_id": "d1", "role": "user", "content": "我长期喜欢做陶艺。2026年9月6日我在青禾工作室做了一个蓝色杯子，打算送给姐姐。", "occurred_at": "2026-09-17T10:00:00+08:00", "time_zone": "Asia/Shanghai"},
+          {"message_id": "d2", "role": "user", "content": "做陶艺一直是我的爱好。", "occurred_at": "2026-09-17T10:02:00+08:00", "time_zone": "Asia/Shanghai"}
+        ]},
+        {"action": "delete", "message_ids": ["d1"]},
+        {"action": "delete", "message_ids": ["d2"]}
+      ],
+      "must_preserve": ["首次：陶艺偏好有两份独立支撑；杯子经历及赠送意图有d1支撑。", "删除d1后：偏好由d2继续支撑；仅d1支撑的杯子、工作室、日期和赠送内容在flush后不再作为记忆返回。", "删除d2后：本场景失去全部支撑的Fact和派生条目消失。"],
+      "must_not": ["把独立支撑强制合成共同组而误删偏好。", "把打算赠送写成已送达，或用旧Event／Profile自证保留已删除内容。"],
+      "acceptable_variations": ["偏好可以合并证据组或分别保存受支持陈述；删除结果必须等价。"]
+    }
+  ]
+}

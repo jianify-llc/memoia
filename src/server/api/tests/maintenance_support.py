@@ -8,60 +8,81 @@ from memoia_server.models.database import User
 from memoia_server.maintenance_agent import ProfileMutation, EventMutation, LoopUsage
 
 
+async def stage_derived(context, *, latest=False, queries=(), kinds=("profile", "event")):
+    """Stage fixture decisions; callers finalize only after all collections are handled."""
+    cursor = None
+    while True:
+        page = await context.read_changes(cursor=cursor)
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+    facts = {row["id"]: row for row in (await context.read("facts"))["items"]}
+    all_entries = {}
+    for collection in ("profiles", "events"):
+        entries = {row["id"]: row for row in (await context.read(collection))["items"]}
+        for query in queries:
+            for row in (await context.read("facts", query=query))["items"]:
+                facts[row["id"]] = row
+            for row in (await context.read(collection, query=query))["items"]:
+                entries[row["id"]] = row
+        all_entries[collection] = entries
+    # Default Fact reads are incremental. Resolve actual support before deciding
+    # whether a previously derived entry should survive this fixture run.
+    missing = {fid for entries in all_entries.values() for entry in entries.values()
+               for fid in entry["fact_ids"]} - facts.keys()
+    if missing:
+        facts.update({row["id"]: row for row in (await context.read("facts", ids=sorted(missing)))["items"]})
+    slots = {}
+    for row in facts.values():
+        slot = f"{row.get('topic') or 'legacy'}::{row.get('sub_topic') or 'value'}"
+        if slot not in slots or row["occurred_at"] > slots[slot]["occurred_at"]:
+            slots[slot] = row
+    selected = list(slots.values()) if latest else list(facts.values())
+    selected_ids = {row["id"] for row in selected}
+    for kind, collection in (("profile", "profiles"), ("event", "events")):
+        if kind not in kinds:
+            continue
+        entries, used = all_entries[collection], set()
+        for row in selected:
+            slot = f"{row.get('topic') or 'legacy'}::{row.get('sub_topic') or 'value'}"
+            existing = next((entry for entry in entries.values()
+                             if row["id"] in [*entry["fact_ids"], *entry.get("invalid_fact_ids", [])]), None)
+            if kind == "profile" and existing is None:
+                existing = next((entry for entry in entries.values() if entry.get("sub_topic") == slot), None)
+            ident = existing["id"] if existing else None
+            if ident:
+                used.add(ident)
+            if kind == "profile":
+                topic = row.get("topic")
+                if topic not in context.allowed_topics:
+                    topic = context.allowed_topics[0]
+                unchanged = (existing is not None and existing["content"] == row["content"]
+                             and existing["topic"] == topic and existing["sub_topic"] == slot
+                             and existing["fact_ids"] == [row["id"]] and not existing.get("invalid_fact_ids"))
+                change = ProfileMutation(action="keep", id=ident) if unchanged else ProfileMutation(
+                    action="upsert", id=ident, content=row["content"], topic=topic,
+                    sub_topic=slot, fact_ids=[row["id"]])
+                await context.stage_profile(change)
+            else:
+                await context.stage_event(EventMutation(action="upsert", id=ident, title=row["content"],
+                    content=row["content"], event_time=datetime.fromisoformat(row["occurred_at"]).isoformat(),
+                    fact_ids=[row["id"]]))
+        for entry in entries.values():
+            if entry["id"] in used:
+                continue
+            supported = [facts[fid] for fid in entry["fact_ids"] if fid in facts]
+            replaced = latest and all(row["id"] not in selected_ids for row in supported)
+            action = "keep" if supported and not replaced and not entry.get("invalid_fact_ids") else "remove"
+            change = {"action": action, "id": entry["id"]}
+            if kind == "profile":
+                await context.stage_profile(ProfileMutation(**change))
+            else:
+                await context.stage_event(EventMutation(**change))
+
+
 def derive(*, latest=False, queries=(), kinds=("profile", "event")):
     async def runner(context):
-        cursor = None
-        while True:
-            page = await context.read_changes(cursor=cursor)
-            cursor = page["next_cursor"]
-            if cursor is None:
-                break
-        facts = {row["id"]: row for row in (await context.read("facts"))["items"]}
-        all_entries = {}
-        for collection in ("profiles", "events"):
-            entries = {row["id"]: row for row in (await context.read(collection))["items"]}
-            for query in queries:
-                for row in (await context.read("facts", query=query))["items"]:
-                    facts[row["id"]] = row
-                for row in (await context.read(collection, query=query))["items"]:
-                    entries[row["id"]] = row
-            all_entries[collection] = entries
-        slots = {}
-        for row in facts.values():
-            slot = f"{row.get('topic') or 'legacy'}::{row.get('sub_topic') or 'value'}"
-            if slot not in slots or row["occurred_at"] > slots[slot]["occurred_at"]:
-                slots[slot] = row
-        selected = list(slots.values()) if latest else list(facts.values())
-        for kind, collection in (("profile", "profiles"), ("event", "events")):
-            if kind not in kinds:
-                continue
-            entries, used = all_entries[collection], set()
-            for row in selected:
-                slot = f"{row.get('topic') or 'legacy'}::{row.get('sub_topic') or 'value'}"
-                existing = next((entry for entry in entries.values() if (
-                    entry.get("sub_topic") == slot if kind == "profile" else
-                    row["id"] in [*entry["fact_ids"], *entry.get("invalid_fact_ids", [])])), None)
-                ident = existing["id"] if existing else None
-                if ident:
-                    used.add(ident)
-                if kind == "profile":
-                    topic = row.get("topic")
-                    if topic not in context.allowed_topics:
-                        topic = context.allowed_topics[0]
-                    await context.stage_profile(ProfileMutation(action="upsert", id=ident, content=row["content"],
-                        topic=topic, sub_topic=slot, fact_ids=[row["id"]]))
-                else:
-                    await context.stage_event(EventMutation(action="upsert", id=ident, title=row["content"],
-                        content=row["content"], time=datetime.fromisoformat(row["occurred_at"]).isoformat(),
-                        fact_ids=[row["id"]]))
-            for entry in entries.values():
-                if entry["id"] in used:
-                    continue
-                change = {"action": "remove", "id": entry["id"]}
-                if kind == "profile":
-                    await context.stage_profile(ProfileMutation(**change))
-                else:
-                    await context.stage_event(EventMutation(**change))
+        await stage_derived(context, latest=latest, queries=queries, kinds=kinds)
         return context.get_plan(LoopUsage())
     return runner
 

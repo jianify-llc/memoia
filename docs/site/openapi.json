@@ -2,9 +2,155 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Memoia API",
-    "version": "0.10.1"
+    "version": "0.11.0"
   },
   "paths": {
+    "/api/users/{user_id}/facts/{fact_id}": {
+      "put": {
+        "tags": [
+          "sources",
+          "facts"
+        ],
+        "summary": "Update Fact",
+        "operationId": "updateFact",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          },
+          {
+            "name": "fact_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Fact Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateFact"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Still processing; query the original operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "sources",
+          "facts"
+        ],
+        "summary": "Delete Fact",
+        "operationId": "deleteFact",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          },
+          {
+            "name": "fact_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Fact Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteFact"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Still processing; query the original operation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/project/identity": {
       "get": {
         "tags": [
@@ -2016,7 +2162,8 @@
             "type": "string",
             "enum": [
               "import",
-              "retract"
+              "retract",
+              "correct"
             ],
             "title": "Kind",
             "default": "import"
@@ -2103,39 +2250,69 @@
           "total_insert": {
             "type": "integer",
             "title": "Total Insert",
-            "description": "The total insert",
-            "default": 0
+            "description": "The total insert"
           },
           "total_success_insert": {
             "type": "integer",
             "title": "Total Success Insert",
-            "description": "The total update",
-            "default": 0
+            "description": "The total update"
           },
           "total_input_token": {
             "type": "integer",
             "title": "Total Input Token",
-            "description": "The total input token",
-            "default": 0
+            "description": "The total input token"
           },
           "total_output_token": {
             "type": "integer",
             "title": "Total Output Token",
-            "description": "The total output token",
-            "default": 0
+            "description": "The total output token"
           },
           "usage_complete": {
             "type": "boolean",
             "title": "Usage Complete",
-            "description": "False when recorded calls lacked token usage. Totals are approximate recorded usage, not a billing ledger; outages or expired counters can lose statistics.",
-            "default": true
+            "description": "False when recorded calls lacked token usage. Totals are approximate recorded usage, not a billing ledger; outages or expired counters can lose statistics."
           }
         },
         "type": "object",
         "required": [
-          "date"
+          "date",
+          "total_insert",
+          "total_success_insert",
+          "total_input_token",
+          "total_output_token",
+          "usage_complete"
         ],
         "title": "DailyUsage"
+      },
+      "DeleteFact": {
+        "properties": {
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "pattern": "^[^/]+$",
+            "title": "Idempotency Key"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Expected Revision"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "idempotency_key",
+          "expected_revision",
+          "reason"
+        ],
+        "title": "DeleteFact"
       },
       "DeleteMessages": {
         "properties": {
@@ -2201,7 +2378,7 @@
             ],
             "title": "Keywords"
           },
-          "time": {
+          "event_time": {
             "anyOf": [
               {
                 "type": "string"
@@ -2210,7 +2387,8 @@
                 "type": "null"
               }
             ],
-            "title": "Time"
+            "title": "Event Time",
+            "description": "Story occurrence time in prose; not a storage timestamp"
           },
           "location": {
             "anyOf": [
@@ -2370,7 +2548,7 @@
             "maximum": 10000.0,
             "minimum": 1.0,
             "title": "Max Token Size",
-            "default": 4000
+            "default": 8192
           },
           "fact_ids": {
             "items": {
@@ -2485,63 +2663,6 @@
         ],
         "title": "EventTag"
       },
-      "EventTime": {
-        "properties": {
-          "start": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Start"
-          },
-          "end": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "End"
-          },
-          "precision": {
-            "type": "string",
-            "enum": [
-              "year",
-              "month",
-              "day",
-              "range",
-              "unknown"
-            ],
-            "title": "Precision"
-          },
-          "evidence": {
-            "items": {
-              "$ref": "#/components/schemas/TimeEvidence"
-            },
-            "type": "array",
-            "maxItems": 20,
-            "minItems": 1,
-            "title": "Evidence"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "start",
-          "end",
-          "precision",
-          "evidence"
-        ],
-        "title": "EventTime"
-      },
       "Events": {
         "properties": {
           "events": {
@@ -2627,13 +2748,36 @@
               "uncertain",
               "legacy"
             ],
-            "title": "Certainty",
-            "default": "legacy"
+            "title": "Certainty"
           },
           "revision": {
             "type": "integer",
-            "title": "Revision",
-            "default": 1
+            "minimum": 1.0,
+            "title": "Revision"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
           },
           "support_groups": {
             "items": {
@@ -2645,10 +2789,10 @@
             "type": "array",
             "title": "Support Groups"
           },
-          "event_time": {
+          "fact_time": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/EventTime"
+                "$ref": "#/components/schemas/FactTime"
               },
               {
                 "type": "null"
@@ -2669,6 +2813,8 @@
           "fact_id",
           "blob_id",
           "content",
+          "certainty",
+          "revision",
           "support_groups"
         ],
         "title": "Evidence"
@@ -2718,7 +2864,7 @@
             "maximum": 10000.0,
             "minimum": 1.0,
             "title": "Max Token Size",
-            "default": 4000
+            "default": 8192
           },
           "source_ids": {
             "items": {
@@ -2782,6 +2928,63 @@
         "additionalProperties": false,
         "type": "object",
         "title": "FactQuery"
+      },
+      "FactTime": {
+        "properties": {
+          "start": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start"
+          },
+          "end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End"
+          },
+          "precision": {
+            "type": "string",
+            "enum": [
+              "year",
+              "month",
+              "day",
+              "range",
+              "unknown"
+            ],
+            "title": "Precision"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/TimeEvidence"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Evidence"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "start",
+          "end",
+          "precision",
+          "evidence"
+        ],
+        "title": "FactTime"
       },
       "FlushInput": {
         "properties": {
@@ -3438,6 +3641,7 @@
             "enum": [
               "import",
               "retract",
+              "correct",
               "legacy_import",
               "flush"
             ],
@@ -3726,7 +3930,7 @@
             "maximum": 10000.0,
             "minimum": 1.0,
             "title": "Max Token Size",
-            "default": 4000
+            "default": 8192
           },
           "topic": {
             "anyOf": [
@@ -3968,7 +4172,7 @@
             ],
             "title": "Keywords"
           },
-          "time": {
+          "event_time": {
             "anyOf": [
               {
                 "type": "string"
@@ -3977,7 +4181,8 @@
                 "type": "null"
               }
             ],
-            "title": "Time"
+            "title": "Event Time",
+            "description": "Story occurrence time in prose; not a storage timestamp"
           },
           "location": {
             "anyOf": [
@@ -4248,7 +4453,7 @@
             ],
             "title": "Keywords"
           },
-          "time": {
+          "event_time": {
             "anyOf": [
               {
                 "type": "string"
@@ -4257,7 +4462,8 @@
                 "type": "null"
               }
             ],
-            "title": "Time"
+            "title": "Event Time",
+            "description": "Story occurrence time in prose; not a storage timestamp"
           },
           "location": {
             "anyOf": [
@@ -4319,6 +4525,30 @@
             "type": "string",
             "format": "date-time",
             "title": "Occurred At"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
           },
           "evidence": {
             "$ref": "#/components/schemas/Evidence"
@@ -4805,6 +5035,93 @@
           "expression"
         ],
         "title": "TimeEvidence"
+      },
+      "UpdateFact": {
+        "properties": {
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 255,
+            "minLength": 1,
+            "pattern": "^[^/]+$",
+            "title": "Idempotency Key"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Expected Revision"
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Reason"
+          },
+          "content": {
+            "type": "string",
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Content"
+          },
+          "subject": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Subject"
+          },
+          "reporter": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Reporter"
+          },
+          "certainty": {
+            "type": "string",
+            "enum": [
+              "asserted",
+              "reported",
+              "uncertain"
+            ],
+            "title": "Certainty"
+          },
+          "support_groups": {
+            "items": {
+              "items": {
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Support Groups"
+          },
+          "fact_time": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FactTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "idempotency_key",
+          "expected_revision",
+          "reason",
+          "content",
+          "subject",
+          "reporter",
+          "certainty",
+          "support_groups",
+          "fact_time"
+        ],
+        "title": "UpdateFact"
       },
       "Usage": {
         "properties": {

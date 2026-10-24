@@ -1,4 +1,4 @@
-# Memoia one-shot Responses boundary; task/transaction recovery owns retries.
+# Memoia text Responses boundary; task/transaction recovery owns retries.
 import time
 from collections.abc import Awaitable, Callable
 from openai import APIError
@@ -17,10 +17,9 @@ async def openai_complete(
     if cache_fixed_prompt and not system_prompt:
         raise ValueError("Explicit caching requires fixed instructions")
     if cache_fixed_prompt:
-        LOG.info("Prompt cache contract: kind=fact_extraction enabled=%s", supports_prompt_cache_options(model))
+        LOG.info("Prompt cache contract: fixed_instructions enabled=%s", supports_prompt_cache_options(model))
     cache_enabled = cache_fixed_prompt and supports_prompt_cache_options(model)
     if system_prompt:
-        # One-shot extraction caches only instructions, never the unique source input.
         fixed = {"type": "input_text", "text": system_prompt}
         if cache_enabled:
             fixed["prompt_cache_breakpoint"] = {"mode": "explicit"}
@@ -28,8 +27,8 @@ async def openai_complete(
     if cache_enabled:
         kwargs["prompt_cache_options"] = {"mode": "explicit", "ttl": "30m"}
     # An extraction's source is reference material, not a fabricated current user.
-    inputs.append({"role": "developer" if cache_fixed_prompt else "user",
-                   "content": [{"type": "input_text", "text": prompt}]})
+    source = {"type": "input_text", "text": prompt}
+    inputs.append({"role": "developer" if cache_fixed_prompt else "user", "content": [source]})
 
     if model == "gpt-6-luna":
         # 正式调用默认使用完整推理预算；启动探针可显式指定独立 completion 上限。

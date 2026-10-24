@@ -16,7 +16,7 @@ from agents import (Agent, ModelSettings, OpenAIResponsesModel, RunConfig, ToolE
                     ModelRetryAdvice, ModelRetryAdviceRequest, ModelRetrySettings, retry_policies)
 from agents import _debug
 from agents.exceptions import AgentsException, UserError
-from openai import AsyncOpenAI, APIConnectionError, APIStatusError, BadRequestError
+from openai import AsyncOpenAI, APIConnectionError, APIStatusError, BadRequestError, omit
 from openai.types.responses import (Response, ResponseFunctionToolCall,
                                     ResponseOutputMessage, ResponseOutputText,
                                     ResponseOutputRefusal, ResponseReasoningItem, ResponseCompactionItem)
@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from .env import CONFIG, LOG
 from .llms import record_completion_usage
 from .llms.utils import get_error_usage, supports_prompt_cache_options
-from .prompts.assembly import developer_data, loop_cache_key
+from .prompts.assembly import developer_data
 from .models.response import EventTag
 from .utils import json_size
 
@@ -55,20 +55,22 @@ ReadIds = Annotated[list[str], Field(json_schema_extra={"maxItems": MAX_PAGE_SIZ
 class ProfileMutation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["upsert", "remove"]
+    action: Literal["upsert", "remove", "keep"]
     id: str | None = Field(default=None, max_length=128,
-        description="Use null to create a new profile; to update/remove, copy the exact id returned by a read or stage tool. Never invent an id.")
+        description="Use null to create; otherwise use this Loop's returned profile reference (p1, p2, ...).")
     content: str | None = Field(default=None, max_length=8000)
     topic: str | None = Field(default=None, max_length=128)
     sub_topic: str | None = Field(default=None, max_length=256)
     fact_ids: list[str] = Field(default_factory=list, max_length=100,
-        description="Copy exact Fact ids read from current valid facts. Message, Source and Blob ids are not Fact ids.")
+        description="Use this Loop's Fact references (f1, f2, ...) from current valid facts. Never use UUIDs or message IDs.")
 
     @model_validator(mode="after")
     def validate_change(self):
-        if self.action == "remove":
+        if self.action == "keep" and self.model_fields_set - {"action", "id"}:
+            raise ValueError("Keeping a profile accepts only action and id")
+        if self.action in ("remove", "keep"):
             if not self.id:
-                raise ValueError("Removing a profile requires its existing id")
+                raise ValueError("Removing or keeping a profile requires its existing id")
         elif not all((self.content and self.content.strip(), self.topic,
                       self.sub_topic, self.fact_ids)):
             raise ValueError("A profile requires content, classification and supporting facts")
@@ -80,25 +82,28 @@ class ProfileMutation(BaseModel):
 class EventMutation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["upsert", "remove"]
+    action: Literal["upsert", "remove", "keep"]
     id: str | None = Field(default=None, max_length=128,
-        description="Use null to create a new event; to update/remove, copy the exact id returned by a read or stage tool. Never invent an id.")
+        description="Use null to create; otherwise use this Loop's returned event reference (e1, e2, ...).")
     title: str | None = Field(default=None, max_length=500)
     summary: str | None = Field(default=None, max_length=4000)
     keywords: str | None = Field(default=None, max_length=1000)
-    time: str | None = Field(default=None, max_length=1000)
+    event_time: str | None = Field(default=None, max_length=1000,
+        description="When the story occurred, in words supported by its Facts; null when unknown. Not a storage timestamp.")
     location: str | None = Field(default=None, max_length=1000)
     content: str | None = Field(default=None, max_length=16000)
     interpretation: str | None = Field(default=None, max_length=4000)
     event_tags: list[EventTag] = Field(default_factory=list, max_length=50)
     fact_ids: list[str] = Field(default_factory=list, max_length=100,
-        description="Copy exact Fact ids read from current valid facts. Message, Source and Blob ids are not Fact ids.")
+        description="Use this Loop's Fact references (f1, f2, ...) from current valid facts. Never use UUIDs or message IDs.")
 
     @model_validator(mode="after")
     def validate_change(self):
-        if self.action == "remove":
+        if self.action == "keep" and self.model_fields_set - {"action", "id"}:
+            raise ValueError("Keeping an event accepts only action and id")
+        if self.action in ("remove", "keep"):
             if not self.id:
-                raise ValueError("Removing an event requires its existing id")
+                raise ValueError("Removing or keeping an event requires its existing id")
         elif not (self.content and self.content.strip() and self.fact_ids):
             raise ValueError("An event requires factual content and supporting facts")
         if len(set(self.fact_ids)) != len(self.fact_ids):
@@ -110,25 +115,27 @@ class EventMutation(BaseModel):
 # Existing DTOs remain the single staging/commit representation.
 class ProfileUpsert(ProfileMutation):
     action: Literal["upsert"]
-    content: str = Field(min_length=1, max_length=8000)
+    content: str = Field(min_length=1, max_length=8000,
+        description="User-facing profile prose, without internal reference markers; record support in fact_ids.")
     topic: str = Field(min_length=1, max_length=128)
     sub_topic: str = Field(min_length=1, max_length=256)
     fact_ids: list[str] = Field(min_length=1, max_length=100,
-        description="Copy exact Fact ids from current valid facts already returned by a tool.")
+        description="Current Fact references (f1, f2, ...) supporting all information used in this Profile, including its content and subtopic. Include the basis of inferences, not every Fact read. Use returned references; read missing support first. References belong here, not in prose.")
 
 
 class EventUpsert(EventMutation):
     action: Literal["upsert"]
-    content: str = Field(min_length=1, max_length=16000)
+    content: str = Field(min_length=1, max_length=16000,
+        description="User-facing event prose, without internal reference markers; record support in fact_ids.")
     fact_ids: list[str] = Field(min_length=1, max_length=100,
-        description="Copy exact Fact ids from current valid facts already returned by a tool.")
+        description="Current Fact references (f1, f2, ...) supporting all information used in this Event: title, summary, keywords, event_time, location, content, interpretation and tag values. Include background and the basis of inferences, not every Fact read. Use returned references; read missing support first. References belong here, not in prose.")
 
 
-class RemoveMemory(BaseModel):
+class MemoryDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["remove"]
+    action: Literal["remove", "keep"]
     id: str = Field(min_length=1, max_length=128,
-        description="Copy the exact existing id returned by a read or stage tool. Never invent an id.")
+        description="Use this Loop's returned target reference: p1, p2, ... for profiles; e1, e2, ... for events.")
 
 
 @dataclass(frozen=True)
@@ -146,6 +153,7 @@ class LoopPlan:
     events: list[EventMutation]
     readset: ReadSet
     usage: LoopUsage
+    derived_reads: dict[str, set[str]]
 
 
 class MaintenanceContext(Protocol):
@@ -154,7 +162,6 @@ class MaintenanceContext(Protocol):
     project_id: str
     user_id: str
     operation_id: UUID
-    through_version: int
     changes: list[dict]
     profile_topics: list[dict]
     allowed_topics: list[str]
@@ -181,9 +188,6 @@ class MaintenanceContext(Protocol):
     def get_plan(self, usage: LoopUsage) -> LoopPlan: ...
 
     async def read_changes(self, *, cursor: str | None = None, limit: int = 100) -> dict: ...
-
-    blob_count: int
-
 
 class MaintenanceRunError(AgentsException):
     """A fixed diagnostic code; never retain a provider response or tool arguments."""
@@ -392,7 +396,76 @@ MAINTENANCE_INSTRUCTIONS = (
 ).read_text(encoding="utf-8").strip()
 
 
-def _maintenance_tools():
+class _LoopReferences:
+    """Model-only addresses; database identities and read versions stay unchanged."""
+
+    def __init__(self):
+        self.by_id = {kind: {} for kind in ("facts", "profiles", "events")}
+        self.by_ref = {kind: {} for kind in self.by_id}
+
+    def encode(self, kind, ident):
+        ident = str(ident)
+        if ident not in self.by_id[kind]:
+            ref = f"{kind[0]}{len(self.by_id[kind]) + 1}"
+            self.by_id[kind][ident] = ref
+            self.by_ref[kind][ref] = ident
+        return self.by_id[kind][ident]
+
+    def decode(self, kind, ref):
+        try:
+            return self.by_ref[kind][ref]
+        except KeyError:
+            raise MaintenanceRunError("MAINTENANCE_REFERENCE_INVALID") from None
+
+    def entry(self, kind, item):
+        # Transform only typed identity fields, never text, message IDs or metadata.
+        result = {**item, "id": self.encode(kind, item["id"])}
+        for key in ("fact_ids", "invalid_fact_ids"):
+            if key in result:
+                result[key] = [self.encode("facts", ident) for ident in result[key]]
+        if "evidence" in result:
+            result["evidence"] = [self.entry("facts", fact) for fact in result["evidence"]]
+        return result
+
+    def change_page(self, page):
+        items = []
+        for change in page["items"]:
+            change = dict(change)
+            if change.get("fact_id"):
+                change["fact_id"] = self.encode("facts", change["fact_id"])
+            if change.get("current_fact"):
+                change["current_fact"] = self.entry("facts", change["current_fact"])
+            items.append(change)
+        return self.progress({**page, "items": items})
+
+    def progress(self, result):
+        if "remaining_review" not in result:
+            return result
+        return {**result, "remaining_review": {
+            kind: {**group, "ids": [self.encode(kind, ident) for ident in group["ids"]]}
+            for kind, group in result["remaining_review"].items()}}
+
+    def mutation(self, kind, change):
+        values = change.model_dump()
+        if change.id is not None:
+            values["id"] = self.decode(kind, change.id)
+        if change.action == "upsert":
+            values["fact_ids"] = [self.decode("facts", ref) for ref in change.fact_ids]
+        factory = ProfileMutation if kind == "profiles" else EventMutation
+        return factory(**values)
+
+    def staged(self, kind, result):
+        result = {**result, "ids": [self.encode(kind, ident) for ident in result["ids"]]}
+        if result.get("error"):
+            result["error"] = dict(result["error"])
+            for key in ("unread_fact_ids", "invalid_fact_ids"):
+                if key in result["error"]:
+                    result["error"][key] = [self.encode("facts", ident)
+                                             for ident in result["error"][key]]
+        return self.progress(result)
+
+
+def _maintenance_tools(refs: _LoopReferences):
     # Only overlapping target IDs need ordered staging. New entries and independent
     # targets/collections remain concurrent; this finite run owns these small locks.
     writes = {}
@@ -409,24 +482,23 @@ def _maintenance_tools():
                           collection: ReadCollection, ids: ReadIds | None = None,
                           cursor: str | None = None, query: ToolQuery | None = None,
                           limit: PageLimit = 100) -> dict:
-        """Read current-user entries. ids must be exact returned UUIDs, never names/labels.
+        """Read complete current-user entries by returned f/p/e references or paged filters.
 
-        query is a literal, case-insensitive substring within one field, not a
-        keyword list or semantic query. Use a known name, topic or text fragment;
-        use search_memory for discovery. ids=null pages through matches, or entries
-        linked to this flush's changes when query is also null. Use linked pages
-        to cover deletion/evidence/time changes, not as a routine first step for additions.
-        Also use them when recovery finds that an originally added Fact is now absent.
-        An empty linked page does not rule out other existing entries; discover
-        related memory before creating a new entry unless it was already returned.
-        All pages preserve complete entry text. Follow next_cursor.
-        The memory cursor is the last returned ID, not an offset; byte-sized pages
-        may contain fewer than limit. pending_delete entries remain visible for
-        navigation/rewrite, but their old text is not evidence. Only current Fact
-        entries and evidence returned from those Fact rows can support new content.
+        ids selects exact references, not UUIDs or names. Without ids, query is a
+        case-insensitive literal substring, not a semantic search or keyword list.
+        It matches any of: Fact content; Profile content/topic/sub_topic;
+        Event title/summary/keywords/content or legacy event_tip.
+        With both ids and query null, page through entries linked
+        to this flush's changes, not all user memory.
+        Follow next_cursor unchanged until null; it is an ID cursor, not an offset.
+        Byte-bounded pages may contain fewer than limit but never partial entries.
         Profile/Event pages include bounded current supporting Facts in evidence,
-        shared by fact_ids once per page. Only fetch missing support if needed.
-        Returned entries and Facts are registered for use without an exact-ID reread.
+        shared by fact_ids once per page. Returned entries and Facts are registered
+        for use; a referenced ID without its Fact body is not yet read support.
+        pending_delete entries remain visible for navigation, not as factual support.
+        review_required marks this run's mandatory decision scope, including possible
+        indirect influence. remaining_review lists counts and up to 20 pending IDs
+        per collection; read those IDs and submit decisions to advance the list.
         """
         if not 1 <= limit <= MAX_PAGE_SIZE or (ids is not None and len(ids) > MAX_PAGE_SIZE):
             LOG.warning("Maintenance bound rejected: tool=read_memory limit=%s id_count=%s", limit, len(ids or []))
@@ -435,26 +507,28 @@ def _maintenance_tools():
             LOG.warning("Maintenance bound rejected: tool=read_memory query_chars=%s", len(query))
             raise MaintenanceRunError("MAINTENANCE_READ_LIMIT")
         await ctx.context.assert_active()
-        data = await ctx.context.read(collection, ids=ids, cursor=cursor, query=query, limit=limit)
+        data = await ctx.context.read(collection,
+            ids=[refs.decode(collection, ref) for ref in ids] if ids is not None else None,
+            cursor=refs.decode(collection, cursor) if cursor is not None else None,
+            query=query, limit=limit)
         await ctx.context.assert_active()
         if not isinstance(data, dict) or not isinstance(data.get("items"), list):
             raise MaintenanceRunError("MAINTENANCE_READ_CONTRACT")
         if len(data["items"]) > limit:
             raise MaintenanceRunError("MAINTENANCE_READ_LIMIT")
-        return data
+        return refs.progress({**data, "items": [refs.entry(collection, item) for item in data["items"]],
+                "next_cursor": refs.encode(collection, data["next_cursor"]) if data.get("next_cursor") else None})
 
     @function_tool(failure_error_function=None)
     async def search_memory(ctx: RunContextWrapper[MaintenanceContext], query: ToolQuery,
                             limit: SearchLimit = 20) -> dict:
-        """Search current-user facts by meaning and words, with related profiles/events.
+        """Search current-user Facts by meaning and words, with related Profiles/Events.
 
-        Use natural-language questions or multiple keywords to discover relevant memory,
-        including existing entries related to added statements before creating new ones.
-        Ranked results do not replace complete linked paging for deletion/evidence/time changes.
-        Results are complete current entries, already registered for version checks;
-        do not read the same entries again. Use read_memory only for additional exact
-        IDs, paging or literal text filters. Empty results need no confirmation.
-        Supporting Facts are shared once across facts/evidence; fetch missing support only if needed.
+        query accepts a natural-language question or multiple keywords. Results are
+        ranked and bounded by limit, not an exhaustive list of linked entries.
+        Complete entries are registered for use; supporting Facts are shared once
+        across facts/evidence. A referenced ID alone is not a returned Fact body.
+        Use read_memory for missing exact references or additional paged/literal reads.
         """
         if not query.strip() or len(query) > 500 or not 1 <= limit <= MAX_SEARCH_RESULTS:
             LOG.warning("Maintenance bound rejected: tool=search_memory limit=%s query_chars=%s", limit, len(query))
@@ -466,49 +540,62 @@ def _maintenance_tools():
             raise MaintenanceRunError("MAINTENANCE_READ_CONTRACT")
         if any(not isinstance(items, list) or len(items) > limit for items in data.values()):
             raise MaintenanceRunError("MAINTENANCE_READ_LIMIT")
-        return data
+        return {kind: [refs.entry(kind, item) for item in items] for kind, items in data.items()}
 
     @function_tool(failure_error_function=None)
     async def stage_profile(ctx: RunContextWrapper[MaintenanceContext],
-                            changes: list[ProfileUpsert | RemoveMemory]) -> dict:
-        """Stage supported profile updates/removals in a byte-bounded batch; commit both collections together."""
+                            changes: list[ProfileUpsert | MemoryDecision]) -> dict:
+        """Stage updates, removals or explicit keep decisions; commit both collections together.
+        Keep preserves an already read entry unchanged; all original support must remain valid and be read.
+        remaining_review reports outstanding mandatory decisions across both collections, not commit success.
+        Text fields are user-facing prose; internal references belong only in id/fact_ids.
+        """
         if not 1 <= len(changes) <= MAX_PAGE_SIZE or json_size([change.model_dump() for change in changes]) > MAX_TOOL_BYTES:
             raise MaintenanceRunError("MAINTENANCE_CHANGE_LIMIT")
+        if any(change.action == "upsert" and change.topic not in ctx.context.allowed_topics for change in changes):
+            raise MaintenanceRunError("MAINTENANCE_PROFILE_TOPIC")
+        changes = [refs.mutation("profiles", change) for change in changes]
         async with write_targets("profiles", changes):
             await ctx.context.assert_active()
-            if any(change.action == "upsert" and change.topic not in ctx.context.allowed_topics for change in changes):
-                raise MaintenanceRunError("MAINTENANCE_PROFILE_TOPIC")
-            result = await ctx.context.stage_batch([ProfileMutation(**change.model_dump()) for change in changes], "profile")
+            result = await ctx.context.stage_batch(changes, "profile")
             await ctx.context.assert_active()
-            return result
+            return refs.staged("profiles", result)
 
     @function_tool(failure_error_function=None)
     async def stage_event(ctx: RunContextWrapper[MaintenanceContext],
-                          changes: list[EventUpsert | RemoveMemory]) -> dict:
-        """Stage supported event updates/removals in a byte-bounded batch; commit both collections together."""
+                          changes: list[EventUpsert | MemoryDecision]) -> dict:
+        """Stage updates, removals or explicit keep decisions; commit both collections together.
+        Keep preserves an already read entry unchanged; all original support must remain valid and be read.
+        remaining_review reports outstanding mandatory decisions across both collections, not commit success.
+        Text fields are user-facing prose; internal references belong only in id/fact_ids.
+        """
         if not 1 <= len(changes) <= MAX_PAGE_SIZE or json_size([change.model_dump() for change in changes]) > MAX_TOOL_BYTES:
             raise MaintenanceRunError("MAINTENANCE_CHANGE_LIMIT")
+        changes = [refs.mutation("events", change) for change in changes]
         async with write_targets("events", changes):
             await ctx.context.assert_active()
-            changes = [EventMutation(**change.model_dump()) for change in changes]
             allowed_tags = {definition["name"] for definition in ctx.context.event_tag_definitions}
             if any(tag.tag not in allowed_tags for change in changes for tag in change.event_tags):
                 raise MaintenanceRunError("MAINTENANCE_EVENT_TAG")
             result = await ctx.context.stage_batch(changes, "event")
             await ctx.context.assert_active()
-            return result
+            return refs.staged("events", result)
 
     @function_tool(failure_error_function=None)
     async def read_changes(ctx: RunContextWrapper[MaintenanceContext],
                            cursor: str | None = None, limit: PageLimit = 100) -> dict:
-        """Read fixed Fact changes with current facts (null means absent/deleted); follow every next_cursor before finishing."""
+        """Continue the initial maintenance_batch page using its next_cursor.
+
+        Return fixed Fact changes with current facts (null means absent/deleted).
+        Follow every next_cursor before finishing; do not reread the initial page.
+        """
         if not 1 <= limit <= MAX_PAGE_SIZE:
             LOG.warning("Maintenance bound rejected: tool=read_changes limit=%s", limit)
             raise MaintenanceRunError("MAINTENANCE_READ_LIMIT")
         await ctx.context.assert_active()
         result = await ctx.context.read_changes(cursor=cursor, limit=limit)
         await ctx.context.assert_active()
-        return result
+        return refs.change_page(result)
 
     return [read_changes, read_memory, search_memory, stage_profile, stage_event]
 
@@ -558,15 +645,23 @@ async def run_loop(context: MaintenanceContext) -> LoopPlan:
     # recovery reads current database state instead of resuming an old model chain.
     cache_supported = supports_prompt_cache_options(context.llm_model)
     LOG.info("Prompt cache contract: kind=agent_loop enabled=%s", cache_supported)
-    # Instructions are sent every round; only dynamic data enters the stored chain.
-    request = [developer_data("project_context", {
-        "profile_topics": context.profile_topics, "event_tag_definitions": context.event_tag_definitions,
-        "language": context.language, "reference_time": reference_time}, cache=cache_supported),
-        developer_data("maintenance_batch", {"through_version": context.through_version,
-            "blob_count": context.blob_count, "change_count": len(context.changes)})]
     try:
         async with asyncio.timeout(MAX_SECONDS):
             await context.assert_active()
+            # Reuse the bounded read path so initial data has the same coverage and
+            # commit checks as tool reads. One mapping spans both, without renumbering.
+            refs = _LoopReferences()
+            first_page = await context.read_changes(limit=MAX_PAGE_SIZE)
+            await context.assert_active()
+            # Instructions are sent every round; only dynamic data enters the stored chain.
+            request = [developer_data("project_context", {
+                "profile_topics": context.profile_topics, "event_tag_definitions": context.event_tag_definitions,
+                "language": context.language, "reference_time": reference_time}),
+                developer_data("maintenance_batch", {"change_count": len(context.changes),
+                    **refs.change_page(first_page)})]
+            if cache_supported:
+                # Preserve the shared prefix before changing batch data, without copying instructions.
+                request[0]["content"][0]["prompt_cache_breakpoint"] = {"mode": "explicit"}
             agent = Agent[MaintenanceContext](
                 name="Memoia memory maintenance",
                 instructions=MAINTENANCE_INSTRUCTIONS,
@@ -577,13 +672,12 @@ async def run_loop(context: MaintenanceContext) -> LoopPlan:
                                              retry=ModelRetrySettings(max_retries=1,
                                                  policy=retry_policies.provider_suggested()),
                                              store=True, truncation="disabled",
+                                             # Prevent SDK per-run key generation; omit the field on the wire.
+                                             extra_args={"prompt_cache_key": omit},
                                              prompt_cache_options=({"mode": "implicit", "ttl": "30m"}
                                                  if cache_supported else None),
-                                             extra_args=({"prompt_cache_key": loop_cache_key(
-                                                 context.project_id, context.user_id, str(context.operation_id))}
-                                                 if cache_supported else None),
                                              context_management=[{"type": "compaction", "compact_threshold": COMPACT_THRESHOLD}]),
-                tools=_maintenance_tools(),
+                tools=_maintenance_tools(refs),
             )
             await Runner.run(agent, request, context=context, max_turns=None,
                              auto_previous_response_id=True,

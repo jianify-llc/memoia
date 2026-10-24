@@ -361,14 +361,14 @@ async def test_apply_plan_reads_targets_support_and_tombstones_in_batches(search
     maintenance.flush(uid, "__root__", "apply-batches")
     counts = {}
     original_apply = maintenance._apply_plan
-    def apply(session, claim, plan, kind, embeddings):
+    def apply(session, claim, plan, kind, embeddings, impact):
         queries = []
         def record(_conn, _cursor, statement, *_):
             if statement.lstrip().upper().startswith("SELECT"):
                 queries.append(statement)
         sql_events.listen(connectors.DB_ENGINE, "before_cursor_execute", record)
         try:
-            result = original_apply(session, claim, plan, kind, embeddings)
+            result = original_apply(session, claim, plan, kind, embeddings, impact)
             counts[kind] = len(queries)
             return result
         finally:

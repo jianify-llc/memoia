@@ -1,7 +1,7 @@
 """Independent, pre-filtered read pools. No writes, mixed-bundle slicing or model routing."""
 import asyncio
 from uuid import UUID
-from sqlalchemy import select, func, literal_column, or_, exists, and_
+from sqlalchemy import select, func, literal_column, or_, exists, and_, cast, String
 from ..connectors import Session, run_sql
 from ..env import CONFIG
 from ..models.database import UserEvent, UserProfile
@@ -10,6 +10,7 @@ from ..models.query import QueriedFacts, QueriedEvents, QueriedProfiles, Queried
 from ..utils import get_encoded_tokens
 from .event import get_embedding, QUERY_EMBEDDING_TIMEOUT_SECONDS, facts_evidence, event_views
 from .source import SourceError
+from .maintenance import pending_derived_fact_ids
 
 
 def _period(column, body):
@@ -89,7 +90,7 @@ def _complete_response(model, field, candidates, body):
 
 async def query_facts(user_id, project_id, body):
     pool = select(facts.c.id).join(blobs, facts.c.blob_id == blobs.c.id).where(facts.c.user_id == user_id,
-        facts.c.project_id == project_id, *_identity(facts.c.id, body), *_period(facts.c.event_time, body))
+        facts.c.project_id == project_id, *_identity(facts.c.id, body), *_period(facts.c.fact_time, body))
     if body.source_ids:
         pool = pool.where(blobs.c.source_id.in_(body.source_ids))
     if body.recorded_after is not None:
@@ -100,6 +101,7 @@ async def query_facts(user_id, project_id, body):
                           facts.c.occurred_at, facts.c.embedding, project_id, body)
     def read():
         with Session() as session:
+            session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
             def candidates():
                 for start in range(0, len(ranking), 20):
                     page = ranking[start:start + 20]
@@ -110,7 +112,8 @@ async def query_facts(user_id, project_id, body):
                     for ident, score in page:
                         if ident in rows:
                             yield SearchFact(id=ident, content=rows[ident]["content"], source_id=rows[ident]["source_id"],
-                                blob_id=rows[ident]["blob_id"], score=score, occurred_at=rows[ident]["occurred_at"], evidence=evidence[ident])
+                                blob_id=rows[ident]["blob_id"], score=score, occurred_at=rows[ident]["occurred_at"],
+                                created_at=rows[ident]["created_at"], updated_at=rows[ident]["updated_at"], evidence=evidence[ident])
             return _complete_response(QueriedFacts, "facts", candidates(), body)
     return await run_sql(read)
 
@@ -123,10 +126,14 @@ async def query_events(user_id, project_id, body):
     if body.created_before is not None:
         pool = pool.where(UserEvent.created_at <= body.created_before)
     if body.fact_ids or body.event_after is not None or body.event_before is not None:
+        candidate_ids = list(map(str, body.fact_ids)) if body.fact_ids else select(cast(facts.c.id, String)).where(
+            facts.c.user_id == user_id, facts.c.project_id == project_id,
+            *_period(facts.c.fact_time, body)).correlate(None)
         related = select(edges.c.fact_id).join(facts, and_(edges.c.fact_id == facts.c.id,
             edges.c.user_id == facts.c.user_id, edges.c.project_id == facts.c.project_id)).where(
             edges.c.event_id == UserEvent.id, edges.c.user_id == user_id, edges.c.project_id == project_id,
-            *_period(facts.c.event_time, body))
+            *_period(facts.c.fact_time, body),
+            cast(facts.c.id, String).notin_(pending_derived_fact_ids(user_id, project_id, candidate_ids)))
         if body.fact_ids:
             related = related.where(facts.c.id.in_(body.fact_ids))
         pool = pool.where(exists(related))
@@ -134,6 +141,7 @@ async def query_events(user_id, project_id, body):
     ranking = await _rank(pool, UserEvent.id, content, UserEvent.created_at, UserEvent.embedding, project_id, body)
     def read():
         with Session() as session:
+            session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
             def candidates():
                 # Hydrate only small ranked pages. The budget consumer stops the
                 # generator when full, or skips an oversized *complete* entry.
@@ -142,8 +150,7 @@ async def query_events(user_id, project_id, body):
                     rows = {row.id: row for row in session.scalars(select(UserEvent).where(
                         UserEvent.id.in_(pool.where(UserEvent.id.in_([ident for ident, _ in page]))),
                         UserEvent.user_id == user_id, UserEvent.project_id == project_id))}
-                    views = event_views(session, rows.values(), user_id=user_id, project_id=project_id,
-                                        include_fact_links=True)
+                    views = event_views(session, rows.values(), user_id=user_id, project_id=project_id)
                     for ident, score in page:
                         if ident in rows:
                             row = rows[ident]
@@ -164,6 +171,7 @@ async def query_profiles(user_id, project_id, body):
     ranking = await _rank(pool, UserProfile.id, content, UserProfile.updated_at, None, project_id, body)
     def read():
         with Session() as session:
+            session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
             def candidates():
                 for start in range(0, len(ranking), 20):
                     page = ranking[start:start + 20]
@@ -181,7 +189,9 @@ async def query_profiles(user_id, project_id, body):
                     all_refs = set().union(*refs.values())
                     valid = dict(session.execute(select(facts.c.id, blobs.c.source_id).join(blobs, facts.c.blob_id == blobs.c.id)
                         .where(facts.c.id.in_(all_refs), facts.c.user_id == user_id,
-                               facts.c.project_id == project_id)).all()) if all_refs else {}
+                               facts.c.project_id == project_id,
+                               cast(facts.c.id, String).notin_(pending_derived_fact_ids(
+                                   user_id, project_id, list(map(str, all_refs)))))).all()) if all_refs else {}
                     for ident, score in page:
                         if ident not in rows:
                             continue

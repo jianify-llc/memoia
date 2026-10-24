@@ -13,7 +13,7 @@ from memoia_server.controllers import maintenance, source
 from memoia_server.controllers.source import SourceError
 from memoia_server.models.database import User, UserProfile, UserEvent
 from memoia_server.models.source import (memory_operations as operations, memory_blobs as blobs,
-    memory_sources, memory_messages, memory_facts, FlushInput, DeleteMessages)
+    memory_sources, memory_messages, memory_facts, FlushInput, DeleteMessages, UpdateFact)
 from memoia_server.maintenance_agent import ProfileMutation, EventMutation, LoopUsage, MaintenanceRunError, run_loop
 from tests.maintenance_support import derive, claim_for
 from tests.test_maintenance_agent import transport, completion, tool, http_failure
@@ -170,19 +170,20 @@ async def test_new_input_during_run_is_not_acknowledged(source_user):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("removed", [False, True], ids=["current-support", "deleted-support"])
 @pytest.mark.parametrize("support_error", [False, True], ids=["valid-support", "corrected-support"])
-async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(source_user, removed, support_error):
+@pytest.mark.parametrize("change_kind", ["evidence", "updated"])
+async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(source_user, removed, support_error, change_kind):
     bid, fid = batch(source_user)
     old = maintenance.flush(source_user, "__root__", "old")
     claim = claim_for(source_user)
     maintenance.fail_claim(claim, SourceError("invalid_model_output", "safe", 502, False))
     assert row(old.operation_id)["attempts"] == 1
-    # A newer deletion changes surviving evidence time, not the stored statement.
-    # Old recovery must use that current Fact metadata rather than its old batch.
+    # Recovery reads today's Fact even when the old sealed batch still says added.
     current_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    current_content = "Supported fact corrected" if change_kind == "updated" else "Supported fact 1"
     with Session.begin() as session:
         session.execute(update(memory_facts).where(memory_facts.c.id == fid).values(
-            occurred_at=current_time, revision=2))
-    newer, _ = batch(source_user, 2, fact=False, changes=[{"kind": "evidence", "fact_id": str(fid)}])
+            content=current_content, occurred_at=current_time, revision=2))
+    newer, _ = batch(source_user, 2, fact=False, changes=[{"kind": change_kind, "fact_id": str(fid)}])
     new = maintenance.flush(source_user, "__root__", "new")
     assert await maintenance.execute_claim(claim_for(source_user), runner=derive())
     assert row(new.operation_id)["status"] == "completed"
@@ -215,6 +216,7 @@ async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(so
             await context.stage_event(EventMutation(action="remove", id=str(event_id)))
             return context.get_plan(LoopUsage())
         assert datetime.fromisoformat(page["items"][0]["current_fact"]["occurred_at"]) == current_time
+        assert page["items"][0]["current_fact"]["content"] == current_content
         found = await context.search("Supported fact")
         assert [item["id"] for item in found["profiles"]] == [str(profile_id)]
         assert [item["id"] for item in found["events"]] == [str(event_id)]
@@ -228,7 +230,7 @@ async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(so
             content=found["profiles"][0]["content"], topic=context.allowed_topics[0],
             sub_topic="fixture", fact_ids=[str(fid)]))
         await context.stage_event(EventMutation(action="upsert", id=str(event_id),
-            content=found["events"][0]["content"], time=found["events"][0]["time"], fact_ids=[str(fid)]))
+            content=found["events"][0]["content"], event_time=found["events"][0]["event_time"], fact_ids=[str(fid)]))
         return context.get_plan(LoopUsage())
 
     maintenance.retry_flush(source_user, "__root__", old.operation_id)
@@ -241,11 +243,110 @@ async def test_old_failed_new_completed_then_old_recovery_reads_current_facts(so
             assert session.query(UserEvent).filter_by(user_id=source_user).count() == 0
             assert session.scalar(select(memory_facts.c.id).where(memory_facts.c.id == fid)) is None
             return
-        assert list(session.scalars(select(UserProfile.content).where(UserProfile.user_id == source_user))) == ["Supported fact 1"]
+        assert list(session.scalars(select(UserProfile.content).where(UserProfile.user_id == source_user))) == [current_content]
         assert session.scalar(select(UserProfile.id).where(UserProfile.user_id == source_user)) == profile_id
         assert session.query(UserEvent).filter_by(user_id=source_user).count() == 1
         assert session.scalar(select(UserEvent.id).where(UserEvent.user_id == source_user)) == event_id
-        assert session.scalar(select(UserEvent.event_data).where(UserEvent.user_id == source_user))["time"] == current_time.isoformat()
+        assert session.scalar(select(UserEvent.event_data).where(UserEvent.user_id == source_user))["event_time"] == current_time.isoformat()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["profile", "event"])
+async def test_deleted_support_rejects_whole_batch_and_cannot_commit_unresolved_plan(source_user, kind):
+    _, valid = batch(source_user)
+    deleted = uuid4()
+    batch(source_user, 2, fact=False, changes=[{"kind": "deleted", "fact_id": str(deleted)}])
+    operation = maintenance.flush(source_user, "__root__", "deleted-support-unresolved")
+    factory = ProfileMutation if kind == "profile" else EventMutation
+    async def runner(context):
+        await context.read_changes()
+        fields = dict(topic=context.allowed_topics[0], sub_topic="fixture") if kind == "profile" else {}
+        good = factory(action="upsert", content="Supported memory", fact_ids=[str(valid)], **fields)
+        bad = factory(action="upsert", content="Unsupported memory", fact_ids=[str(deleted)], **fields)
+        rejected = await context.stage_batch([good, bad], kind)
+        assert rejected["staged"] is False
+        assert rejected["error"] == {"code": "maintenance_support_invalid",
+                                     "unread_fact_ids": [], "invalid_fact_ids": [str(deleted)]}
+        assert context._staged == {"profiles": {}, "events": {}}
+        return context.get_plan(LoopUsage())
+    assert not await maintenance.execute_claim(claim_for(source_user), runner=runner)
+    assert row(operation.operation_id)["error"]["code"] == "maintenance_unresolved_staging"
+    with Session() as session:
+        assert session.query(UserProfile).filter_by(user_id=source_user).count() == 0
+        assert session.query(UserEvent).filter_by(user_id=source_user).count() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deleted", [False, True], ids=["edit-background", "delete-background"])
+async def test_event_background_support_locates_rewrite_and_fences_old_loop(source_user, deleted):
+    _, main_fact = batch(source_user)
+    background_blob, background_fact = batch(source_user, 2)
+    with Session.begin() as session:
+        session.execute(update(memory_facts).where(memory_facts.c.id == main_fact)
+                        .values(content="The user performed at a charity concert."))
+        session.execute(update(memory_facts).where(memory_facts.c.id == background_fact)
+                        .values(content="The user sings alto."))
+    maintenance.flush(source_user, "__root__", "with-background")
+    async def create(context):
+        await context.read_changes()
+        await context.stage_event(EventMutation(action="upsert",
+            content="The user performed at a charity concert.", summary="The alto singer performed.",
+            keywords="charity concert, alto", fact_ids=[str(main_fact), str(background_fact)]))
+        return context.get_plan(LoopUsage())
+    assert await maintenance.execute_claim(claim_for(source_user), runner=create)
+    with Session() as session:
+        event = session.query(UserEvent).filter_by(user_id=source_user).one()
+        event_id, original_data = str(event.id), dict(event.event_data)
+        sid = session.scalar(select(blobs.c.source_id).where(blobs.c.id == background_blob))
+        revision = session.scalar(select(memory_facts.c.revision).where(memory_facts.c.id == background_fact))
+
+    batch(source_user, 3, fact=False, changes=[{"kind": "evidence", "fact_id": str(main_fact)}])
+    old = maintenance.flush(source_user, "__root__", "before-background-change")
+    async def stale(context):
+        await context.read_changes()
+        entry = (await context.read("events"))["items"][0]
+        await context.stage_event(EventMutation(action="upsert", id=event_id,
+            content=entry["content"], summary="Old background must not be committed.",
+            keywords=entry["keywords"], fact_ids=entry["fact_ids"]))
+        if deleted:
+            await source.delete_messages(source_user, "__root__", sid,
+                DeleteMessages(idempotency_key="remove-background", message_ids=["m1"]))
+        else:
+            await source.update_fact(source_user, "__root__", background_fact,
+                UpdateFact(idempotency_key="edit-background", expected_revision=revision,
+                    reason="Correct the voice part", content="The user sings soprano.",
+                    subject="the user", reporter="the user", certainty="asserted",
+                    support_groups=[["m1"]], fact_time=None))
+        return context.get_plan(LoopUsage())
+    assert not await maintenance.execute_claim(claim_for(source_user), runner=stale)
+    assert row(old.operation_id)["error"]["code"] == "maintenance_read_conflict"
+    with Session() as session:
+        assert session.scalar(select(UserEvent.event_data).where(UserEvent.id == event_id)) == original_data
+
+    updated = maintenance.flush(source_user, "__root__", "after-background-change")
+    async def rewrite(context):
+        await context.read_changes()
+        # The changed Fact only appeared in summary/keywords, never in content.
+        linked = await context.read("events")
+        assert [entry["id"] for entry in linked["items"]] == [event_id]
+        entry = linked["items"][0]
+        assert entry.get("pending_delete", False) is False
+        assert entry["invalid_fact_ids"] == ([str(background_fact)] if deleted else [])
+        await context.stage_event(EventMutation(action="upsert", id=event_id,
+            content=entry["content"], summary="The user performed." if deleted else "The soprano singer performed.",
+            keywords="charity concert" if deleted else "charity concert, soprano",
+            fact_ids=entry["fact_ids"]))
+        return context.get_plan(LoopUsage())
+    claim = claim_for(source_user)
+    assert claim.operation_id == updated.operation_id
+    assert await maintenance.execute_claim(claim, runner=rewrite)
+    with Session() as session:
+        data = session.scalar(select(UserEvent.event_data).where(UserEvent.id == event_id))
+        assert data["content"] == original_data["content"]
+        assert set(data["fact_ids"]) == ({str(main_fact)} if deleted else {str(main_fact), str(background_fact)})
+        assert "alto" not in data["summary"] + data["keywords"]
+        assert ("soprano" in data["keywords"]) is not deleted
+        assert session.scalar(select(memory_facts.c.id).where(memory_facts.c.id == main_fact)) == main_fact
 
 
 @pytest.mark.asyncio
@@ -264,7 +365,10 @@ async def test_four_attempts_backoff_and_new_batch_cannot_reset_old_budget(sourc
         assert failed["lease_owner"] is None
         assert failed["status"] == ("processing" if attempt < 4 else "failed")
         if attempt < 4:
-            remaining = (failed["available_at"] - datetime.now(timezone.utc)).total_seconds()
+            # Scheduling uses PostgreSQL time; a Docker host can have clock skew.
+            with Session() as session:
+                now = session.scalar(select(func.clock_timestamp()))
+            remaining = (failed["available_at"] - now).total_seconds()
             assert maintenance.RETRY_SECONDS[attempt - 1] - 5 <= remaining <= maintenance.RETRY_SECONDS[attempt - 1]
     batch(source_user, 2)
     new = maintenance.flush(source_user, "__root__", "after-exhaust")
@@ -289,7 +393,7 @@ async def test_parent_loss_recovers_original_operation_without_stale_staged_writ
             completion(None, calls=[tool("stage_profile", {"changes": [{
                 "action": "upsert", "id": None, "topic": context.allowed_topics[0],
                 "sub_topic": "fixture", "content": "Never commit this failed draft",
-                "fact_ids": [str(fid)]}]}, "stage-1")], response_id="resp-stage"),
+                "fact_ids": ["f1"]}]}, "stage-1")], response_id="resp-stage"),
             http_failure(400, code="previous_response_not_found", param="previous_response_id"),
         ]
         return await run_loop(context)
@@ -327,7 +431,7 @@ async def test_parent_loss_recovers_original_operation_without_stale_staged_writ
     assert await maintenance.execute_claim(recovered)
     restarted, continued = transport["requests"][restart_index:]
     assert "previous_response_id" not in restarted
-    assert restarted["prompt_cache_key"] == transport["requests"][0]["prompt_cache_key"]
+    assert all("prompt_cache_key" not in body for body in transport["requests"])
     assert continued["previous_response_id"] == "resp-new"
     # The pinned Agents SDK serializes dict tool results with str(), not JSON.
     changes = ast.literal_eval(continued["input"][0]["output"])["items"]
@@ -391,16 +495,17 @@ async def test_unified_atomic_commit_rolls_back_profile_if_event_apply_fails(sou
     maintenance.flush(source_user, "__root__", "atomic")
     claim = claim_for(source_user)
     apply = maintenance._apply_plan
-    def fail_event(session, claim, plan, kind, event_embeddings):
+    def fail_event(session, claim, plan, kind, event_embeddings, impact):
         if kind == "event":
             raise SourceError("test_event_failure", "safe", 502, True)
-        apply(session, claim, plan, kind, event_embeddings)
+        apply(session, claim, plan, kind, event_embeddings, impact)
     monkeypatch.setattr(maintenance, "_apply_plan", fail_event)
     assert not await maintenance.execute_claim(claim, runner=derive())
     with Session() as session:
         assert session.query(UserProfile).filter_by(user_id=source_user).count() == 0
         assert session.query(UserEvent).filter_by(user_id=source_user).count() == 0
     assert row(claim.operation_id)["status"] == "processing"
+    assert row(claim.operation_id)["error"] == {"code": "test_event_failure", "retryable": True}
 
 
 @pytest.mark.asyncio

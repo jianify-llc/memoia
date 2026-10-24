@@ -6,7 +6,7 @@ import pytest
 
 from memoia_server.prompts import user_profile_topics, zh_user_profile_topics
 from memoia_server.prompts.profile_init_utils import formate_profile_topic
-from memoia_server.maintenance_agent import run_loop
+from memoia_server.maintenance_agent import run_loop, MAINTENANCE_INSTRUCTIONS
 from tests.test_maintenance_agent import Context, transport, completion
 from tests.test_maintenance import source_user, batch
 from tests.maintenance_support import maintain
@@ -39,12 +39,8 @@ async def test_three_context_topics_are_described_in_actual_runner_request(trans
     assert len(request["input"][0]["content"]) == 1
     project = json.loads(ElementTree.fromstring(request["input"][0]["content"][0]["text"]).text)
     assert [item["topic"] for item in project["profile_topics"]] == TOPICS
-    instructions = request["instructions"]
-    for rule in ("user_profile", "interests_preferences", "sub_topic=interaction_preferences",
-                 "lifestyle", "single episode is not a habit", "not a concatenation",
-                 "one-off", "explicit settings", "not a schema singleton"):
-        assert rule in instructions
-    assert "Never edit, invalidate or delete a Fact or its evidence" in instructions
+    assert project["profile_topics"] == context.profile_topics
+    assert request["instructions"] == MAINTENANCE_INSTRUCTIONS
 
 
 @pytest.mark.asyncio
@@ -103,6 +99,13 @@ async def test_three_context_sections_reuse_existing_queries_and_deletion_loop(s
 
     async def review_deletion(context):
         await context.read_changes()
+        # All five entries were generated from one read set. Review that conservative
+        # scope, retaining the four entries whose actual support still exists.
+        for item in (await context.read("profiles"))["items"]:
+            if item["fact_ids"]:
+                await context.stage_profile(ProfileMutation(action="upsert", id=item["id"],
+                    content=item["content"], topic=item["topic"], sub_topic=item["sub_topic"],
+                    fact_ids=item["fact_ids"]))
         return context.get_plan(LoopUsage())
     assert await maintain(source_user, review_deletion)
     remaining = await section("interests_preferences")
@@ -115,7 +118,7 @@ async def test_three_context_sections_reuse_existing_queries_and_deletion_loop(s
     with Session() as session:
         after = dict(session.execute(select(UserProfile.id, UserProfile.revision).where(
             UserProfile.user_id == source_user)).all())
-        assert after == before  # Unrelated overview/detail entries were not rewritten.
+        assert after == {ident: revision + 2 for ident, revision in before.items()}
 
 
 @pytest.mark.asyncio

@@ -8,14 +8,15 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, and_, delete, func, or_, select, update, exists
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import JSON, and_, column, delete, func, or_, select, true, union, update, exists
+from sqlalchemy.dialects.postgresql import JSONB, insert
 
 from ..connectors import Session, run_sql
 from ..models.source import memory_operations as operations, memory_blobs as blobs
 from ..models.database import User
 from ..utils import json_size as payload_size
 from .source import SourceError, _scope, _hash, assert_user_active, lock_user_identity
+from .derived_impact import IMPACT_KEY, affected, public_data
 
 QUIET_SECONDS = 30
 MAX_WAIT_SECONDS = 120
@@ -36,11 +37,49 @@ def record_changes(session, user_id, project_id, blob_id, version, changes):
     ])).rowcount
     if updated != 1:
         raise SourceError("blob_conflict", "Fixed Fact batch was already completed", 409, True)
+    changed_ids = {_uuid(change["fact_id"]) for change in (changes or [])
+                   if change.get("fact_id") and change["kind"] != "added"}
+    if changed_ids:
+        from ..models.database import UserProfile, UserEvent
+        # Invalidate readers of derived text as well as direct Fact readers. The
+        # text may remain visible until flush, but old computations cannot commit.
+        for collection, table in (("profiles", UserProfile.__table__), ("events", UserEvent.__table__)):
+            session.execute(update(table).where(_scope(table, user_id, project_id),
+                _associated_entries(table, collection, user_id, project_id, changed_ids,
+                                    include_unknown=True))
+                .values(revision=table.c.revision + 1, updated_at=table.c.updated_at))
 
 
 def _unassigned(user_id, project_id):
     return and_(_scope(blobs, user_id, project_id), blobs.c.fact_completed_at.is_not(None),
                 blobs.c.flush_operation_id.is_(None))
+
+
+def pending_derived_fact_ids(user_id, project_id, fact_ids):
+    """Scoped SQL IDs whose old derived links await a successful flush.
+
+    Callers supply only their candidate IDs (strings, or a scoped SQL select).
+    Navigation links and direct Fact reads remain independent of this public proof filter.
+    """
+    blob_change = func.jsonb_array_elements(blobs.c.fact_changes).table_valued(
+        column("value", JSONB)).alias("blob_change")
+    legacy_change = func.jsonb_array_elements(operations.c.request["legacy_changes"]).table_valued(
+        column("value", JSONB)).alias("legacy_change")
+    unfinished = select(operations.c.id).where(
+        _scope(operations, user_id, project_id), operations.c.kind == "flush",
+        operations.c.status != "completed")
+    blob_ids = select(blob_change.c.value["fact_id"].astext).select_from(blobs.join(blob_change, true())).where(
+        _scope(blobs, user_id, project_id), blobs.c.fact_completed_at.is_not(None),
+        or_(blobs.c.flush_operation_id.is_(None), blobs.c.flush_operation_id.in_(unfinished)),
+        blob_change.c.value["kind"].astext.in_(["updated", "evidence", "deleted"]),
+        blob_change.c.value["fact_id"].astext.in_(fact_ids))
+    legacy_ids = select(legacy_change.c.value["fact_id"].astext).select_from(
+        operations.join(legacy_change, true())).where(
+        _scope(operations, user_id, project_id), operations.c.kind == "flush",
+        operations.c.status != "completed",
+        legacy_change.c.value["kind"].astext.in_(["updated", "evidence", "deleted"]),
+        legacy_change.c.value["fact_id"].astext.in_(fact_ids))
+    return union(blob_ids, legacy_ids)
 
 
 def _change_facts(session, user_id, project_id, changes):
@@ -51,7 +90,8 @@ def _change_facts(session, user_id, project_id, changes):
     return {row.id: dict(row) for row in session.execute(select(
         memory_facts.c.id, memory_facts.c.content, memory_facts.c.subject,
         memory_facts.c.reporter, memory_facts.c.certainty, memory_facts.c.support_groups,
-        memory_facts.c.occurred_at, memory_facts.c.event_time,
+        memory_facts.c.occurred_at, memory_facts.c.fact_time,
+        memory_facts.c.created_at, memory_facts.c.updated_at,
     ).where(_scope(memory_facts, user_id, project_id), memory_facts.c.id.in_(fact_ids))).mappings()}
 
 
@@ -89,7 +129,8 @@ def _seal(session, user_id, project_id, key):
     result = None if batch_ids else {"blob_ids": [], "profile_ids": [], "event_ids": []}
     session.execute(insert(operations).values(
         id=ident, user_id=user_id, project_id=project_id, idempotency_key=key,
-        kind="flush", request_hash=request_hash, request={"blob_ids": list(map(str, batch_ids))},
+        kind="flush", request_hash=request_hash,
+        request={"blob_ids": list(map(str, batch_ids))},
         source_id=None, blob_id=None,
         status="failed" if oversized else "processing" if batch_ids else "completed",
         error={"code": "maintenance_capacity", "retryable": False} if oversized else None,
@@ -398,14 +439,14 @@ class DBMaintenanceContext:
         self.claim, self.lease = claim, lease
         self.operation_id = claim.operation_id
         self.user_id, self.project_id = claim.user_id, claim.project_id
-        self.through_version, self.changes = claim.through_version, claim.changes
-        self.blob_count = len(claim.blob_ids)
-        with Session() as session:
+        self.changes = claim.changes
+        with Session.begin() as session:
             # Recovery reads current Facts, so a formerly small batch may have
             # grown. Keep the sealed identity, but reject unbounded model work.
             if _change_size(self.changes, _change_facts(session, self.user_id, self.project_id, self.changes)) > MAX_FLUSH_BYTES:
                 raise SourceError("maintenance_capacity", "Fixed Blob changes exceed the flush budget", 413)
             rules = _project_rules(session, self.project_id)
+            assert_claim(session, claim)
         self.profile_topics = rules["profile_topics"]
         self.allowed_topics = [topic["topic"] for topic in self.profile_topics]
         self.event_tag_definitions = rules["event_tag_definitions"] or []
@@ -413,14 +454,16 @@ class DBMaintenanceContext:
         self.llm_model = rules["llm_model"]
         self.reasoning_effort = rules["reasoning_effort"]
         self.readset = {"facts": {}, "profiles": {}, "events": {}}
+        self._derived_reads = {"profiles": set(), "events": set()}
+        self._review_required = {"profiles": set(), "events": set()}
         self._staged = {"profiles": {}, "events": {}}
-        self._unresolved_staging = set()
+        self._unresolved_staging = {}
         self._seen_changes = set()
-        self._prepare_unsupported()
+        self._prepare_affected()
+        self._review_progress_bytes = payload_size(self._remaining_review(include_resolved=True)) + 32
 
-    def _prepare_unsupported(self):
+    def _prepare_affected(self):
         from ..models.database import UserProfile, UserEvent
-        from ..models.source import memory_facts, memory_event_facts
         from ..maintenance_agent import ProfileMutation, EventMutation
         changed_ids = {_uuid(change["fact_id"]) for change in self.changes
                        if change.get("fact_id") and change.get("kind") != "added"}
@@ -432,33 +475,39 @@ class DBMaintenanceContext:
                 ("profiles", UserProfile.__table__, ProfileMutation),
                 ("events", UserEvent.__table__, EventMutation),
             ):
-                data = table.c.attributes if collection == "profiles" else table.c.event_data
-                rows = session.execute(select(table.c.id, table.c.revision,
-                    data["fact_ids"].label("fact_ids"), data["evidence"].label("evidence"))
+                rows = session.execute(select(table.c.id, table.c.revision)
                     .where(_scope(table, self.user_id, self.project_id),
-                           _associated_entries(table, collection, self.user_id, self.project_id, changed_ids))).mappings().all()
-                links = {}
-                if collection == "events" and rows:
-                    for eid, fid in session.execute(select(memory_event_facts.c.event_id, memory_event_facts.c.fact_id)
-                        .where(_scope(memory_event_facts, self.user_id, self.project_id),
-                               memory_event_facts.c.event_id.in_([row["id"] for row in rows]))):
-                        links.setdefault(eid, set()).add(str(fid))
-                supported = {row["id"]: set(row["fact_ids"] or []) | links.get(row["id"], set()) |
-                    {proof["fact_id"] for proof in (row["evidence"] or [])
-                     if isinstance(proof, dict) and proof.get("fact_id")} for row in rows}
-                ids = {_uuid(ident) for values in supported.values() for ident in values}
-                surviving = set(map(str, session.scalars(select(memory_facts.c.id).where(
-                    _scope(memory_facts, self.user_id, self.project_id), memory_facts.c.id.in_(ids)))))
+                           _associated_entries(table, collection, self.user_id, self.project_id,
+                                               changed_ids, include_unknown=True))).mappings().all()
+                support = _entry_support(session, table, collection, self.claim, [row["id"] for row in rows])
+                if any(str(row["id"]) not in support for row in rows):
+                    raise SourceError("maintenance_read_conflict", "Memory disappeared while preparing review", 409, True)
+                known = set().union(*support.values()) if support else set()
+                from ..models.source import memory_facts
+                current = set(map(str, session.scalars(select(memory_facts.c.id).where(
+                    _scope(memory_facts, self.user_id, self.project_id),
+                    memory_facts.c.id.in_([_uuid(fid) for fid in known]))))) if known else set()
                 for row in rows:
-                    proof_ids = supported[row["id"]]
-                    # An empty legacy/manual association proves nothing. Only a
-                    # known Fact-backed entry with no surviving support is mechanical.
-                    if not proof_ids or proof_ids & surviving:
-                        continue
                     ident = str(row["id"])
                     self.readset[collection][ident] = row["revision"]
-                    self.readset["facts"].update({str(_uuid(fid)): None for fid in proof_ids})
-                    self._staged[collection][ident] = mutation(action="remove", id=ident)
+                    self._review_required[collection].add(ident)
+                    # Possible influence requires a decision, not deletion. Only
+                    # known support that has entirely disappeared is auto-removed.
+                    if support[ident] and not support[ident].intersection(current):
+                        for fid in support[ident]:
+                            self.readset["facts"][fid] = None
+                        self._staged[collection][ident] = mutation(action="remove", id=ident)
+
+    def _remaining_review(self, *, include_resolved=False):
+        # Reuse the prepared scope; optional reads do not create new obligations.
+        # Accepted decisions advance this bounded preview without a second cursor.
+        result = {}
+        for collection, required in self._review_required.items():
+            pending = set(required) if include_resolved else required - self._staged[collection].keys()
+            pending |= {ident for kind, ident in self._unresolved_staging
+                        if kind + "s" == collection and ident in required}
+            result[collection] = {"count": len(pending), "ids": sorted(pending)[:20]}
+        return result
 
     async def assert_active(self):
         await self.lease.assert_active()
@@ -497,7 +546,9 @@ class DBMaintenanceContext:
                 statement = statement.where(table.c.id.in_(changed_ids))
             else:
                 statement = statement.where(_associated_entries(
-                    table, collection, self.user_id, self.project_id, changed_ids))
+                    table, collection, self.user_id, self.project_id, changed_ids,
+                    include_unknown=any(change.get("fact_id") and change["kind"] != "added"
+                                        for change in self.changes)))
         if requested is not None:
             statement = statement.where(table.c.id.in_(requested))
         if query:
@@ -541,7 +592,7 @@ class DBMaintenanceContext:
                     data = row["event_data"] or {}
                     legacy_ids = [value["fact_id"] for value in (data.get("evidence") or [])
                                   if isinstance(value, dict) and value.get("fact_id")]
-                    item = {**data, "id": ident, "revision": row["revision"],
+                    item = {**public_data(data), "id": ident, "revision": row["revision"],
                             "fact_ids": sorted({*data.get("fact_ids", []), *legacy_ids})}
                     item.pop("evidence", None)
                 item.pop("user_id", None)
@@ -561,7 +612,7 @@ class DBMaintenanceContext:
                     # Keep its identity/text visible for navigation and rewrite,
                     # but only current Fact rows can supply positive evidence.
                     item["pending_delete"] = True
-                else:
+                elif change.action == "upsert":
                     item = {"id": ident, "revision": actual, **change.model_dump(exclude={"action", "id"})}
                     if collection == "events":
                         item["event_tip"] = change.content
@@ -590,21 +641,25 @@ class DBMaintenanceContext:
                         links.setdefault(str(eid), set()).add(str(fid))
                     for item in items:
                         change = staged.get(item["id"])
-                        if change is None or change.action == "remove":
+                        if change is None or change.action != "upsert":
                             item["fact_ids"] = sorted(set(item["fact_ids"]) | links.get(item["id"], set()))
                 mentioned = {_uuid(fid) for item in items for fid in item["fact_ids"]}
                 facts = {str(row["id"]): dict(row) for row in session.execute(select(
                     memory_facts.c.id, memory_facts.c.blob_id, memory_facts.c.content, memory_facts.c.subject,
                     memory_facts.c.reporter, memory_facts.c.certainty, memory_facts.c.support_groups,
-                    memory_facts.c.occurred_at, memory_facts.c.event_time, memory_facts.c.revision,
+                    memory_facts.c.occurred_at, memory_facts.c.fact_time, memory_facts.c.revision,
+                    memory_facts.c.created_at, memory_facts.c.updated_at,
                 ).where(_scope(memory_facts, self.user_id, self.project_id), memory_facts.c.id.in_(mentioned))).mappings()}
                 for item in items:
                     item["invalid_fact_ids"] = sorted(set(item["fact_ids"]) - facts.keys())
                     item["fact_ids"] = sorted(set(item["fact_ids"]) & facts.keys())
                     item["evidence"] = []
 
-        accepted, size = [], 96
+        # Leave room for the bounded progress preview attached on the event loop.
+        accepted, size = [], 96 + self._review_progress_bytes
         for item in items:
+            if collection != "facts":
+                item["review_required"] = item["id"] in self._review_required[collection]
             cost = payload_size(item) + 2
             if size + cost > MAX_TOOL_BYTES:
                 if not accepted:
@@ -660,12 +715,17 @@ class DBMaintenanceContext:
                for item in result["items"]):
             raise SourceError("maintenance_read_conflict", "Staged memory changed during the read", 409, True)
         self._merge_reads(reads)
-        return result
+        if collection in self._derived_reads:
+            # Reading our own replacement is not reading the original stored text.
+            self._derived_reads[collection].update(item["id"] for item in result["items"]
+                if item["id"] not in staged or staged[item["id"]].action != "upsert")
+        return {**result, "remaining_review": self._remaining_review()}
 
     async def search(self, query, *, limit=20):
         from .event import hybrid_search_user_events
         await self.assert_active()
-        result = await hybrid_search_user_events(self.user_id, self.project_id, query, limit=limit)
+        result = await hybrid_search_user_events(self.user_id, self.project_id, query, limit=limit,
+                                                include_pending_derived=True)
         if not result.ok():
             raise SourceError("maintenance_search_unavailable", "Memory search did not complete", 503,
                               result.code() in {429, 500, 502, 503, 504})
@@ -702,6 +762,9 @@ class DBMaintenanceContext:
             if (self.readset[collection][ident] is None and ident not in staged
                     and (kind, ident) not in self._unresolved_staging):
                 raise SourceError("maintenance_target_absent", "Cannot replace an absent entry with a supplied id", 502)
+            if (ident not in self._derived_reads[collection]
+                    and (change.action == "keep" or self.readset[collection][ident] is not None)):
+                raise SourceError("maintenance_target_unread", "Read the complete target before deciding its content", 502)
         if change.action == "upsert":
             if kind == "profile" and change.topic not in self.allowed_topics:
                 raise SourceError("maintenance_invalid_topic", "Profile topic is outside the configured topics", 502)
@@ -714,39 +777,75 @@ class DBMaintenanceContext:
         return set()
 
     async def stage_batch(self, changes, kind):
-        """Reject the whole batch before staging; only unread support is repairable."""
+        """Reject the whole batch before staging; keep rejected targets unresolved."""
         from ..env import LOG
         await self.assert_active()
-        unread = set().union(*(self._validate_stage(change, kind) for change in changes))
-        if unread:
+        missing = set().union(*(self._validate_stage(change, kind) for change in changes))
+        keep_ids = [_uuid(change.id) for change in changes if change.action == "keep"]
+        keep_support = {}
+        if keep_ids:
+            def read_support():
+                from ..models.database import UserProfile, UserEvent
+                table = UserProfile.__table__ if kind == "profile" else UserEvent.__table__
+                with Session() as session:
+                    return _entry_support(session, table, "profiles" if kind == "profile" else "events",
+                                          self.claim, keep_ids)
+            keep_support = await run_sql(read_support)
+            await self.assert_active()
+            missing.update(fid for support in keep_support.values() for fid in support
+                           if self.readset["facts"].get(fid) is None)
+        empty_support = any(not keep_support.get(str(ident)) for ident in keep_ids)
+        invalid = {ident for ident in missing if ident in self.readset["facts"]}
+        unread = missing - invalid
+        if missing or empty_support:
             collection = "profiles" if kind == "profile" else "events"
             ids = []
+            rejections = {}
             for change in changes:
                 ident = str(_uuid(change.id)) if change.id is not None else str(uuid4())
+                # A corrected create uses its reserved id. Compare the same target
+                # and full proposal, with read evidence, rather than its null input id.
+                proposal = change.model_dump(mode="json")
+                proposal["id"] = ident
+                proposal["fact_ids"] = sorted(proposal["fact_ids"])
+                support = [(fid, self.readset["facts"].get(fid, "unread"))
+                           for fid in sorted(keep_support.get(ident, proposal["fact_ids"]))]
+                signature = (proposal, support) if any(revision in (None, "unread")
+                                                     for _, revision in support) or (change.action == "keep" and not support) else None
+                if signature is not None and self._unresolved_staging.get((kind, ident)) == signature:
+                    raise SourceError("maintenance_staging_repeated", "Rejected change was repeated without new evidence or correction", 502)
+                if signature is not None or (kind, ident) not in rejections:
+                    rejections[(kind, ident)] = signature
+                ids.append(ident)
+            for change, ident in zip(changes, ids, strict=True):
                 if change.id is None:
                     # Reserve only a run-local identity for correcting this create;
                     # no draft or database row is saved.
                     self.readset[collection][ident] = None
-                ids.append(ident)
-                self._unresolved_staging.add((kind, ident))
-            LOG.warning("Maintenance support rejected: operation=%s kind=%s target_ids=%s unread_fact_ids=%s unread_count=%s read_fact_count=%s",
-                        self.operation_id, kind, ids[:20], sorted(unread)[:20], len(unread), len(self.readset["facts"]))
+            self._unresolved_staging.update(rejections)
+            LOG.warning("Maintenance support rejected: operation=%s kind=%s target_ids=%s unread_fact_ids=%s invalid_fact_ids=%s read_fact_count=%s",
+                        self.operation_id, kind, ids[:20], sorted(unread)[:20], sorted(invalid)[:20], len(self.readset["facts"]))
             return {"staged": False, "ids": ids,
-                    "error": {"code": "maintenance_support_unread", "unread_fact_ids": sorted(unread)}}
+                    "remaining_review": self._remaining_review(),
+                    "error": {"code": "maintenance_support_invalid" if invalid or empty_support else "maintenance_support_unread",
+                              "unread_fact_ids": sorted(unread), "invalid_fact_ids": sorted(invalid)}}
         stage = self.stage_profile if kind == "profile" else self.stage_event
-        return {"staged": True, "ids": [await stage(change) for change in changes]}
+        ids = [await stage(change) for change in changes]
+        return {"staged": True, "ids": ids, "remaining_review": self._remaining_review()}
 
     async def _stage(self, change, kind):
         await self.assert_active()
-        if self._validate_stage(change, kind):
-            raise SourceError("maintenance_support_unread", "Read valid supporting facts before staging memory", 502)
+        missing = self._validate_stage(change, kind)
+        if missing:
+            code = "maintenance_support_invalid" if any(fid in self.readset["facts"] for fid in missing) else "maintenance_support_unread"
+            raise SourceError(code, "Read valid supporting facts before staging memory", 502)
         collection = "profiles" if kind == "profile" else "events"
         ident = str(_uuid(change.id)) if change.id is not None else str(uuid4())
         if change.id is None:
             change = change.model_copy(update={"id": ident})
             self.readset[collection][ident] = None
         self._staged[collection][ident] = change
-        self._unresolved_staging.discard((kind, ident))
+        self._unresolved_staging.pop((kind, ident), None)
         return ident
 
     async def stage_profile(self, change):
@@ -767,9 +866,10 @@ class DBMaintenanceContext:
             current = {str(row["id"]): dict(row) for row in session.execute(select(
                 memory_facts.c.id, memory_facts.c.blob_id, memory_facts.c.content, memory_facts.c.subject,
                 memory_facts.c.reporter, memory_facts.c.certainty, memory_facts.c.revision,
-                memory_facts.c.support_groups, memory_facts.c.occurred_at, memory_facts.c.event_time,
+                memory_facts.c.support_groups, memory_facts.c.occurred_at, memory_facts.c.fact_time,
+                memory_facts.c.created_at, memory_facts.c.updated_at,
             ).where(_scope(memory_facts, self.user_id, self.project_id), memory_facts.c.id.in_(ids))).mappings()}
-        items, size = [], 64
+        items, size = [], 64 + self._review_progress_bytes
         for change in candidates:
             ident = str(_uuid(change["fact_id"])) if change.get("fact_id") else None
             fact = current.get(ident)
@@ -802,17 +902,20 @@ class DBMaintenanceContext:
         await self.assert_active()
         self._merge_reads({"facts": reads})
         self._seen_changes.update(range(offset, offset + len(result["items"])))
-        return result
+        return {**result, "remaining_review": self._remaining_review()}
 
     def get_plan(self, usage):
         from ..maintenance_agent import LoopPlan
         if self._unresolved_staging:
             raise SourceError("maintenance_unresolved_staging", "Rejected memory changes must be corrected before completion", 502)
+        if any(group["count"] for group in self._remaining_review().values()):
+            raise SourceError("maintenance_unresolved_entries", "Required memory decisions remain outstanding", 502)
         if any(index not in self._seen_changes for index, change in enumerate(self.changes)
                if change.get("kind") != "noop"):
             raise SourceError("maintenance_incomplete", "Not all fixed Fact changes were reviewed", 502, True)
         return LoopPlan(list(self._staged["profiles"].values()), list(self._staged["events"].values()),
-                        {key: dict(value) for key, value in self.readset.items()}, usage)
+                        {key: dict(value) for key, value in self.readset.items()}, usage,
+                        {key: set(value) for key, value in self._derived_reads.items()})
 
 
 def _verify_readset(session, claim, readset):
@@ -831,10 +934,12 @@ def _verify_readset(session, claim, readset):
                 raise SourceError("maintenance_read_conflict", "Related memory changed while the Loop was computed", 409, True)
 
 
-def _associated_entries(table, collection, user_id, project_id, fact_ids):
+def _associated_entries(table, collection, user_id, project_id, fact_ids, *, include_unknown=False):
     from ..models.source import memory_event_facts
     data = table.c.attributes if collection == "profiles" else table.c.event_data
     matches = [data.contains({"fact_ids": [str(ident)]}) for ident in fact_ids]
+    if fact_ids:
+        matches.append(affected(data, fact_ids, include_unknown=include_unknown))
     if collection == "events" and fact_ids:
         # FK cascade removes a deleted Fact's relational edge, so the previously
         # saved identity list also locates its now-stale story.
@@ -844,10 +949,28 @@ def _associated_entries(table, collection, user_id, project_id, fact_ids):
     return or_(*matches) if matches else table.c.id.in_([])
 
 
+def _entry_support(session, table, collection, claim, ids):
+    """Known support identities, including legacy JSON and surviving relation edges."""
+    from ..models.source import memory_event_facts
+    data = table.c.attributes if collection == "profiles" else table.c.event_data
+    result = {}
+    for ident, value in session.execute(select(table.c.id, data).where(
+            _scope(table, claim.user_id, claim.project_id), table.c.id.in_(ids))):
+        value = value or {}
+        result[str(ident)] = set(value.get("fact_ids") or [])
+        if collection == "events":
+            result[str(ident)].update(item["fact_id"] for item in (value.get("evidence") or [])
+                                     if isinstance(item, dict) and item.get("fact_id"))
+    if collection == "events":
+        for eid, fid in session.execute(select(memory_event_facts.c.event_id, memory_event_facts.c.fact_id).where(
+                _scope(memory_event_facts, claim.user_id, claim.project_id), memory_event_facts.c.event_id.in_(ids))):
+            result[str(eid)].add(str(fid))
+    return result
+
+
 def _verify_resolution(session, claim, plan, kind):
     from ..models.database import UserProfile, UserEvent
-    # A no-op is valid for new facts that need no derived entry. Existing entries
-    # supported by changed/deleted evidence need an explicit new conclusion.
+    # Reading is not a decision: every candidate needs keep/upsert/remove.
     changed_ids = [_uuid(change["fact_id"]) for change in claim.changes
                    if change.get("fact_id") and change.get("kind") != "added"]
     if not changed_ids:
@@ -856,17 +979,62 @@ def _verify_resolution(session, claim, plan, kind):
     table = UserProfile.__table__ if kind == "profile" else UserEvent.__table__
     affected = set(map(str, session.scalars(select(table.c.id).where(
         _scope(table, claim.user_id, claim.project_id),
-        _associated_entries(table, collection, claim.user_id, claim.project_id, changed_ids)))))
+        _associated_entries(table, collection, claim.user_id, claim.project_id, changed_ids,
+                            include_unknown=True)))))
     resolved = {str(_uuid(change.id)) for change in getattr(plan, collection)}
     if affected - resolved:
         raise SourceError("maintenance_unresolved_entries", "Changed evidence still has unreviewed derived entries", 502)
 
 
-def _apply_plan(session, claim, plan, kind, event_embeddings):
+def _plan_impact(session, claim, plan):
+    """Read original, already version-locked entries before either collection is written."""
+    from ..models.database import UserProfile, UserEvent
+    from ..models.source import memory_facts
+    impact = {ident for ident, revision in plan.readset["facts"].items() if revision is not None}
+    for collection, table, data in (("profiles", UserProfile.__table__, UserProfile.attributes),
+                                    ("events", UserEvent.__table__, UserEvent.event_data)):
+        # Automatic removal targets are version-checked, but their unread text
+        # must not contaminate the impact of newly generated entries.
+        ids = [_uuid(ident) for ident in plan.derived_reads[collection]
+               if plan.readset[collection].get(ident) is not None]
+        if not ids:
+            continue
+        for inherited in session.scalars(select(data[IMPACT_KEY]).where(
+                _scope(table, claim.user_id, claim.project_id), table.c.id.in_(ids))):
+            if inherited is None:
+                # An old incomplete association cannot become complete merely by
+                # being copied into a newly generated entry.
+                return None
+            impact.update(inherited)
+    # Pending text may still carry a deletion owned by another sealed flush.
+    # Drop only deletions this batch handles; otherwise its later cleanup would
+    # miss newly derived entries. Keep a currently present Fact even on recovery.
+    deleted_here = {change["fact_id"] for change in claim.changes if change.get("kind") == "deleted"}
+    if deleted_here:
+        current = set(map(str, session.scalars(select(memory_facts.c.id).where(
+            _scope(memory_facts, claim.user_id, claim.project_id),
+            memory_facts.c.id.in_([_uuid(fid) for fid in deleted_here])))))
+        impact.difference_update(deleted_here - current)
+    return sorted(impact)
+
+
+def _apply_plan(session, claim, plan, kind, event_embeddings, impact):
     changes = plan.profiles if kind == "profile" else plan.events
+    # Keep never rewrites text, provenance, vectors, timestamps or history.
+    from ..models.database import UserProfile, UserEvent
+    collection = "profiles" if kind == "profile" else "events"
+    table = UserProfile.__table__ if kind == "profile" else UserEvent.__table__
+    kept = [_uuid(change.id) for change in changes if change.action == "keep"]
+    if kept:
+        support = _entry_support(session, table, collection, claim, kept)
+        for ident in map(str, kept):
+            if ident not in plan.derived_reads[collection] or ident not in support:
+                raise SourceError("maintenance_target_unread", "Read the complete target before keeping it", 502)
+            if not support[ident] or any(plan.readset["facts"].get(fid) is None for fid in support[ident]):
+                raise SourceError("maintenance_support_unread", "Keep requires all original support to be valid and read; otherwise update or remove", 502)
+    changes = [change for change in changes if change.action != "keep"]
     if not changes:
         return
-    from ..models.database import UserProfile, UserEvent
     from ..models.source import (memory_facts, memory_blobs, memory_event_facts,
                                 memory_deleted_events, memory_profile_revisions)
     from .source import _profile_snapshot, _project_rules, _history_profiles
@@ -931,14 +1099,15 @@ def _apply_plan(session, claim, plan, kind, event_embeddings):
         if kind == "profile":
             attributes = {**(existing["attributes"] or {} if existing else {}), "memoia_v2": True,
                           "topic": change.topic, "sub_topic": change.sub_topic,
-                          "fact_ids": sorted(change.fact_ids), "source_ids": sources}
+                          "fact_ids": sorted(change.fact_ids), "source_ids": sources,
+                          IMPACT_KEY: impact}
             values = {"content": change.content, "attributes": attributes, "revision": revision}
         else:
             blob_ids = sorted({str(fact["blob_id"]) for fact in supported})
             values = {"event_data": {"memoia_v2": True, "event_tip": change.content,
                        **change.model_dump(exclude={"action", "id"}), "source_ids": sources,
                        "blob_ids": blob_ids, "source_id": sources[0] if len(sources) == 1 else None,
-                       "blob_id": blob_ids[0] if len(blob_ids) == 1 else None},
+                       "blob_id": blob_ids[0] if len(blob_ids) == 1 else None, IMPACT_KEY: impact},
                       "embedding": event_embeddings[ident], "revision": revision}
         if existing is None:
             session.execute(table.insert().values(id=ident, user_id=claim.user_id,
@@ -952,7 +1121,7 @@ def _apply_plan(session, claim, plan, kind, event_embeddings):
             session.execute(memory_event_facts.insert(), [{"event_id": ident, "fact_id": fact["id"],
                 "user_id": claim.user_id, "project_id": claim.project_id} for fact in supported])
     if kind == "profile" and changes:
-        # A newer deletion can arrive during this Loop. Its stale current text is
+        # A newer correction/retraction can arrive during this Loop. Its stale current text is
         # allowed until the next flush, but must never be restored into history.
         after = _history_profiles(_profile_snapshot(session, claim.user_id, claim.project_id), future_invalid)
         before_by_id = {row["id"]: row for row in before}
@@ -1020,8 +1189,9 @@ def _commit_plan(claim, plan, lease, task_lease, model_config, event_embeddings)
         _verify_readset(session, claim, plan.readset)
         for kind in ("profile", "event"):
             _verify_resolution(session, claim, plan, kind)
+        impact = _plan_impact(session, claim, plan)
         for kind in ("profile", "event"):
-            _apply_plan(session, claim, plan, kind, event_embeddings)
+            _apply_plan(session, claim, plan, kind, event_embeddings, impact)
         fence_commit(session, claim.user_id, claim.project_id, lease)
         task_lease.check_active()
         complete_flush(session, claim, plan)

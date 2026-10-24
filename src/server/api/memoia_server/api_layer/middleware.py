@@ -95,7 +95,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # 路径只保留资源形状，UUID 和来源编号不能制造高基数指标。
         import re
         path = _redact_operation_key(path)
-        return re.sub(r"(/users|/projects|/sources|/blobs|/operations|/keys|/profiles|/events)/(?!by-key(?:/|$))[^/]+", r"\1/{id}", path)
+        return re.sub(r"(/users|/projects|/sources|/blobs|/operations|/keys|/profiles|/events|/facts)/(?!by-key(?:/|$)|query(?:/|$))[^/]+", r"\1/{id}", path)
 
     async def dispatch(self, request, call_next):
         if not request.url.path.startswith("/api"):

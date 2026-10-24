@@ -325,13 +325,19 @@ async def test_delete_fences_inflight_batch_and_resume_cannot_restore_contributi
 @pytest.mark.asyncio
 async def test_joint_support_failure_and_independent_surviving_group(uid, models, monkeypatch):
     async def extract(request, **kwargs):
-        return source.ExtractedSource([dict(id=uuid4(), content="Likes chess", topic="interest", sub_topic="hobby",
+        return source.ExtractedSource([dict(id=uuid4(), content="The user worries Mira is tired.",
             support_groups=[["1", "2"], ["3"]], occurred_at=request.messages[-1].occurred_at)])
     monkeypatch.setattr(source, "extract_source", extract)
-    imported = await source.import_source(uid, "__root__", body("a", "1", "2", "3"))
-    await source.delete_messages(uid, "__root__", "dialog-1", DeleteMessages(idempotency_key="d2", message_ids=["2"]))
+    request = body("a", "1", "2", "3")
+    for message, content in zip(request.messages, (
+        "My colleague Mira stayed late.", "I worry they are tired.", "I worry Mira is tired.",
+    ), strict=True):
+        message.content = content
+    imported = await source.import_source(uid, "__root__", request)
+    await source.delete_messages(uid, "__root__", "dialog-1", DeleteMessages(idempotency_key="d1", message_ids=["1"]))
     fact = source.get_source(uid, "__root__", source_id="dialog-1").evidence[0]
     assert fact.support_groups == [["3"]]
+    assert fact.content == "The user worries Mira is tired."
     await source.delete_messages(uid, "__root__", "dialog-1", DeleteMessages(idempotency_key="d3", message_ids=["3"]))
     assert not source.get_source(uid, "__root__", source_id="dialog-1").evidence
     assert not source.get_blob(uid, "__root__", imported.blob_id).event_ids

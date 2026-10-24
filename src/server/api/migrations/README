@@ -17,6 +17,28 @@ memoia_server.schema.check_schema() 校验 revision 和 embedding 维度、初�
   0009_blob_flush        固定 Blob 变更、flush Operation 租约/恢复；转移历史维护记录后移除任务表。
   0010_historical_facts  只删除旧隐藏 Fact，退出纠正图/active；保留其他历史与固定回执。
   0011_retire_gists      删除旧 Gist 索引表，保留 Event/Fact；为 Blob message_ids 添加 jsonb_ops GIN。
+  0012_fact_corrections  Fact 持久化时间列；Operation/Blob 的 correct 类型及对应约束、唯一索引。
+  0013_reasoning_mode 不新增表或列；历史 flush guard 允许一次模式冻结。当前运行时统一 Standard，不再写入或继承此字段，迁移仍保留。
+  0014_fact_time       Fact 时间列及未完成操作的已知恢复字段改名，值与幂等身份不变。
+  0015_event_time      Event 叙事 JSON 的顶层 time 改为 event_time，值及其他持久数据不变。
+
+0015 仅机械改名 user_events.event_data 对象的顶层 time；event_time 仍为叙事时间文本，
+不转换为 Fact 的时间证据结构。缺失字段不补写，字符串（包括空字符串）和 null 原值保留，
+不递归修改嵌套 metadata。已有 event_time 原值保留；两个键同时存在且值相同时移除旧键，
+值不同时整条迁移失败，须先明确解决冲突，不能静默覆盖。正文、向量、revision、创建及修改
+时间、Fact、关联、操作回执和幂等身份均不变；不调用模型、不重算向量，拒绝降级。
+
+0014 仅将 memory_facts.event_time 改名为 fact_time，并机械改名未完成 correct request
+顶层时间字段和 import request.fact_review_candidate.extraction.facts[*] 的对应字段。
+时间范围、精度、证据、空值和既有时间语义不变；不递归修改原消息或任意 metadata。
+原 request_hash、input_fingerprint、input_expires_at 和其他元数据保持原值，包括过期但未清除的
+恢复输入；不恢复已清除载荷，不清空事实、回执、墓碑或原文，不修改已封闭 Blob。
+纠正请求仍按历史 canonical event_time 键计算摘要，保证已完成且载荷已清除的旧幂等身份可重放。
+旧迁移中的字段名保持冻结；API、Worker 和 SDK 必须与新 schema 协调升级。
+
+0012 为 Fact 添加可空 created_at/updated_at：旧行保持 null，之后插入默认 now()，不猜补历史。
+Operation/Blob 接纳 correct，import/retract/correct 必须关联 Blob，且同一 Blob 只能有一个
+此类 Operation。迁移不纠正 Fact 内容、不删除历史数据；纠正回执属于持久业务数据，拒绝降级。
 
 0011 不改 Event 正文，不将缺少消息证据的 Gist 转成 Fact。仅存在于旧 Gist 表的细节
 随表删除、不可通过 downgrade 恢复；共享库执行仍须单独确认。历史基线和已执行迁移
@@ -30,7 +52,7 @@ memoia_server.schema.check_schema() 校验 revision 和 embedding 维度、初�
 该迁移不可恢复已删除 Fact，不重新抽取已清除原文。服务与项目退役配置须在发布前单独
 检查并确认处理，迁移不重写共享配置。当前 SDK 请求／回执结构不变。
 
-当前 schema 与 SDK 0.9 配套：completed 只表示 Fact 原子提交；画像与 Event 由同镜像独立
+0009 与 SDK 0.9 配套：completed 只表示 Fact 原子提交；画像与 Event 由同镜像独立
 Worker 运行一个用户级 AgentLoop，Profile/Event 与 flush 回执原子提交。0008 旧任务的
 完成区间、变更引用、原身份和失败次数保留为 flush；运行中的旧租约不延续，恢复读取当前
 有效 Fact，不恢复已清除原文。未封闭的新 Blob 留到下一次，未关联 Blob 的旧变更引用

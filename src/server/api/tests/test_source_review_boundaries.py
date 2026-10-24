@@ -40,7 +40,7 @@ async def test_partial_support_change_commits_fact_and_preserves_pending_derived
     assert await maintain(uid, runner)
     with Session() as session:
         unrelated = session.query(UserProfile).filter_by(user_id=uid, content="Likes chess").one()
-        unchanged = (unrelated.id, unrelated.updated_at)
+        unchanged = (unrelated.id, unrelated.content, unrelated.updated_at, unrelated.attributes["fact_ids"])
 
     async def fail(*args, **kwargs):
         if failure == "cancel":
@@ -65,7 +65,7 @@ async def test_partial_support_change_commits_fact_and_preserves_pending_derived
             memory_facts.c.content == "Lives in Beijing")).mappings().one()
         assert fact["support_groups"] == [["1"]] and fact["occurred_at"].day == 1
         unrelated = session.get(UserProfile, (unchanged[0], "__root__"))
-        assert (unrelated.id, unrelated.updated_at) == unchanged
+        assert (unrelated.id, unrelated.content, unrelated.updated_at, unrelated.attributes["fact_ids"]) == unchanged
     state = status(uid, "__root__")
     assert state["error"]["code"] == ("maintenance_cancelled" if failure == "cancel" else
         "reconciliation_too_large" if failure == "capacity" else "model_unavailable")
@@ -74,6 +74,10 @@ async def test_partial_support_change_commits_fact_and_preserves_pending_derived
     assert await maintain(uid, runner)
     assert {p.content for p in (await profile.get_user_profiles(uid, "__root__")).data().profiles} == {
         "Lives in Shanghai", "Likes chess"}
+    with Session() as session:
+        unrelated = session.get(UserProfile, (unchanged[0], "__root__"))
+        assert unrelated is not None
+        assert (unrelated.id, unrelated.content, unrelated.updated_at, unrelated.attributes["fact_ids"]) == unchanged
 
 
 @pytest.mark.asyncio
@@ -104,7 +108,7 @@ async def test_v1_operation_recovery_atomically_scrubs_original_blob(uid, models
     if old_receipt:
         recovered = await source.import_source(uid, "__root__",
             source.ImportSource.model_validate({key: value for key, value in operation["request"].items()
-                                               if key != "legacy_buffers"}), legacy_buffers=([buffer], [raw]))
+                                               if key not in {"legacy_buffers"}}), legacy_buffers=([buffer], [raw]))
     else:
         recovered = await source.retry_operation(uid, "__root__", operation["id"])
     assert recovered.status == "completed"

@@ -39,8 +39,11 @@ def openai_transport(monkeypatch):
                 state["status"],
                 json={"error": {"message": "mock error", "type": "invalid_request_error"}},
             )
+        response_content = state["content"]
+        if callable(response_content):
+            response_content = response_content(state["requests"][-1])
         content = ([{"type": "refusal", "refusal": state["refusal"]}] if state["refusal"] is not None else
-                   [{"type": "output_text", "text": state["content"], "annotations": []}])
+                   [{"type": "output_text", "text": response_content, "annotations": []}])
         result = {
             "id": "resp-test",
             "object": "response",
@@ -452,7 +455,7 @@ async def test_empty_structured_content_flush_fails_without_event(
 @pytest.mark.asyncio
 async def test_complete_structured_empty_facts_flush_succeeds_without_event(openai_transport):
     state, model_client = openai_transport
-    state["content"] = '{"facts": []}'
+    state["content"] = '{"messages": [{"message_id": "1", "facts": []}]}'
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", headers={"Authorization": f"Bearer {os.environ['ACCESS_TOKEN']}"})
     uid = (await client.post("/api/users", json={})).json()["id"]
     try:
@@ -462,8 +465,9 @@ async def test_complete_structured_empty_facts_flush_succeeds_without_event(open
         assert inserted.status_code == 200 and inserted.json()["status"] == "completed"
         assert inserted.json()["result"]["event_ids"] == []
         assert (await client.get(f"/api/users/{uid}/events")).json()["events"] == []
+        # A valid empty extraction completes the same single-call contract.
         assert len(state["requests"]) == 1
-        assert state["requests"][0]["text"]["format"]["strict"]
+        assert all(request["text"]["format"]["strict"] for request in state["requests"])
     finally:
         (await client.delete(f"/api/users/{uid}"))
         (await client.aclose())

@@ -6,7 +6,7 @@ from pydantic import BaseModel, UUID4, UUID5, Field
 from .blob import BlobData, OpenAICompatibleMessage
 from .claim import ClaimData
 from .action import ActionData
-from .source import EventTime, SourceObservation, Evidence
+from .source import FactTime, SourceObservation, Evidence
 
 UUID = UUID4 | UUID5
 
@@ -100,18 +100,20 @@ class EventTag(BaseModel):
 
 class RetrievedContent(BaseModel):
     content: str = Field(..., description="Retrieved memory content")
-    event_time: "EventTime | None" = None
+    fact_time: "FactTime | None" = None
     source_messages: list["SourceObservation"] = Field(default_factory=list)
     source_id: str | None = None
     blob_id: UUID | None = None
     fact_id: UUID | None = None
+    created_at: datetime | None = Field(None, description="Fact database creation time; null for legacy rows with unknown creation time")
+    updated_at: datetime | None = Field(None, description="Fact last modification time; never an event occurrence time")
 
 
 class EventData(BaseModel):
     title: str | None = None
     summary: str | None = None
     keywords: str | None = None
-    time: str | None = None
+    event_time: str | None = Field(None, description="Story occurrence time in prose; not a storage timestamp")
     location: str | None = None
     content: str | None = None
     interpretation: str | None = None
@@ -199,11 +201,11 @@ class ProjectUsersData(BaseModel):
 
 class DailyUsage(BaseModel):
     date: str = Field(..., description="The date")
-    total_insert: int = Field(0, description="The total insert")
-    total_success_insert: int = Field(0, description="The total update")
-    total_input_token: int = Field(0, description="The total input token")
-    total_output_token: int = Field(0, description="The total output token")
-    usage_complete: bool = Field(True, description="False when recorded calls lacked token usage. Totals are approximate recorded usage, not a billing ledger; outages or expired counters can lose statistics.")
+    total_insert: int = Field(description="The total insert")
+    total_success_insert: int = Field(description="The total update")
+    total_input_token: int = Field(description="The total input token")
+    total_output_token: int = Field(description="The total output token")
+    usage_complete: bool = Field(description="False when recorded calls lacked token usage. Totals are approximate recorded usage, not a billing ledger; outages or expired counters can lose statistics.")
 
 
 # API response format
