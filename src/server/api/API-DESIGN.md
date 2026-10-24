@@ -1,5 +1,11 @@
 # Fact 写入与串行派生维护
 
+## 后台推理模式与输出详略
+
+Fact 抽取与 Profile/Event 统一 maintenance 始终发送 Responses `reasoning.mode=standard`，
+并使用 `text.verbosity=low`；工具轮、Flex 恢复和重新执行保持相同设置。
+模型、reasoning effort、服务等级、正文和支撑完整性要求及正常恢复规则各自独立。
+
 ## 不变量与归属
 
 Fact 是有消息支持的历史陈述，不维护唯一正确的当前真相；Profile 整理长期属性和人物关系，Event 组织故事。后两者不能修改 Fact 或产生新的事实依据。Luvel 决定消息范围并压缩分段；Memoia 只处理一个完整有界 Blob，不建设第二套分块或通用任务平台。

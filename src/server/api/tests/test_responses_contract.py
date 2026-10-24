@@ -58,7 +58,8 @@ async def test_fact_uses_native_responses_schema_and_fixed_only_cache(responses_
         assert not {"instructions", "messages", "response_format", "prompt_cache_key"}.intersection(wire)
         assert wire["store"] is False and wire["truncation"] == "disabled"
         assert wire["max_output_tokens"] == CONFIG.source_output_reserve_tokens
-        assert wire["service_tier"] == "default" and wire["reasoning"] == {"effort": CONFIG.llm_reasoning_effort}
+        assert wire["service_tier"] == "default" and wire["reasoning"] == {"effort": CONFIG.llm_reasoning_effort, "mode": "standard"}
+        assert wire["text"]["verbosity"] == "low"
         assert state["calls"][0].extensions["timeout"] == dict.fromkeys(("connect", "read", "write", "pool"), 120)
         assert accounting.await_count == 1
         assert accounting.await_args.args[1:3] == (10, 5)

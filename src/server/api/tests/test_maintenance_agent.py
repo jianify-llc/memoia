@@ -159,7 +159,8 @@ async def test_loop_cache_respects_model_capability_without_switching_configurat
     plan = await run_loop(context)
     assert plan.usage.turns == 1
     body = transport["requests"][0]
-    assert body["model"] == model and body["reasoning"] == {"effort": "high"}
+    assert body["model"] == model and body["reasoning"] == {"effort": "high", "mode": "standard"}
+    assert body["text"]["verbosity"] == "low"
     if supported:
         assert body["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}
     else:
@@ -204,7 +205,8 @@ async def test_unified_runner_reads_stages_and_returns_only_after_final(transpor
     assert "Newer alone does not mean truer" in fixed_rules
     assert "Never edit, invalidate or delete a Fact" in fixed_rules
     assert "visible as pending_delete for navigation" in fixed_rules
-    assert first["reasoning"] == {"effort": "high"}
+    assert first["reasoning"] == {"effort": "high", "mode": "standard"}
+    assert all(body["text"]["verbosity"] == "low" for body in transport["requests"])
     assert all(body["service_tier"] == "flex" for body in transport["requests"])
     assert all(body["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}
                for body in transport["requests"])
@@ -547,7 +549,7 @@ async def test_project_model_and_reasoning_override_reach_runner(transport, kind
     transport["responses"] = [completion()]
     await run_loop(context)
     assert transport["requests"][0]["model"] == "project-model"
-    assert transport["requests"][0]["reasoning"]["effort"] == effort
+    assert transport["requests"][0]["reasoning"] == {"effort": effort, "mode": "standard"}
 
 
 @pytest.mark.asyncio
@@ -1305,6 +1307,8 @@ async def test_next_model_call_returns_to_flex_without_restarting_or_repeating_t
     context = Context()
     plan = await run_loop(context)
     bodies = transport["requests"]
+    assert all(body["reasoning"] == {"effort": "high", "mode": "standard"} for body in bodies)
+    assert all(body["text"]["verbosity"] == "low" for body in bodies)
     assert [body["service_tier"] for body in bodies] == ["flex", "flex", "default", "flex"]
     assert [item["requested_service_tier"] for item in transport["accounting_metadata"]] == [
         "flex", "flex", "default", "flex"]
@@ -1452,6 +1456,8 @@ async def test_failed_execution_recovery_starts_new_chain_from_current_context(t
     transport["responses"] = [completion()]
     plan = await run_loop(recovered)
     initial, restarted = transport["requests"][0], transport["requests"][-1]
+    assert all(body["reasoning"] == {"effort": "high", "mode": "standard"} for body in transport["requests"])
+    assert all(body["text"]["verbosity"] == "low" for body in transport["requests"])
     assert "previous_response_id" not in restarted
     assert restarted["prompt_cache_key"] == initial["prompt_cache_key"]
     assert restarted["input"][0] == initial["input"][0]
