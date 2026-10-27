@@ -77,7 +77,11 @@ async def test_partial_support_change_commits_fact_and_preserves_pending_derived
     with Session() as session:
         unrelated = session.get(UserProfile, (unchanged[0], "__root__"))
         assert unrelated is not None
-        assert (unrelated.id, unrelated.content, unrelated.updated_at, unrelated.attributes["fact_ids"]) == unchanged
+        # The conservative read scope requires rebuilding this entry too. Its
+        # identity, content and support survive; the successful rewrite advances time.
+        assert (unrelated.id, unrelated.content, unrelated.attributes["fact_ids"]) == (
+            unchanged[0], unchanged[1], unchanged[3])
+        assert unrelated.updated_at > unchanged[2]
 
 
 @pytest.mark.asyncio

@@ -103,8 +103,12 @@ async def test_three_context_sections_reuse_existing_queries_and_deletion_loop(s
         # scope, retaining the four entries whose actual support still exists.
         for item in (await context.read("profiles"))["items"]:
             if item["fact_ids"]:
+                fact_id = item["fact_ids"][0]
+                content = next(fact["content"] for fact in item["evidence"] if fact["id"] == fact_id)
+                sub_topic = ("hobbies" if fact_id == str(hobby) else
+                             "interaction_preferences" if item["topic"] == "interests_preferences" else "overview")
                 await context.stage_profile(ProfileMutation(action="upsert", id=item["id"],
-                    content=item["content"], topic=item["topic"], sub_topic=item["sub_topic"],
+                    content=content, topic=item["topic"], sub_topic=sub_topic,
                     fact_ids=item["fact_ids"]))
         return context.get_plan(LoopUsage())
     assert await maintain(source_user, review_deletion)
