@@ -34,8 +34,9 @@ async def openai_complete(
         # 正式调用默认使用完整推理预算；启动探针可显式指定独立 completion 上限。
         kwargs.setdefault("reasoning", {"effort": CONFIG.llm_reasoning_effort})
         kwargs.setdefault("max_output_tokens", 32768)
-        for name in ("temperature", "top_p", "top_logprobs", "logprobs"):
-            kwargs.pop(name, None)
+        if kwargs["reasoning"].get("effort") != "none":
+            for name in ("temperature", "top_p", "top_logprobs", "logprobs"):
+                kwargs.pop(name, None)
 
     started = time.monotonic()
     async def report_usage(usage, *, actual_model=model, service_tier=None):

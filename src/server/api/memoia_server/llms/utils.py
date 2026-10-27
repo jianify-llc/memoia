@@ -29,7 +29,7 @@ def get_openai_async_client_instance() -> AsyncOpenAI:
 def supports_prompt_cache_options(model: str) -> bool:
     """Both model and endpoint must support the contract; no capability probes."""
     known_model = re.fullmatch(
-        r"gpt-(?:5\.6|6(?:\.1)?)(?:-(?:luna|sol|astra))?(?:-\d{4}-\d{2}-\d{2})?",
+        r"gpt-(?:5\.6|6(?:\.1)?)(?:-(?:luna|sol|astra|terra))?(?:-\d{4}-\d{2}-\d{2})?",
         model,
     ) is not None
     if not known_model or CONFIG.llm_prompt_cache_options is False:

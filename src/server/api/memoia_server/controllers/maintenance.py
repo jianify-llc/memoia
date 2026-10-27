@@ -585,7 +585,7 @@ class DBMaintenanceContext:
                     attributes = row["attributes"] or {}
                     item = {"id": ident, "content": row["content"], "revision": row["revision"],
                             "topic": attributes.get("topic", ""), "sub_topic": attributes.get("sub_topic", ""),
-                            "fact_ids": attributes.get("fact_ids", [])}
+                            "fact_ids": attributes.get("fact_ids") or []}
                 else:
                     # Legacy JSON retains identity only. Its old evidence text is
                     # never reintroduced as valid Fact support after withdrawal.
@@ -593,7 +593,7 @@ class DBMaintenanceContext:
                     legacy_ids = [value["fact_id"] for value in (data.get("evidence") or [])
                                   if isinstance(value, dict) and value.get("fact_id")]
                     item = {**public_data(data), "id": ident, "revision": row["revision"],
-                            "fact_ids": sorted({*data.get("fact_ids", []), *legacy_ids})}
+                            "fact_ids": sorted({*(data.get("fact_ids") or []), *legacy_ids})}
                     item.pop("evidence", None)
                 item.pop("user_id", None)
                 item.pop("project_id", None)
@@ -609,8 +609,7 @@ class DBMaintenanceContext:
                 if change.action == "remove":
                     if row is None:
                         continue
-                    # Keep its identity/text visible for navigation and rewrite,
-                    # but only current Fact rows can supply positive evidence.
+                    # Retain the target identity for an explicit rebuild decision.
                     item["pending_delete"] = True
                 elif change.action == "upsert":
                     item = {"id": ident, "revision": actual, **change.model_dump(exclude={"action", "id"})}
@@ -651,6 +650,7 @@ class DBMaintenanceContext:
                     memory_facts.c.created_at, memory_facts.c.updated_at,
                 ).where(_scope(memory_facts, self.user_id, self.project_id), memory_facts.c.id.in_(mentioned))).mappings()}
                 for item in items:
+                    item["support_unknown"] = not item["fact_ids"]
                     item["invalid_fact_ids"] = sorted(set(item["fact_ids"]) - facts.keys())
                     item["fact_ids"] = sorted(set(item["fact_ids"]) & facts.keys())
                     item["evidence"] = []
@@ -660,6 +660,14 @@ class DBMaintenanceContext:
         for item in items:
             if collection != "facts":
                 item["review_required"] = item["id"] in self._review_required[collection]
+                change = staged.get(item["id"])
+                if item["review_required"] and (change is None or change.action != "upsert"):
+                    # Old prose can carry withdrawn claims even with valid Fact IDs.
+                    # Rebuild affected entries from current support, including legacy
+                    # relation-only evidence; keep only identity and classification.
+                    item = {key: value for key, value in item.items() if key in (
+                        "id", "revision", "topic", "fact_ids", "invalid_fact_ids", "evidence",
+                        "review_required", "pending_delete", "support_unknown")}
             cost = payload_size(item) + 2
             if size + cost > MAX_TOOL_BYTES:
                 if not accepted:
@@ -765,6 +773,8 @@ class DBMaintenanceContext:
             if (ident not in self._derived_reads[collection]
                     and (change.action == "keep" or self.readset[collection][ident] is not None)):
                 raise SourceError("maintenance_target_unread", "Read the complete target before deciding its content", 502)
+            if change.action == "keep" and ident in self._review_required[collection]:
+                raise SourceError("maintenance_rewrite_required", "Rebuild affected memory from current Facts or remove it", 502)
         if change.action == "upsert":
             if kind == "profile" and change.topic not in self.allowed_topics:
                 raise SourceError("maintenance_invalid_topic", "Profile topic is outside the configured topics", 502)
@@ -984,6 +994,9 @@ def _verify_resolution(session, claim, plan, kind):
     resolved = {str(_uuid(change.id)) for change in getattr(plan, collection)}
     if affected - resolved:
         raise SourceError("maintenance_unresolved_entries", "Changed evidence still has unreviewed derived entries", 502)
+    if any(change.action == "keep" and str(_uuid(change.id)) in affected
+           for change in getattr(plan, collection)):
+        raise SourceError("maintenance_rewrite_required", "Rebuild affected memory from current Facts or remove it", 502)
 
 
 def _plan_impact(session, claim, plan):

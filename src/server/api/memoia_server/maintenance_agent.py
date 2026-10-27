@@ -496,8 +496,10 @@ def _maintenance_tools(refs: _LoopReferences):
         shared by fact_ids once per page. Returned entries and Facts are registered
         for use; a referenced ID without its Fact body is not yet read support.
         pending_delete entries remain visible for navigation, not as factual support.
-        review_required marks this run's mandatory decision scope, including possible
-        indirect influence. remaining_review lists counts and up to 20 pending IDs
+        review_required entries withhold original prose; rebuild from all current
+        supporting Facts or remove. support_unknown means missing legacy links,
+        requiring Fact discovery, not automatic deletion. Own staged replacements stay readable.
+        remaining_review lists counts and up to 20 pending IDs
         per collection; read those IDs and submit decisions to advance the list.
         """
         if not 1 <= limit <= MAX_PAGE_SIZE or (ids is not None and len(ids) > MAX_PAGE_SIZE):
@@ -546,7 +548,8 @@ def _maintenance_tools(refs: _LoopReferences):
     async def stage_profile(ctx: RunContextWrapper[MaintenanceContext],
                             changes: list[ProfileUpsert | MemoryDecision]) -> dict:
         """Stage updates, removals or explicit keep decisions; commit both collections together.
-        Keep preserves an already read entry unchanged; all original support must remain valid and be read.
+        Keep preserves an unrelated read entry; review_required entries must be rebuilt or removed.
+        All original support of kept entries must remain valid and be read.
         remaining_review reports outstanding mandatory decisions across both collections, not commit success.
         Text fields are user-facing prose; internal references belong only in id/fact_ids.
         """
@@ -565,7 +568,8 @@ def _maintenance_tools(refs: _LoopReferences):
     async def stage_event(ctx: RunContextWrapper[MaintenanceContext],
                           changes: list[EventUpsert | MemoryDecision]) -> dict:
         """Stage updates, removals or explicit keep decisions; commit both collections together.
-        Keep preserves an already read entry unchanged; all original support must remain valid and be read.
+        Keep preserves an unrelated read entry; review_required entries must be rebuilt or removed.
+        All original support of kept entries must remain valid and be read.
         remaining_review reports outstanding mandatory decisions across both collections, not commit success.
         Text fields are user-facing prose; internal references belong only in id/fact_ids.
         """

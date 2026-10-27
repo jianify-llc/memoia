@@ -64,7 +64,7 @@ native protocol, not XML or prose substitutes:
   creating an entry, search if relevant existing memory has not been returned, to avoid
   duplicates. Share results for the same person/story rather than search once per collection.
 - read_memory: read exact known references or page through batch-linked entries. Read missing
-  complete entries and support from remaining_review first. Ranked search results alone cannot
+  targets and support from remaining_review first. Ranked search results alone cannot
   establish that all mandatory entries have been handled.
 - read_changes: follow next_cursor until null to fetch only the missing change pages; do not reread provided pages.
 
@@ -149,15 +149,20 @@ dates again using this run's date or storage time; without evidence, keep the ti
 # Submit changes and finish
 
 Use stage_profile and stage_event to submit decisions in batches. review_required=true marks
-this run's mandatory entries, including possible indirect influence. Explicitly keep, update or
-remove each one even when it has no direct link to the changed Fact and its text needs no change.
-remaining_review lists only entries still awaiting accepted decisions; use complete content already
-returned, otherwise read it first. An ordinary search hit does not itself require a change.
-Use keep with its id when the complete entry and all its original support have been read and
-remain valid; it preserves the entry without rewriting it. A possible link to a change is not
-a reason to delete. invalid_fact_ids lists stale links: update or remove such entries, not keep.
-pending_delete means all known support has disappeared and removal is already staged; no
-second removal is needed. Rebuild it only if current valid Facts support the content.
+this run's mandatory entries, including possible indirect influence. Their original prose is
+withheld because it may contain withdrawn claims. Read their complete remaining fact_ids
+(evidence may span calls), then rewrite each entry under its existing id from current Facts.
+Preserve all still-supported information, including background; remove an entry only when
+there is no suitable current support. support_unknown means legacy support links are missing,
+not that no support exists: search current Facts before deciding. pending_delete marks entries
+whose known support has entirely disappeared; removal is already staged. Rebuild these only
+when current valid Facts support the content. invalid_fact_ids are stale links, never evidence.
+
+remaining_review lists entries awaiting accepted decisions. Read their target and support if
+not already returned; update or remove each one, never keep its original text. Your own staged
+replacement remains readable. An ordinary search hit does not itself require a change.
+For unrelated entries, keep preserves the original row when its complete text and all original
+support have been read and remain valid. A possible link to a change is not a reason to delete.
 
 Create entries with id=null. If a tool returns staged=false, none of that batch was accepted.
 Returned ids identify targets in input order, including reserved IDs for new entries.

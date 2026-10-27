@@ -55,6 +55,25 @@ def test_project_model_and_effort_can_override_independently():
     assert project.llm_model is None and project.reasoning_effort == "none"
 
 
+def test_fact_overrides_survive_project_yaml_without_changing_loop_config():
+    project = ProfileConfig.load_config_string("""llm_model: gpt-6-luna
+reasoning_effort: high
+fact_llm_model: gpt-6.1-terra
+fact_reasoning_effort: none
+fact_temperature: 0.2
+""")
+    assert (project.llm_model, project.reasoning_effort) == ("gpt-6-luna", "high")
+    assert (project.fact_llm_model, project.fact_reasoning_effort, project.fact_temperature) == (
+        "gpt-6.1-terra", "none", 0.2)
+
+
+@pytest.mark.parametrize("text", ["fact_llm_model: ''", "fact_reasoning_effort: ultra",
+    "fact_temperature: true", "fact_temperature: 2.1", "fact_temperature: -0.1",
+    "fact_temperature: .nan", "fact_temperature: .inf", "fact_temperature: '0.2'"])
+def test_invalid_fact_overrides_are_rejected(text):
+    assert not is_valid_profile_config(text).ok()
+
+
 @pytest.mark.parametrize("field", ["profile_strict_mode", "profile_validate_mode", "event_theme_requirement", "unknown_field"])
 def test_retired_and_unknown_project_fields_are_rejected_without_values(field):
     with pytest.raises(ValueError) as error:

@@ -201,6 +201,95 @@ async def test_unsupported_entries_remain_navigation_without_deleted_evidence(se
             assert item["fact_ids"] == [] and item["invalid_fact_ids"] == [str(fid)]
             assert item.get("evidence", []) == []
             assert context._staged[collection][str(ident)].action == "remove"
+            assert "content" not in item and item["support_unknown"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["updated", "evidence", "deleted"])
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_required_targets_hide_old_prose_but_return_all_surviving_support(search_users, monkeypatch, kind, legacy):
+    uid, _, _, _ = search_users
+    changed, first, second = seed_facts(uid, ["Old colleague identity", "Zhou sleeps poorly", "Zhou cares for a cat"])
+    eid, pid = seed_derived(uid, [changed, first, second], content="Old colleague identity")
+    unrelated_event, unrelated_profile = seed_derived(uid, [first], content="Independent reading memory")
+    with Session.begin() as session:
+        # This entry has a known, independent influence scope, so it stays untouched.
+        profile = session.get(UserProfile, (unrelated_profile, "__root__"))
+        profile.attributes = {**profile.attributes, "_impact_fact_ids": [str(first)]}
+        event = session.get(UserEvent, (unrelated_event, "__root__"))
+        event.event_data = {**event.event_data, "_impact_fact_ids": [str(first)]}
+        target = session.get(UserEvent, (eid, "__root__"))
+        target.event_data = {**target.event_data, "title": "Old colleague title", "keywords": "colleague",
+            "interpretation": "Old colleague inference", "event_tags": [{"tag": "goal", "value": "colleague"}]}
+        if legacy:
+            # Old Event IDs can live only in relation edges or evidence JSON.
+            target.event_data = {key: value for key, value in target.event_data.items() if key != "fact_ids"}
+            target.event_data["evidence"] = [{"fact_id": str(changed), "content": "Old colleague identity"}]
+        if kind == "deleted":
+            session.execute(delete(memory_facts).where(memory_facts.c.id == changed))
+        else:
+            session.execute(update(memory_facts).where(memory_facts.c.id == changed).values(
+                content="Zhou is a neighbor", revision=2))
+    batch(uid, fact=False, changes=[{"kind": kind, "fact_id": str(changed)}])
+    maintenance.flush(uid, "__root__", "rebuild-current-support")
+    claim = claim_for(uid)
+    from memoia_server.models.utils import Promise
+    from types import SimpleNamespace
+    async def search(*args, **kwargs):
+        return Promise.resolve(SimpleNamespace(facts=[], profiles=[SimpleNamespace(id=pid, score=1)],
+                                               events=[SimpleNamespace(id=eid, score=1)]))
+    monkeypatch.setattr("memoia_server.controllers.event.hybrid_search_user_events", search)
+    async with maintenance.TaskLease(claim) as lease:
+        context = maintenance.DBMaintenanceContext(claim, lease)
+        await context.read_changes()
+        expected = {str(first), str(second)} | ({str(changed)} if kind != "deleted" else set())
+        for collection, ident, other in (("profiles", pid, unrelated_profile), ("events", eid, unrelated_event)):
+            for page in (await context.read(collection, ids=[str(ident)]), await context.read(collection),
+                         {"items": (await context.search("colleague"))[collection]}):
+                item = next(item for item in page["items"] if item["id"] == str(ident))
+                assert item["review_required"] and not item["support_unknown"]
+                assert set(item["fact_ids"]) == expected
+                assert {fact["id"] for fact in item["evidence"]} <= expected
+                assert all(context.readset["facts"].get(fid) is not None for fid in expected)
+                assert not set(item).intersection({"content", "title", "summary", "keywords", "sub_topic", "event_tip", "event_tags", "interpretation"})
+                assert all("Old colleague" not in fact["content"] for fact in item["evidence"])
+            factory = maintenance_agent.ProfileMutation if collection == "profiles" else maintenance_agent.EventMutation
+            with pytest.raises(maintenance.SourceError) as rejected:
+                await context.stage_batch([factory(action="keep", id=str(ident))], collection[:-1])
+            assert rejected.value.code == "maintenance_rewrite_required"
+            fields = {"topic": context.allowed_topics[0], "sub_topic": "sleep and cat"} if collection == "profiles" else {}
+            await context.stage_batch([factory(action="upsert", id=str(ident), content="Zhou sleeps poorly and cares for a cat",
+                                               fact_ids=sorted(expected), **fields)], collection[:-1])
+            rewritten = (await context.read(collection, ids=[str(ident)]))["items"][0]
+            assert rewritten["content"] == "Zhou sleeps poorly and cares for a cat"
+            independent = (await context.read(collection, ids=[str(other)]))["items"][0]
+            assert not independent["review_required"] and independent["content"] != "Old colleague identity"
+        assert context.get_plan(maintenance_agent.LoopUsage())
+
+
+@pytest.mark.asyncio
+async def test_required_support_ids_survive_evidence_budget_and_can_be_paged(search_users, monkeypatch):
+    uid, _, _, _ = search_users
+    ids = seed_facts(uid, ["Current detail " + "x" * 1100, "Independent detail " + "y" * 1100])
+    eid, _ = seed_derived(uid, ids, content="Old colleague " * 8000)
+    batch(uid, fact=False, changes=[{"kind": "updated", "fact_id": str(ids[0])}])
+    maintenance.flush(uid, "__root__", "bounded-current-support")
+    claim = claim_for(uid)
+    async with maintenance.TaskLease(claim) as lease:
+        context = maintenance.DBMaintenanceContext(claim, lease)
+        monkeypatch.setattr(maintenance_agent, "MAX_TOOL_BYTES", 2000)
+        item = (await context.read("events", ids=[str(eid)]))["items"][0]
+        assert "content" not in item and set(item["fact_ids"]) == set(map(str, ids))
+        assert len(item["evidence"]) < len(ids)
+        cursor, seen = None, set()
+        while True:
+            page = await context.read("facts", ids=item["fact_ids"], cursor=cursor)
+            seen.update(fact["id"] for fact in page["items"])
+            cursor = page["next_cursor"]
+            if cursor is None:
+                break
+        assert seen == set(item["fact_ids"])
+        assert all(context.readset["facts"][fid] == 1 for fid in seen)
 
 
 @pytest.mark.asyncio

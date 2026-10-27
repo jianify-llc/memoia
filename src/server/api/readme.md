@@ -156,7 +156,7 @@ for business calls through the configured model. An explicit native
 Startup uses a separate 4096-token completion budget and asks for exactly `OK`;
 empty, unexpected or incomplete probe results prevent startup. This shared request
 boundary no longer accepts historical Chat Completions parameters or history;
-it removes Luna's unsupported `temperature`, `top_p`, `logprobs` and `top_logprobs`. Keeping a tiny output limit
+it removes Luna's unsupported `temperature`, `top_p`, `logprobs` and `top_logprobs` when reasoning is enabled. Keeping a tiny output limit
 with reasoning enabled can truncate the completion before usable text is produced.
 
 Projects can independently override `llm_model` and `reasoning_effort` in their
@@ -166,6 +166,12 @@ use Responses with `store=false`; the maintenance tool loop uses `store=true` an
 SDK-native response chaining within each execution. Neither silently lowers a project's
 reasoning setting. Embeddings keep their separate API.
 The optional Inspector Playground has its own runtime model configuration.
+
+Optional project fields `fact_llm_model`, `fact_reasoning_effort` and `fact_temperature`
+override Fact extraction only. Model/effort individually fall back to the shared configuration;
+omitted temperature is not sent. Temperature must be finite and between 0 and 2, and is sent
+only with effective effort `none`. The tested candidate is `gpt-6.1-terra / none / 0.2`;
+applying it to a project is explicit and does not change maintenance's `gpt-6-luna / high` settings.
 
 ### Prompt caching and numerical usage
 

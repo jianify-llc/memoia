@@ -116,6 +116,33 @@ async def test_fact_extraction_uses_project_model_and_reasoning_on_wire(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model,effort,temperature,expected_temperature", [
+    ("gpt-6.1-terra", "none", 0.2, 0.2), ("gpt-6-luna", "none", 0, 0),
+    ("gpt-6.1-terra", "high", 0.2, None), ("gpt-6.1-terra", "none", None, None),
+])
+async def test_fact_overrides_on_wire_preserve_cache_and_single_call(
+        monkeypatch, model, effort, temperature, expected_temperature):
+    client, bodies = model_transport(model_outputs([]))
+    monkeypatch.setattr("memoia_server.llms.openai_model_llm.get_openai_async_client_instance", lambda: client)
+    monkeypatch.setattr(source, "record_completion_usage", AsyncMock())
+    try:
+        await source.extract_source(request_body((("u-one", "user", "Hello"),)), rules={
+            "llm_model": "gpt-6-luna", "reasoning_effort": "high",
+            "fact_llm_model": model, "fact_reasoning_effort": effort, "fact_temperature": temperature})
+        assert len(bodies) == 1
+        wire = bodies[0]
+        assert wire["model"] == model and wire["reasoning"] == {"effort": effort, "mode": "standard"}
+        assert wire.get("temperature") == expected_temperature
+        assert ("temperature" in wire) == (expected_temperature is not None)
+        assert wire["service_tier"] == "default" and wire["store"] is False
+        assert wire["prompt_cache_options"] == {"mode": "explicit", "ttl": "30m"}
+        assert wire["input"][0]["content"][0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
+        assert "prompt_cache_breakpoint" not in wire["input"][1]["content"][0]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("project_language", ["en", "zh", None])
 async def test_extraction_preserves_mixed_language_material_and_result_without_language_configuration(
         monkeypatch, project_language):

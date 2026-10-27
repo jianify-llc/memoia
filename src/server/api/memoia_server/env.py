@@ -6,6 +6,7 @@ Initialize logger, encoder, and config.
 import os
 import datetime
 import json
+import math
 import yaml
 import logging
 import tiktoken
@@ -258,6 +259,9 @@ class ProfileConfig:
     language: Literal["en", "zh"] = None
     llm_model: str | None = None
     reasoning_effort: ReasoningEffort = None
+    fact_llm_model: str | None = None
+    fact_reasoning_effort: ReasoningEffort = None
+    fact_temperature: float | None = None
     additional_user_profiles: list[dict] = field(default_factory=list)
     overwrite_user_profiles: Optional[list[dict]] = None
 
@@ -265,6 +269,13 @@ class ProfileConfig:
 
     def __post_init__(self):
         _validate_llm_configuration(self.llm_model, self.reasoning_effort)
+        _validate_llm_configuration(self.fact_llm_model, self.fact_reasoning_effort)
+        if self.fact_temperature is not None and (
+            type(self.fact_temperature) not in (int, float)
+            or not math.isfinite(self.fact_temperature)
+            or not 0 <= self.fact_temperature <= 2
+        ):
+            raise ValueError("fact_temperature must be a finite number between 0 and 2")
         if self.language not in ["en", "zh"]:
             self.language = None
         _validate_topics(self.additional_user_profiles)

@@ -56,7 +56,8 @@ async def stage_derived(context, *, latest=False, queries=(), kinds=("profile", 
                 topic = row.get("topic")
                 if topic not in context.allowed_topics:
                     topic = context.allowed_topics[0]
-                unchanged = (existing is not None and existing["content"] == row["content"]
+                unchanged = (existing is not None and not existing.get("review_required")
+                             and existing["content"] == row["content"]
                              and existing["topic"] == topic and existing["sub_topic"] == slot
                              and existing["fact_ids"] == [row["id"]] and not existing.get("invalid_fact_ids"))
                 change = ProfileMutation(action="keep", id=ident) if unchanged else ProfileMutation(
@@ -74,6 +75,11 @@ async def stage_derived(context, *, latest=False, queries=(), kinds=("profile", 
             replaced = latest and all(row["id"] not in selected_ids for row in supported)
             action = "keep" if supported and not replaced and not entry.get("invalid_fact_ids") else "remove"
             change = {"action": action, "id": entry["id"]}
+            if supported and not replaced and entry.get("review_required"):
+                change.update(action="upsert", content=" ".join(row["content"] for row in supported),
+                              fact_ids=[row["id"] for row in supported])
+                if kind == "profile":
+                    change.update(topic=context.allowed_topics[0], sub_topic="fixture")
             if kind == "profile":
                 await context.stage_profile(ProfileMutation(**change))
             else:

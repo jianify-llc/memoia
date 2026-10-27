@@ -306,8 +306,8 @@ async def test_event_background_support_locates_rewrite_and_fences_old_loop(sour
         await context.read_changes()
         entry = (await context.read("events"))["items"][0]
         await context.stage_event(EventMutation(action="upsert", id=event_id,
-            content=entry["content"], summary="Old background must not be committed.",
-            keywords=entry["keywords"], fact_ids=entry["fact_ids"]))
+            content=next(fact["content"] for fact in entry["evidence"] if fact["id"] == str(main_fact)),
+            summary="Old background must not be committed.", keywords="charity concert, alto", fact_ids=entry["fact_ids"]))
         if deleted:
             await source.delete_messages(source_user, "__root__", sid,
                 DeleteMessages(idempotency_key="remove-background", message_ids=["m1"]))
@@ -333,7 +333,8 @@ async def test_event_background_support_locates_rewrite_and_fences_old_loop(sour
         assert entry.get("pending_delete", False) is False
         assert entry["invalid_fact_ids"] == ([str(background_fact)] if deleted else [])
         await context.stage_event(EventMutation(action="upsert", id=event_id,
-            content=entry["content"], summary="The user performed." if deleted else "The soprano singer performed.",
+            content=next(fact["content"] for fact in entry["evidence"] if fact["id"] == str(main_fact)),
+            summary="The user performed." if deleted else "The soprano singer performed.",
             keywords="charity concert" if deleted else "charity concert, soprano",
             fact_ids=entry["fact_ids"]))
         return context.get_plan(LoopUsage())

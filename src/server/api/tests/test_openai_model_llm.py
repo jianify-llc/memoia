@@ -144,7 +144,8 @@ async def test_fact_cache_requires_model_and_endpoint_capabilities(openai_transp
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model,supported", [
     ("gpt-5.6", True), ("gpt-6-luna", True), ("gpt-6-luna-2026-09-22", True),
-    ("gpt-6.1-sol", True), ("gpt-5.4", False), ("gpt-4o", False),
+    ("gpt-6.1-sol", True), ("gpt-6.1-terra", True), ("gpt-6.1-terra-2026-10-27", True),
+    ("gpt-5.4", False), ("gpt-4o", False),
     ("custom-project-model", False), ("gpt-6-unknown", False),
 ])
 async def test_fixed_cache_respects_model_capability(openai_transport, model, supported):

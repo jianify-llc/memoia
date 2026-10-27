@@ -173,6 +173,23 @@ async def test_model_and_reasoning_fallbacks_are_resolved_independently(projects
 
 
 @pytest.mark.asyncio
+async def test_fact_overrides_are_loaded_from_project_without_changing_maintenance(projects):
+    uid, ids = projects
+    with Session.begin() as session:
+        session.execute(update(Project).where(Project.project_id == ids[0]).values(profile_config=json.dumps({
+            "llm_model": "gpt-6-luna", "reasoning_effort": "high",
+            "fact_llm_model": "gpt-6.1-terra", "fact_reasoning_effort": "none", "fact_temperature": 0.2})))
+        rules = source._project_rules(session, ids[0])
+        other = source._project_rules(session, ids[1])
+    assert (rules["fact_llm_model"], rules["fact_reasoning_effort"], rules["fact_temperature"]) == (
+        "gpt-6.1-terra", "none", 0.2)
+    assert other["fact_llm_model"] is None and other["fact_temperature"] is None
+    async with maintenance.TaskLease(claim_project(uid, ids[0])) as lease:
+        context = maintenance.DBMaintenanceContext(lease.claim, lease)
+        assert (context.llm_model, context.reasoning_effort) == ("gpt-6-luna", "high")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("field,value", [("llm_model", "replacement-model"), ("reasoning_effort", "medium")])
 @pytest.mark.parametrize("stage_changes", [False, True])
 async def test_model_change_during_phase_conflicts_without_ack_or_partial_writes(

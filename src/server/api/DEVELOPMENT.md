@@ -18,8 +18,11 @@ Memoia is a user memory system derived from Memobase. Sources and evidence are t
 Derived `fact_ids` are actual evidence, not a complete influence map. The existing read set also
 produces an internal JSON influence scope, inherited through read Profile/Event text. Fact
 corrections/deletions invalidate affected derived revisions in their transaction; the existing flush
-must resolve that scope with explicit keep/update/remove decisions before committing, not default
-deletion. Keep preserves the original row and requires its complete, valid support to be read.
+must resolve that scope by rebuilding from current Facts or removing the entry, not default
+deletion or keeping old prose. Affected targets withhold original prose, including titles and subtopics;
+their complete surviving support IDs remain available, with bounded evidence and existing Fact paging.
+Missing legacy links are marked support_unknown and require discovery, not automatic removal.
+Unrelated entries can still be kept after their complete text and valid support have been read.
 Tools mark this prepared scope with `review_required` and expose bounded `remaining_review`
 counts/IDs in initial changes, reads and staging receipts. Optional reads do not expand it;
 an ID in this list is not permission to mutate unread text. Accepted decisions advance the
@@ -168,7 +171,17 @@ llm_model: gpt-6-luna
 reasoning_effort: high
 ```
 
-Fact 抽取和后台统一 AgentLoop 均使用该项目配置；工具循环使用 Responses，
+这两个字段默认同时用于 Fact 和维护 Loop。只调整 Fact 时，可以在同一份项目 YAML 中覆盖：
+
+```yaml
+fact_llm_model: gpt-6.1-terra
+fact_reasoning_effort: none
+fact_temperature: 0.2
+```
+
+三个字段均可省略：模型和思考等级分别回退至原项目／服务配置，温度省略则不发送。
+温度仅在 Fact 的实际思考等级为 `none` 时发送，取值为有限数字 0–2。
+这不会改变维护 Loop 的模型、思考等级或 Flex 回退策略。工具循环使用 Responses，
 不为适配协议静默降低思考等级。项目密钥与可选 Playground 的模型配置仍独立。
 
 Fact 抽取和统一 Profile/Event AgentLoop 固定 Responses `reasoning.mode=standard`，

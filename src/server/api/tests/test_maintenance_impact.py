@@ -53,6 +53,8 @@ async def test_required_progress_covers_indirect_scope_not_optional_reads(backgr
             page = await context.read(collection)
             assert page["items"][0]["review_required"] is True
             assert page["items"][0]["fact_ids"] == [str(main)]
+            assert set(page["items"][0]) <= {"id", "revision", "topic", "fact_ids", "evidence",
+                                               "invalid_fact_ids", "support_unknown", "review_required"}
             assert page["remaining_review"] == expected
         from types import SimpleNamespace
         from memoia_server.models.utils import Promise
@@ -63,18 +65,33 @@ async def test_required_progress_covers_indirect_scope_not_optional_reads(backgr
         found = await context.search("concert")
         assert [item["review_required"] for item in found["profiles"]] == [True, False]
         assert found["events"][0]["review_required"] is True
-        result = await context.stage_batch([EventMutation(action="keep", id=eid)], "event")
+        for item in (found["profiles"][0], found["events"][0]):
+            assert not {"content", "event_tip", "title", "summary", "keywords", "sub_topic"}.intersection(item)
+        for collection, ident, factory in (("profile", pid, ProfileMutation), ("event", eid, EventMutation)):
+            with pytest.raises(source.SourceError) as rejected:
+                await context.stage_batch([factory(action="keep", id=ident)], collection)
+            assert rejected.value.code == "maintenance_rewrite_required"
+        current = (await context.read("facts", ids=[str(main)]))["items"][0]
+        result = await context.stage_batch([EventMutation(action="upsert", id=eid,
+            content=current["content"], fact_ids=[current["id"]])], "event")
         assert result["remaining_review"] == {**expected, "events": {"count": 0, "ids": []}}
         with pytest.raises(source.SourceError) as missing:
             context.get_plan(LoopUsage())
         assert missing.value.code == "maintenance_unresolved_entries"
-        result = await context.stage_batch([ProfileMutation(action="keep", id=pid)], "profile")
+        result = await context.stage_batch([ProfileMutation(action="upsert", id=pid,
+            content=current["content"], topic=context.allowed_topics[0], sub_topic="concert",
+            fact_ids=[current["id"]])], "profile")
         assert all(group["count"] == 0 for group in result["remaining_review"].values())
         return context.get_plan(LoopUsage())
 
     before = derived(uid)
     assert (await run_flush(uid, "explicit-required-scope", runner))[1]
-    assert derived(uid) == before
+    profiles, events = derived(uid)
+    assert profiles[manual] == before[0][manual]
+    assert profiles[pid]["fact_ids"] == events[eid]["fact_ids"] == [str(main)]
+    with Session() as session:
+        assert session.get(UserProfile, (pid, "__root__")).content == "Supported fact 2"
+    assert events[eid]["content"] == "Supported fact 2"
 
 
 @pytest.mark.asyncio
@@ -92,13 +109,19 @@ async def test_remaining_preview_advances_after_decisions_not_reads(background_m
         ids = progress["profiles"]["ids"]
         page = await context.read("profiles", ids=ids)
         assert page["remaining_review"] == progress
-        result = await context.stage_batch([ProfileMutation(action="keep", id=ident) for ident in ids], "profile")
+        current = (await context.read("facts", ids=[str(main)]))["items"][0]
+        result = await context.stage_batch([ProfileMutation(action="upsert", id=ident,
+            content=current["content"], topic=context.allowed_topics[0], sub_topic="concert",
+            fact_ids=[current["id"]]) for ident in ids], "profile")
         tail = result["remaining_review"]["profiles"]
         assert tail["count"] == len(tail["ids"]) == 2 and not set(tail["ids"]).intersection(ids)
         await context.read("profiles", ids=tail["ids"])
-        await context.stage_batch([ProfileMutation(action="keep", id=ident) for ident in tail["ids"]], "profile")
+        await context.stage_batch([ProfileMutation(action="upsert", id=ident,
+            content=current["content"], topic=context.allowed_topics[0], sub_topic="concert",
+            fact_ids=[current["id"]]) for ident in tail["ids"]], "profile")
         await context.read("events", ids=[eid])
-        result = await context.stage_batch([EventMutation(action="keep", id=eid)], "event")
+        result = await context.stage_batch([EventMutation(action="upsert", id=eid,
+            content=current["content"], fact_ids=[current["id"]])], "event")
         assert all(group["count"] == 0 for group in result["remaining_review"].values())
         return context.get_plan(LoopUsage())
 
@@ -616,16 +639,24 @@ async def test_manual_edits_preserve_private_scope_and_serialize_background_revi
 
     async def forget_affected(context):
         await context.read_changes()
+        current = (await context.read("facts", ids=[str(main)]))["items"][0]
         for collection, factory in (("profiles", ProfileMutation), ("events", EventMutation)):
             page = await context.read(collection)
             for entry in page["items"]:
                 if entry["id"] == str(null_profile):
+                    assert entry["review_required"] is True
+                    assert entry["support_unknown"] is True
+                    assert entry["fact_ids"] == entry["invalid_fact_ids"] == entry["evidence"] == []
+                    assert "content" not in entry and "sub_topic" not in entry
                     assert entry.get("pending_delete", False) is False
                     await context.stage_profile(factory(action="remove", id=entry["id"]))
                 elif collection == "profiles":
-                    await context.stage_profile(factory(action="keep", id=entry["id"]))
+                    await context.stage_profile(factory(action="upsert", id=entry["id"],
+                        content=current["content"], topic=context.allowed_topics[0], sub_topic="concert",
+                        fact_ids=[current["id"]]))
                 else:
-                    await context.stage_event(factory(action="keep", id=entry["id"]))
+                    await context.stage_event(factory(action="upsert", id=entry["id"],
+                        content=current["content"], fact_ids=[current["id"]]))
         plan = context.get_plan(LoopUsage())
         assert any(change.id == str(null_profile) and change.action == "remove" for change in plan.profiles)
         return plan

@@ -199,14 +199,16 @@ def evidence_time(groups, messages):
 
 
 async def _structured(model, prompt, system, *, project_id=DEFAULT_PROJECT_ID,
-                      llm_model=None, reasoning_effort=None, kind="fact_extraction"):
+                      llm_model=None, reasoning_effort=None, temperature=None, kind="fact_extraction"):
     validate_budget(prompt, system)
     schema = model.model_json_schema()
+    effort = reasoning_effort or CONFIG.llm_reasoning_effort
     # OpenAI strict schemas require all object keys; Pydantic fields here have no defaults.
     try:
         raw = await openai_complete(
             llm_model or CONFIG.best_llm_model, prompt, system_prompt=system,
-            reasoning={"effort": reasoning_effort or CONFIG.llm_reasoning_effort, "mode": "standard"},
+            reasoning={"effort": effort, "mode": "standard"},
+            **({"temperature": temperature} if effort == "none" and temperature is not None else {}),
             service_tier="default",
             cache_fixed_prompt=True,
             on_usage=partial(record_completion_usage, project_id, kind=kind),
@@ -235,6 +237,9 @@ def _project_rules(session, project_id):
     return {
         "llm_model": config.llm_model or CONFIG.best_llm_model,
         "reasoning_effort": config.reasoning_effort or CONFIG.llm_reasoning_effort,
+        "fact_llm_model": config.fact_llm_model,
+        "fact_reasoning_effort": config.fact_reasoning_effort,
+        "fact_temperature": config.fact_temperature,
         "language": language,
         "profile_topics": [{"topic": p.topic, "description": p.description,
                             "sub_topics": [s.model_dump() for s in p.sub_topics]}
@@ -270,7 +275,9 @@ async def extract_source(request: ImportSource, *, rules=None, project_id=DEFAUL
         else:
             return _validated_extraction(result, request, data)
     response = await _structured(MessageExtraction, prompt, EXTRACT_SYSTEM, project_id=project_id,
-                                llm_model=rules.get("llm_model"), reasoning_effort=rules.get("reasoning_effort"))
+                                llm_model=rules.get("fact_llm_model") or rules.get("llm_model"),
+                                reasoning_effort=rules.get("fact_reasoning_effort") or rules.get("reasoning_effort"),
+                                temperature=rules.get("fact_temperature"))
     result = _normalize_extraction(response, request)
     extracted = _validated_extraction(result, request, data)
     if save_candidate is not None:

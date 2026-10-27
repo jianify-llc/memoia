@@ -69,15 +69,15 @@ def test_keep_mutation_requires_only_an_existing_id(factory):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("omit_last", [False, True], ids=["explicit-keep", "unresolved"])
-async def test_one_correction_keeps_three_independent_entries_in_a_broad_impact_set(
+@pytest.mark.parametrize("omit_last", [False, True], ids=["rebuilt", "unresolved"])
+async def test_one_correction_rebuilds_all_entries_in_a_broad_impact_set(
         search_users, transport, script_refs, omit_last):
     uid, _, _, _ = search_users
-    facts = seed_facts(uid, ["The user sings alto.", "The user hikes on Sundays.",
-                             "The user paints with oils.", "The user plays chess."])
-    targets = [seed_derived(uid, [fid], content=content) for fid, content in zip(facts,
-        ["The user sings alto.", "The user hikes on Sundays.",
-         "The user paints with oils.", "The user plays chess."], strict=True)]
+    fact_contents = ["The user sings alto.", "The user hikes on Sundays.",
+                     "The user paints with oils.", "The user plays chess."]
+    facts = seed_facts(uid, fact_contents)
+    targets = [seed_derived(uid, [fid], content=content)
+               for fid, content in zip(facts, fact_contents, strict=True)]
     with Session.begin() as session:
         for index, (eid, pid) in enumerate(targets):
             entry = session.get(UserProfile, (pid, "__root__"))
@@ -92,6 +92,7 @@ async def test_one_correction_keeps_three_independent_entries_in_a_broad_impact_
         content="The user sings soprano.", subject="The user", reporter="The user",
         certainty="asserted", support_groups=[["m1"]], fact_time=None))
     assert corrected.status == "completed"
+    fact_contents[0] = "The user sings soprano."
 
     def snapshot():
         with Session() as session:
@@ -105,14 +106,13 @@ async def test_one_correction_keeps_three_independent_entries_in_a_broad_impact_
 
     before = snapshot()
     operation = maintenance.flush(uid, "__root__", "review-four-impact-candidates")
-    profile_changes = [{"action": "upsert", "id": str(targets[0][1]),
-        "content": "The user sings soprano.", "topic": "interests_preferences", "sub_topic": "voice",
-        "fact_ids": [str(facts[0])]}]
-    event_changes = [{"action": "upsert", "id": str(targets[0][0]),
-        "content": "The user sings soprano.", "fact_ids": [str(facts[0])]}]
-    for eid, pid in targets[1:3 if omit_last else 4]:
-        profile_changes.append({"action": "keep", "id": str(pid)})
-        event_changes.append({"action": "keep", "id": str(eid)})
+    profile_changes, event_changes = [], []
+    for index, (eid, pid) in enumerate(targets[:3 if omit_last else 4]):
+        profile_changes.append({"action": "upsert", "id": str(pid),
+            "content": fact_contents[index], "topic": "interests_preferences", "sub_topic": "activity",
+            "fact_ids": [str(facts[index])]})
+        event_changes.append({"action": "upsert", "id": str(eid),
+            "content": fact_contents[index], "fact_ids": [str(facts[index])]})
     refs = script_refs([
         completion(None, calls=[tool("read_changes", {})], response_id="resp-changes"),
         completion(None, calls=[
@@ -131,6 +131,11 @@ async def test_one_correction_keeps_three_independent_entries_in_a_broad_impact_
     assert all(group["count"] == 4 for group in initial["remaining_review"].values())
     reads = {item["call_id"]: ast.literal_eval(item["output"]) for item in transport["requests"][2]["input"]}
     assert all(item["review_required"] for page in reads.values() for item in page["items"])
+    assert all(not ({"content", "title", "summary", "sub_topic"} & item.keys())
+               for page in reads.values() for item in page["items"])
+    evidence = {item["id"]: item["content"] for page in reads.values()
+                for entry in page["items"] for item in entry["evidence"]}
+    assert evidence == {refs[str(fid)]: content for fid, content in zip(facts, fact_contents, strict=True)}
     staged = {item["call_id"]: ast.literal_eval(item["output"]) for item in transport["requests"][3]["input"]}
     for collection, call_id, target_index in (("profiles", "profiles-stage", 1), ("events", "events-stage", 0)):
         pending = staged[call_id]["remaining_review"][collection]
@@ -145,11 +150,13 @@ async def test_one_correction_keeps_three_independent_entries_in_a_broad_impact_
     if omit_last:
         assert after == before
         return
-    for eid, pid in targets[1:]:
-        assert after[0][str(pid)] == before[0][str(pid)]
-        assert after[1][str(eid)] == before[1][str(eid)]
-    assert after[0][str(targets[0][1])]["content"] == "The user sings soprano."
-    assert after[1][str(targets[0][0])]["event_data"]["content"] == "The user sings soprano."
+    assert after[0].keys() == before[0].keys() and after[1].keys() == before[1].keys()
+    for index, (eid, pid) in enumerate(targets):
+        assert after[0][str(pid)]["content"] == after[1][str(eid)]["event_data"]["content"] == fact_contents[index]
+        assert after[0][str(pid)]["attributes"]["fact_ids"] == [str(facts[index])]
+        assert after[1][str(eid)]["event_data"]["fact_ids"] == [str(facts[index])]
+        assert after[0][str(pid)]["revision"] == before[0][str(pid)]["revision"] + 1
+        assert after[1][str(eid)]["revision"] == before[1][str(eid)]["revision"] + 1
 
 
 @pytest.mark.asyncio
@@ -160,11 +167,10 @@ async def test_keep_cannot_bypass_actual_target_and_complete_original_support_re
     uid, _, _, _ = search_users
     changed, support = seed_facts(uid, ["Changed background", "Supporting fact " + "x" * 2000])
     eid, pid = seed_derived(uid, [support, changed], content="Original supported entry")
-    if reason == "support-missing":
-        deleted = await source.delete_fact(uid, "__root__", support, DeleteFact(
-            idempotency_key="delete-part-of-keep-support", expected_revision=1, reason="Withdraw support"))
-        assert deleted.status == "completed"
     with Session.begin() as session:
+        if reason == "support-missing":
+            # Exercise ordinary keep validation without creating a required-rewrite change.
+            session.execute(memory_facts.delete().where(memory_facts.c.id == support))
         for table, ident, column in ((UserProfile, pid, "attributes"), (UserEvent, eid, "event_data")):
             entry = session.get(table, (ident, "__root__"))
             data = {**getattr(entry, column), "_impact_fact_ids": [str(changed), str(support)]}
@@ -173,7 +179,7 @@ async def test_keep_cannot_bypass_actual_target_and_complete_original_support_re
             setattr(entry, column, data)
         if reason == "support-empty":
             session.execute(memory_event_facts.delete().where(memory_event_facts.c.event_id == eid))
-    batch(uid, fact=False, changes=[{"kind": "updated", "fact_id": str(changed)}])
+    batch(uid, fact=False, changes=[{"kind": "added", "fact_id": str(changed)}])
     operation = maintenance.flush(uid, "__root__", "keep-requires-real-reads")
     target = str(pid if kind == "profile" else eid)
     collection = "profiles" if kind == "profile" else "events"
@@ -181,6 +187,7 @@ async def test_keep_cannot_bypass_actual_target_and_complete_original_support_re
 
     async def runner(context):
         await context.read_changes()
+        assert all(group["count"] == 0 for group in context._remaining_review().values())
         if reason == "staged-replacement":
             await context.read("facts", ids=[str(support)])
             fields = {"topic": context.allowed_topics[0], "sub_topic": "replacement"} if kind == "profile" else {}
@@ -225,7 +232,7 @@ async def test_keep_batch_can_read_omitted_support_and_correct_it_in_the_same_lo
     uid, _, _, _ = search_users
     changed, support = seed_facts(uid, ["Changed background", "Supporting fact " + "x" * 2000])
     eid, pid = seed_derived(uid, [support], content="Original supported entry")
-    batch(uid, fact=False, changes=[{"kind": "updated", "fact_id": str(changed)}])
+    batch(uid, fact=False, changes=[{"kind": "added", "fact_id": str(changed)}])
     collection, target, factory = (("profiles", str(pid), maintenance_agent.ProfileMutation)
         if kind == "profile" else ("events", str(eid), maintenance_agent.EventMutation))
 
@@ -238,7 +245,7 @@ async def test_keep_batch_can_read_omitted_support_and_correct_it_in_the_same_lo
         change = factory(action="keep", id=target)
         rejected = await context.stage_batch([change], kind)
         assert rejected == {"staged": False, "ids": [target], "remaining_review": {
-            "profiles": {"count": 1, "ids": [str(pid)]}, "events": {"count": 1, "ids": [str(eid)]}}, "error": {
+            "profiles": {"count": 0, "ids": []}, "events": {"count": 0, "ids": []}}, "error": {
             "code": "maintenance_support_unread", "unread_fact_ids": [str(support)], "invalid_fact_ids": []}}
         with pytest.raises(source.SourceError, match="must be corrected"):
             context.get_plan(maintenance_agent.LoopUsage())
@@ -251,7 +258,9 @@ async def test_keep_batch_can_read_omitted_support_and_correct_it_in_the_same_lo
             proposal.update(topic=context.allowed_topics[0], sub_topic="fixture")
         rejected_again = await context.stage_batch([factory(**proposal)], kind)
         assert rejected_again["staged"] is False
-        assert rejected_again["remaining_review"][collection] == {"count": 1, "ids": [target]}
+        assert rejected_again["remaining_review"][collection] == {"count": 0, "ids": []}
+        with pytest.raises(source.SourceError, match="must be corrected"):
+            context.get_plan(maintenance_agent.LoopUsage())
         assert (await context.stage_batch([change], kind))["remaining_review"][collection]["count"] == 0
         other, other_id, other_factory = (("events", str(eid), maintenance_agent.EventMutation)
             if kind == "profile" else ("profiles", str(pid), maintenance_agent.ProfileMutation))
@@ -526,12 +535,14 @@ async def test_new_affected_entry_after_preparation_rejects_all_staged_changes(s
 
     async def runner(context):
         await context.read_changes()
-        await context.read("facts", ids=[str(kept)])
+        current = (await context.read("facts", ids=[str(kept)]))["items"][0]
         assert not context._staged["profiles"] and not context._staged["events"]
         await context.read("profiles", ids=[str(pid)])
         await context.read("events", ids=[str(eid)])
-        await context.stage_profile(maintenance_agent.ProfileMutation(action="keep", id=str(pid)))
-        await context.stage_event(maintenance_agent.EventMutation(action="keep", id=str(eid)))
+        await context.stage_profile(maintenance_agent.ProfileMutation(action="upsert", id=str(pid),
+            content=current["content"], topic=context.allowed_topics[0], sub_topic="trails", fact_ids=[str(kept)]))
+        await context.stage_event(maintenance_agent.EventMutation(action="upsert", id=str(eid),
+            content=current["content"], fact_ids=[str(kept)]))
         created["profile"] = await context.stage_profile(maintenance_agent.ProfileMutation(action="upsert",
             content="A newly staged profile must not commit.", topic=context.allowed_topics[0],
             sub_topic="late-write", fact_ids=[str(kept)]))
