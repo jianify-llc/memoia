@@ -422,3 +422,23 @@ async def test_database_rejects_duplicate_support_groups_and_batch_receipts(uid,
         session.execute(insert(memory_operations).values(id=uuid4(), user_id=uid, project_id="__root__",
             source_id="dialog-1", blob_id=imported.blob_id, idempotency_key="b", kind="import",
             request_hash="x", request={}, status="processing"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["tombstone", "remove_member", "exclude_support"])
+async def test_database_keeps_live_support_checks_when_source_exists(uid, models, action):
+    imported = await source.import_source(uid, "__root__", body("support-guard", "1", "2"))
+    expected = {"tombstone": "message still supports facts", "remove_member": "message still belongs to a blob",
+                "exclude_support": "blob still owns excluded evidence"}[action]
+    with pytest.raises(IntegrityError, match=expected), Session.begin() as session:
+        own_message = (memory_messages.c.user_id == uid, memory_messages.c.project_id == "__root__",
+                       memory_messages.c.source_id == "dialog-1", memory_messages.c.message_id == "1")
+        if action == "tombstone":
+            session.execute(update(memory_messages).where(*own_message).values(deleted=True))
+        else:
+            if action == "remove_member":
+                session.execute(delete(memory_facts).where(memory_facts.c.user_id == uid))
+            session.execute(delete(memory_messages).where(*own_message))
+            if action == "exclude_support":
+                session.execute(update(memory_blobs).where(memory_blobs.c.id == imported.blob_id).values(message_ids=["2"]))
+    assert len(source.get_source(uid, "__root__", source_id="dialog-1").evidence) == 2

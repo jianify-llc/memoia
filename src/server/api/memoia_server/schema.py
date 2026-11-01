@@ -4,7 +4,7 @@ from .connectors import Session
 from .models.database import Project, UserEvent
 from .env import CONFIG
 
-EXPECTED_REVISION = "0015_event_time"
+EXPECTED_REVISION = "0016_source_cascade"
 
 
 def check_schema():

@@ -21,6 +21,12 @@ memoia_server.schema.check_schema() 校验 revision 和 embedding 维度、初�
   0013_reasoning_mode 不新增表或列；历史 flush guard 允许一次模式冻结。当前运行时统一 Standard，不再写入或继承此字段，迁移仍保留。
   0014_fact_time       Fact 时间列及未完成操作的已知恢复字段改名，值与幂等身份不变。
   0015_event_time      Event 叙事 JSON 的顶层 time 改为 event_time，值及其他持久数据不变。
+  0016_source_cascade  Source 级联完成后跳过逐消息证据扫描，保留存续来源约束并移除重复旧外键。
+
+0016 不改业务数据、批次、回执或墓碑；用现有索引缩小消息/Blob 证据检查范围。
+Source 已不存在时，其消息和 Blob 已被复合外键级联移除，延迟检查直接返回；Source
+仍存在时完整执行证据保护。旧 memory_facts_source_id_fkey 被现有归属复合外键覆盖，
+仅删除这项重复约束，不关闭触发器、不延长超时，也不新增清理队列。共享库仍需单独授权迁移。
 
 0015 仅机械改名 user_events.event_data 对象的顶层 time；event_time 仍为叙事时间文本，
 不转换为 Fact 的时间证据结构。缺失字段不补写，字符串（包括空字符串）和 null 原值保留，

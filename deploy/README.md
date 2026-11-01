@@ -134,7 +134,7 @@ deploy-memoia.sh prepare/finalize 使用固定根目录、传入的 digest/SHA/r
 
 ## Schema 维护与来源模型升级
 
-现有库升级是显式维护，不是普通 `prepare`。当前 Alembic head 为 `0015_event_time`，整条前向链及数据范围见[迁移说明](../src/server/api/migrations/README)。0015 将 Event 的 time 改名为 event_time；0014 将 Fact 时间和已知恢复字段改名为 fact_time，均保留原值与恢复身份。0013 的历史 flush guard 原样保留；当前 Fact 与 maintenance 固定 Standard，不再保存／继承模式，不新增 JSON 清洗迁移。0012 添加 Fact 持久化时间列（旧行保持 null，新写入默认 now()），扩展 Operation／Blob 的 `correct` 类型及对应约束、唯一索引。0011 删除旧 Gist 索引表（不转换为 Fact），保留 Event 正文、Fact 和回执，并添加 Blob 消息成员 GIN 索引。0010 只删除旧隐藏 Fact、纠正图及 active，不复活历史、不重置消息状态或原回执；受影响派生内容由已有 flush 异步修复。需在发布前检查并单独处理退役配置键，不能静默改共享配置。保持原备份／授权和停写边界，不重新抽取已清除正文，不 stamp 或手填 schema 指纹。不可兼容升级不能通过切回旧 API 撤销，数据契约见 [API-DESIGN](../src/server/api/API-DESIGN.md)。
+现有库升级是显式维护，不是普通 `prepare`。当前 Alembic head 为 `0016_source_cascade`，整条前向链及数据范围见[迁移说明](../src/server/api/migrations/README)。0016 优化来源级联清理的约束检查并移除重复旧外键，不改业务数据或清理超时。0015 将 Event 的 time 改名为 event_time；0014 将 Fact 时间和已知恢复字段改名为 fact_time，均保留原值与恢复身份。0013 的历史 flush guard 原样保留；当前 Fact 与 maintenance 固定 Standard，不再保存／继承模式，不新增 JSON 清洗迁移。0012 添加 Fact 持久化时间列（旧行保持 null，新写入默认 now()），扩展 Operation／Blob 的 `correct` 类型及对应约束、唯一索引。0011 删除旧 Gist 索引表（不转换为 Fact），保留 Event 正文、Fact 和回执，并添加 Blob 消息成员 GIN 索引。0010 只删除旧隐藏 Fact、纠正图及 active，不复活历史、不重置消息状态或原回执；受影响派生内容由已有 flush 异步修复。需在发布前检查并单独处理退役配置键，不能静默改共享配置。保持原备份／授权和停写边界，不重新抽取已清除正文，不 stamp 或手填 schema 指纹。不可兼容升级不能通过切回旧 API 撤销，数据契约见 [API-DESIGN](../src/server/api/API-DESIGN.md)。
 
 首次增加 Worker 也走这次显式 schema 维护：旧 API／Redis／数据库／网络契约必须与已验收基线相同，且没有旧 Worker。备份策略只允许在旧配套恢复证明上增加同镜像 Worker，不放宽配置或基础设施校验；迁移暂存新的 Worker 指纹，只有两个进程及业务验收通过才接纳。普通 prepare／finalize 仍拒绝拓扑漂移。
 

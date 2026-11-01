@@ -161,7 +161,7 @@ async def test_extraction_preserves_mixed_language_material_and_result_without_l
         extracted = await source.extract_source(request, rules=rules)
         assert len(bodies) == 1
         assert source_material(bodies[0]["input"][1]["content"][0]["text"]) == {
-            "messages": [{**message.model_dump(mode="json", exclude={"time_zone"}), "local_recorded_date": None}
+            "messages": [{**message.model_dump(mode="json", exclude={"time_zone", "images"}), "local_recorded_date": None}
                          for message in request.messages]}
         assert [{key: item[key] for key in expected[0]} for item in extracted.facts] == expected
         recovered = await source.extract_source(request, rules=rules, candidate={"facts": expected})
@@ -230,7 +230,7 @@ async def test_actual_extract_preserves_full_roles_ids_times_and_joint_support(m
         assert wire["input"][1]["role"] == "developer"
         assert "prompt_cache_key" not in wire
         assert source_material(wire["input"][1]["content"][0]["text"]) == {
-            "messages": [{**message.model_dump(mode="json", exclude={"time_zone"}), "local_recorded_date": None}
+            "messages": [{**message.model_dump(mode="json", exclude={"time_zone", "images"}), "local_recorded_date": None}
                          for message in request.messages]}
         assert wire["text"]["format"]["schema"] == source.MessageExtraction.model_json_schema()
         assert wire["text"]["format"]["strict"] is True

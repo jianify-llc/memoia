@@ -88,7 +88,7 @@ def test_event_time_rename_preserves_values_and_unrelated_data(legacy_schema, mo
         before_events = snapshots(db, "user_events")
         before_others = {table: snapshots(db, table) for table in unchanged_tables}
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "0015_event_time")
 
     with engine.connect() as db:
         assert db.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0015_event_time"

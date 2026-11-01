@@ -1,6 +1,8 @@
 """V2 protocol: explicit identities and bounded complete messages."""
 from datetime import date, datetime
 import calendar
+import ipaddress
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Annotated, Literal
 from uuid import UUID
@@ -18,13 +20,56 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ImageAttachment(StrictModel):
+    url: str = Field(min_length=1, max_length=4096, pattern=r"^https?://",
+                     description="Temporary extraction input; never returned as durable message evidence.")
+    mimeType: Literal["image/jpeg", "image/png", "image/webp", "image/gif"]
+    width: int = Field(gt=0, strict=True)
+    height: int = Field(gt=0, strict=True)
+    byteSize: int = Field(gt=0, le=10 * 1024 * 1024, strict=True)
+
+    @field_validator("url")
+    @classmethod
+    def public_url(cls, value):
+        try:
+            parsed = urlsplit(value)
+            host = parsed.hostname
+            port = parsed.port
+            if (parsed.scheme not in ("http", "https") or not host or parsed.username is not None
+                    or parsed.password is not None or parsed.fragment or host.lower() == "localhost"
+                    or host.lower().endswith(".localhost")
+                    or any(ord(char) <= 32 or char in '\\"<>' for char in value)):
+                raise ValueError
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError:
+                address = None
+            if address is not None and not address.is_global:
+                raise ValueError
+            return value
+        except ValueError:
+            raise ValueError("Image URL must be a public HTTP(S) URL without credentials or fragment") from None
+
+
 class SourceMessage(StrictModel):
+    # Publish the same cross-field requirement to generated SDK validators.
+    model_config = ConfigDict(json_schema_extra={
+        "if": {"required": ["content"], "properties": {"content": {"const": ""}}},
+        "then": {"required": ["images"], "properties": {"images": {"minItems": 1}}},
+    })
     message_id: str = Field(min_length=1, max_length=255)
     role: Literal["user", "assistant", "system", "tool"]
-    content: str = Field(min_length=1, max_length=262144)
+    content: str = Field(max_length=262144)
+    images: list[ImageAttachment] = Field(default_factory=list, max_length=1)
     occurred_at: datetime
     # Wire name retained for compatibility: this is the message recording time.
     time_zone: str | None = Field(default=None, max_length=100)
+
+    @model_validator(mode="after")
+    def nonempty_message(self):
+        if not self.content and not self.images:
+            raise ValueError("Message requires text or an image")
+        return self
 
     @field_validator("time_zone")
     @classmethod

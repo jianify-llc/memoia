@@ -79,6 +79,27 @@ pnpm pack
 
 The generated validators are standalone JavaScript: runtime use requires no Node.js APIs, dynamic evaluation, or Ajv dependency. A fixed-version tarball can be copied into a consumer's `vendor/` directory and referenced through a `file:` dependency with its lockfile; no registry publication is required for first integration. Regenerate after exporting server OpenAPI. The generated-schema check must be part of verification before distribution.
 
+## Transient image input
+
+Import messages may include `images: [{ url, mimeType, width, height, byteSize }]`: at most one
+public HTTP(S) image per message, declared size at most 10 MiB, JPEG/PNG/WebP or non-animated GIF.
+`content` remains required and may be empty only with an image. The caller validates actual
+bytes, ownership and link availability. Memoia forwards the image to the extraction model with
+`store: false`; URLs exist only in the current extraction process/request and are never written to
+Operation input or durable memory. Stored input has only an image-count marker; message identity
+hashes include the original attachment. Text input and validated candidates retain their existing
+seven-day expiry. For unfinished image operations, `retryOperation()` returns `input_required`
+instead of attempting extraction without images. Query the original receipt first; after confirming
+resupply is needed, call `importBlob()` with the same key and complete original messages/images.
+This resumes an eligible original failure, reuses its saved candidate where available, returns a
+completed receipt unchanged and does not replay permanent failures. Never blindly resubmit an
+unknown write; inspect its original handle. Concurrent same-key requests retain one effect.
+An `input_required` receipt remains recoverable by explicit same-key resupply; it is not a permanent
+model/configuration rejection.
+Source evidence and search keep only existing message IDs/times, never image URLs. Resolve
+images from those IDs in the calling system. No new database migration or image retrieval
+field is introduced. This wire extension does not prove deployed vision-model quality.
+
 ## Time evidence (0.4)
 
 Import messages may include `time_zone` (original IANA zone). `occurred_at` remains the message recording instant, not the date of the fact it describes. Returned source evidence and search facts preserve `fact_time` (inclusive `YYYY-MM-DD` dates, precision and verbatim source expressions) and `source_messages` (recording instants/zones). `FactTime` and `Evidence` are exported from generated OpenAPI. The former `EventTime` type and Fact evidence `event_time` field are removed; Event story `event_time` is separate nullable prose. Server and consumers must upgrade together. `event_after` and `event_before` query parameters are unchanged. Unknown dates must remain unknown. A month/year range is not an exact occurrence or duration. No model backfill of historical identity or time is performed.

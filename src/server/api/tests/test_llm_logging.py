@@ -49,9 +49,11 @@ def test_standalone_api_debug_never_logs_model_body_before_loop_import(tmp_path)
             openai_model_llm.get_openai_async_client_instance = lambda: client
             try:
                 assert await openai_model_llm.openai_complete("gpt-6-luna", marker,
-                    system_prompt=marker, cache_fixed_prompt=True) == marker
+                    system_prompt=marker, cache_fixed_prompt=True,
+                    images=[{"message_id": "m1", "url": "https://example.invalid/PRIVATE_IMAGE_URL.png"}]) == marker
                 assert len(requests) == 1
                 assert marker not in output.getvalue()
+                assert "PRIVATE_IMAGE_URL" not in output.getvalue()
             finally:
                 await client.close()
         asyncio.run(run())

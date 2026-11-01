@@ -1,4 +1,5 @@
-# Memoia text Responses boundary; task/transaction recovery owns retries.
+# Memoia Responses boundary; task/transaction recovery owns retries.
+import json
 import time
 from collections.abc import Awaitable, Callable
 from openai import APIError
@@ -10,6 +11,7 @@ async def openai_complete(
     model, prompt, system_prompt=None,
     on_usage: Callable[..., Awaitable[None]] | None = None,
     cache_fixed_prompt: bool = False,
+    images: list[dict] | None = None,
     **kwargs
 ) -> str:
     openai_async_client = get_openai_async_client_instance()
@@ -29,6 +31,14 @@ async def openai_complete(
     # An extraction's source is reference material, not a fabricated current user.
     source = {"type": "input_text", "text": prompt}
     inputs.append({"role": "developer" if cache_fixed_prompt else "user", "content": [source]})
+    if images:
+        content = []
+        for image in images:
+            content.extend([{"type": "input_text", "text": "Source image: " + json.dumps(
+                                {"message_id": image["message_id"]}, ensure_ascii=False)},
+                            {"type": "input_image", "image_url": image["url"], "detail": "auto"}])
+        inputs.append({"role": "user", "content": content})
+
 
     if model == "gpt-6-luna":
         # 正式调用默认使用完整推理预算；启动探针可显式指定独立 completion 上限。

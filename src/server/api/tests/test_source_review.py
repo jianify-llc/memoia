@@ -165,7 +165,7 @@ async def test_single_stateless_request_keeps_rules_cache_and_complete_schema(mo
     dynamic = ElementTree.fromstring(source_item["content"][0]["text"])
     assert dynamic.tag == "source_material" and len(dynamic) == 0
     assert json.loads(dynamic.text) == {"messages": [
-        {**body.messages[0].model_dump(mode="json", exclude={"time_zone"}), "local_recorded_date": "2026-10-22"}]}
+        {**body.messages[0].model_dump(mode="json", exclude={"time_zone", "images"}), "local_recorded_date": "2026-10-22"}]}
     assert body.messages[0].content not in wire["input"][0]["content"][0]["text"]
     assert source.EXTRACT_SYSTEM not in dynamic.text
     assert wire["text"]["verbosity"] == "low"
@@ -423,7 +423,7 @@ async def test_extraction_material_preserves_roles_dates_and_escaped_source(monk
     mocked.assert_awaited_once()
     data = material(mocked.await_args.args[1])
     assert set(data) == {"messages"}
-    assert data["messages"] == [{**message.model_dump(mode="json", exclude={"time_zone"}), "local_recorded_date": date}
+    assert data["messages"] == [{**message.model_dump(mode="json", exclude={"time_zone", "images"}), "local_recorded_date": date}
         for message, date in zip(body.messages, ["2026-10-03", "2026-10-02", None], strict=True)]
 
 

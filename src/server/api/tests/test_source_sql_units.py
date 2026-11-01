@@ -2,17 +2,19 @@
 import asyncio
 import json
 import threading
+import time
 from datetime import datetime, timezone
 from uuid import uuid4
 from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
-from sqlalchemy import event as sql_event, select
+from sqlalchemy import delete, event as sql_event, func, select, text
 
 from memoia_server.connectors import DB_ENGINE, Session, get_redis_client
 from memoia_server.controllers import source
 from memoia_server.controllers.user_lease import UserLease
+from memoia_server.models.database import User
 from memoia_server.models.source import DeleteMessages, memory_facts, memory_blobs, memory_messages, memory_sources
 from tests.test_sources import source_user, models, request
 
@@ -141,18 +143,25 @@ async def test_cancelled_sql_commit_finishes_before_releasing_user_lease(source_
     assert models.await_count == 1
 
 
-@pytest.mark.asyncio
-async def test_delete_one_message_in_large_source_fetches_only_affected_rows(source_user, models):
+def seed_large_source(source_user, batch_size=1):
     now, sid = datetime.now(timezone.utc), "large-source"
-    batches = [(str(index), uuid4(), uuid4()) for index in range(10_000)]
+    blobs = [(uuid4(), [str(index) for index in range(start, min(start + batch_size, 10_000))])
+             for start in range(0, 10_000, batch_size)]
+    batches = [(mid, bid, uuid4()) for bid, mids in blobs for mid in mids]
     with Session.begin() as session:
         session.execute(memory_sources.insert().values(user_id=source_user, project_id="__root__", source_id=sid))
         session.execute(memory_messages.insert(), [dict(user_id=source_user, project_id="__root__", source_id=sid,
             message_id=mid, content_hash="0" * 64, role="user", occurred_at=now, processed=True) for mid, _, _ in batches])
         session.execute(memory_blobs.insert(), [dict(id=bid, user_id=source_user, project_id="__root__", source_id=sid,
-            message_ids=[mid], status="active") for mid, bid, _ in batches])
+            message_ids=mids, status="active") for bid, mids in blobs])
         session.execute(memory_facts.insert(), [dict(id=fid, user_id=source_user, project_id="__root__", blob_id=bid,
             content="Historical statement " + mid, support_groups=[[mid]], occurred_at=now) for mid, bid, fid in batches])
+    return sid, batches
+
+
+@pytest.mark.asyncio
+async def test_delete_one_message_in_large_source_fetches_only_affected_rows(source_user, models):
+    sid, batches = seed_large_source(source_user)
     plans = {}
     def capture(connection, cursor, statement, parameters, context, executemany):
         if not statement.startswith("SELECT"):
@@ -171,3 +180,30 @@ async def test_delete_one_message_in_large_source_fetches_only_affected_rows(sou
     assert plans["facts"]["Plan"]["Actual Rows"] == 1
     assert plans["blobs"]["Plan"]["Actual Rows"] == 2  # Original input plus this deletion Blob.
     print("source-delete-explain " + json.dumps(plans))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target,batch_size", [("user", 1), ("source", 100)])
+async def test_large_source_cascade_finishes_with_deferred_checks(source_user, models, target, batch_size):
+    protected = await source.import_source(source_user, "__root__", request())
+    sid, _ = seed_large_source(source_user, batch_size)
+    started = time.monotonic()
+    with Session.begin() as session:
+        # Bound each SQL statement, including deferred checks, to 10 seconds.
+        # Measure the complete transaction separately below.
+        session.execute(text("SET LOCAL statement_timeout='10s'"))
+        if target == "user":
+            session.execute(delete(User).where(User.id == source_user, User.project_id == "__root__"))
+        else:
+            session.execute(delete(memory_sources).where(memory_sources.c.user_id == source_user,
+                memory_sources.c.project_id == "__root__", memory_sources.c.source_id == sid))
+        session.execute(text("SET CONSTRAINTS ALL IMMEDIATE"))
+    elapsed = time.monotonic() - started
+    expected_counts = {memory_sources: 1, memory_messages: 2, memory_blobs: 1, memory_facts: 2}
+    with Session() as session:
+        for table, remaining in expected_counts.items():
+            assert session.scalar(select(func.count()).select_from(table).where(
+                table.c.user_id == source_user, table.c.project_id == "__root__")) == (0 if target == "user" else remaining)
+    if target == "source":
+        assert source.get_operation(source_user, "__root__", operation_id=protected.operation_id) == protected
+    print(f"source-cascade target={target} messages=10000 batch_size={batch_size} seconds={elapsed:.3f}")

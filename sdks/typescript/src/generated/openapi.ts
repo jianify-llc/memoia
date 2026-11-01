@@ -978,6 +978,25 @@ export interface components {
              */
             id: string;
         };
+        /** ImageAttachment */
+        ImageAttachment: {
+            /**
+             * Url
+             * @description Temporary extraction input; never returned as durable message evidence.
+             */
+            url: string;
+            /**
+             * Mimetype
+             * @enum {string}
+             */
+            mimeType: "image/jpeg" | "image/png" | "image/webp" | "image/gif";
+            /** Width */
+            width: number;
+            /** Height */
+            height: number;
+            /** Bytesize */
+            byteSize: number;
+        };
         /** ImportSource */
         ImportSource: {
             /** Idempotency Key */
@@ -1500,6 +1519,8 @@ export interface components {
             role: "user" | "assistant" | "system" | "tool";
             /** Content */
             content: string;
+            /** Images */
+            images?: components["schemas"]["ImageAttachment"][];
             /**
              * Occurred At
              * Format: date-time

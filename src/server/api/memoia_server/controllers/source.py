@@ -124,6 +124,7 @@ EXTRACT_SYSTEM = (Path(__file__).parent.parent / "prompts" / "fact_extraction.md
     encoding="utf-8").strip()
 # Keep the stored key so in-flight operations retain their existing expiry/ownership boundary.
 _EXTRACTION_CANDIDATE = "fact_review_candidate"
+IMAGE_CONTEXT_RESERVE_TOKENS = 16384
 
 
 def _identity(user_id, project_id):
@@ -178,12 +179,14 @@ def _operation(row):
     )
 
 
-def validate_budget(prompt: str, system: str, *, source_text: str | None = None):
+def validate_budget(prompt: str, system: str, *, source_text: str | None = None, image_count: int = 0):
     if source_text is not None and len(get_encoded_tokens(source_text)) > CONFIG.source_max_input_tokens:
         raise SourceError("input_too_long", "Complete source exceeds input limit", 413)
-    budget = len(get_encoded_tokens(prompt + system)) + CONFIG.source_output_reserve_tokens
+    # Conservative context reserve, not an estimate of provider-billed image tokens.
+    budget = (len(get_encoded_tokens(prompt + system)) + CONFIG.source_output_reserve_tokens
+              + image_count * IMAGE_CONTEXT_RESERVE_TOKENS)
     if budget > CONFIG.source_context_window_tokens:
-        raise SourceError("input_too_long", "Prompt, evidence and reserved output exceed model budget", 413)
+        raise SourceError("input_too_long", "Prompt, images and reserved output exceed model budget", 413)
 
 
 def retained_groups(groups, retracted):
@@ -199,8 +202,7 @@ def evidence_time(groups, messages):
 
 
 async def _structured(model, prompt, system, *, project_id=DEFAULT_PROJECT_ID,
-                      llm_model=None, reasoning_effort=None, temperature=None, kind="fact_extraction"):
-    validate_budget(prompt, system)
+                      llm_model=None, reasoning_effort=None, temperature=None, kind="fact_extraction", images=None):
     schema = model.model_json_schema()
     effort = reasoning_effort or CONFIG.llm_reasoning_effort
     # OpenAI strict schemas require all object keys; Pydantic fields here have no defaults.
@@ -211,6 +213,7 @@ async def _structured(model, prompt, system, *, project_id=DEFAULT_PROJECT_ID,
             **({"temperature": temperature} if effort == "none" and temperature is not None else {}),
             service_tier="default",
             cache_fixed_prompt=True,
+            **({"images": images} if images else {}),
             on_usage=partial(record_completion_usage, project_id, kind=kind),
             max_output_tokens=CONFIG.source_output_reserve_tokens,
             text={"verbosity": "low", "format": {"type": "json_schema", "name": model.__name__, "strict": True, "schema": schema}},
@@ -250,15 +253,22 @@ def _project_rules(session, project_id):
 
 async def extract_source(request: ImportSource, *, rules=None, project_id=DEFAULT_PROJECT_ID,
                          candidate=None, save_candidate=None):
-    data = [m.model_dump(mode="json", exclude={"time_zone"}) for m in request.messages]
+    data = [m.model_dump(mode="json", exclude={"time_zone", "images"}) for m in request.messages]
     from zoneinfo import ZoneInfo
     for message, original in zip(data, request.messages, strict=True):
         local = original.occurred_at.astimezone(ZoneInfo(original.time_zone)) if original.time_zone else None
         message["local_recorded_date"] = local.date().isoformat() if local else None
+        if original.images:
+            message["image_count"] = len(original.images)
     rules = rules or {}
     from ..prompts.assembly import reference_data
+    images = [{"message_id": m.message_id, "url": image.url}
+              for m in request.messages for image in m.images]
     prompt = reference_data("source_material", {"messages": data})
-    validate_budget(prompt, EXTRACT_SYSTEM, source_text="\n".join(m.content for m in request.messages))
+    # Check the effective model material once; deleted messages, attachment URLs
+    # and caller metadata are not part of this text prompt.
+    validate_budget(prompt, EXTRACT_SYSTEM, source_text="\n".join(m.content for m in request.messages),
+                    image_count=len(images))
     if candidate is not None:
         try:
             result = Extraction.model_validate(candidate)
@@ -277,7 +287,8 @@ async def extract_source(request: ImportSource, *, rules=None, project_id=DEFAUL
     response = await _structured(MessageExtraction, prompt, EXTRACT_SYSTEM, project_id=project_id,
                                 llm_model=rules.get("fact_llm_model") or rules.get("llm_model"),
                                 reasoning_effort=rules.get("fact_reasoning_effort") or rules.get("reasoning_effort"),
-                                temperature=rules.get("fact_temperature"))
+                                temperature=rules.get("fact_temperature"),
+                                **({"images": images} if images else {}))
     result = _normalize_extraction(response, request)
     extracted = _validated_extraction(result, request, data)
     if save_candidate is not None:
@@ -301,6 +312,13 @@ def _validate_evidence_references(result, request):
 def _validated_extraction(result, request, data):
     """Validate assembled evidence and time before producing formal facts."""
     _validate_evidence_references(result, request)
+    # A model can echo an input link. Reject it before candidate persistence or
+    # embedding rather than silently altering the extracted memory.
+    image_urls = {image.url.split("?", 1)[0] for message in request.messages for image in message.images}
+    if image_urls:
+        serialized = result.model_dump_json()
+        if any(url in serialized for url in image_urls):
+            raise SourceError("invalid_model_output", "Fact output contains a temporary image URL", 502, True)
     output = []
     for fact in result.facts:
         occurred_at = evidence_time(fact.support_groups, data)
@@ -407,6 +425,18 @@ async def _fact_vectors(project_id, source_facts):
     return list(result.data())
 
 
+def _stored_import_input(payload):
+    """An image marker requests resupply; download URLs never enter SQL input."""
+    stored = {**payload, "messages": []}
+    for message in payload["messages"]:
+        value = dict(message)
+        image_count = len(value.pop("images", []))
+        if image_count:
+            value["image_count"] = image_count
+        stored["messages"].append(value)
+    return stored
+
+
 
 
 def _register(user_id, project_id, key, kind, request, source_id, *, legacy_buffers=None):
@@ -440,7 +470,7 @@ def _register(user_id, project_id, key, kind, request, source_id, *, legacy_buff
                 for mid in request["message_ids"]:
                     session.execute(insert(messages).values(user_id=user_id, project_id=project_id,
                         source_id=source_id, message_id=mid, deleted=True).on_conflict_do_nothing())
-        stored_request = dict(request)
+        stored_request = _stored_import_input(request) if kind == "import" else dict(request)
         if legacy_buffers:
             # Server-owned cleanup identities are durable, but are not part of the
             # public input/hash. Recovery must commit cleanup with the original receipt.
@@ -502,8 +532,11 @@ def _set_failure(user_id, project_id, op, lease, error):
 
 def _message_hash(message):
     # Preserve established message identities; optional zone evidence is validated separately.
-    return _hash({"role": message.role, "content": message.content,
-                  "occurred_at": message.occurred_at.astimezone(timezone.utc).isoformat()})
+    value = {"role": message.role, "content": message.content,
+             "occurred_at": message.occurred_at.astimezone(timezone.utc).isoformat()}
+    if message.images:
+        value["images"] = [image.model_dump(mode="json") for image in message.images]
+    return _hash(value)
 
 
 def _message_rows(session, user_id, project_id, source_id, message_ids):
@@ -520,7 +553,7 @@ def _accept_messages(session, user_id, project_id, request):
         row = known.get(message.message_id)
         digest = _message_hash(message)
         if row and row["content_hash"] and row["content_hash"] != digest:
-            raise SourceError("message_conflict", "Message identity has different content, role or recording time", 409)
+            raise SourceError("message_conflict", "Message identity has different content, image, role or recording time", 409)
         if row and message.time_zone is not None:
             if row["time_zone"] is not None and row["time_zone"] != message.time_zone:
                 raise SourceError("message_conflict", "Message identity has different recorded timezone", 409)
@@ -576,7 +609,7 @@ def _can_process(operation, *, explicit_retry=False):
     # Retired history limits can be resumed only by an explicit request. Preserve
     # their original failed receipts until then; never migrate them into auto-retry.
     return explicit_retry and (error["code"] in {"reconciliation_too_large", "related_facts_too_large"}
-                              or operation["kind"] == "correct" and error["code"] == "input_required")
+                              or operation["kind"] in {"import", "correct"} and error["code"] == "input_required")
 
 
 async def import_source(user_id, project_id, request: ImportSource, *, legacy_buffers=None, explicit_retry=False):
@@ -585,8 +618,13 @@ async def import_source(user_id, project_id, request: ImportSource, *, legacy_bu
     for message in payload["messages"]:
         if message.get("time_zone") is None:
             message.pop("time_zone", None)
+        if not message.get("images"):
+            message.pop("images", None)
     op = await run_sql(_register, user_id, project_id, request.idempotency_key, "import", payload,
                        request.source_id, legacy_buffers=legacy_buffers)
+    # The original image body cannot be recovered from SQL. A validated same-key
+    # resupply is the explicit recovery input, not permission to replay permanent errors.
+    explicit_retry = explicit_retry or any(message.images for message in request.messages)
     if not _can_process(op, explicit_retry=explicit_retry):
         return _operation(op)
 
@@ -623,14 +661,14 @@ async def import_source(user_id, project_id, request: ImportSource, *, legacy_bu
             rules = _project_rules(session, project_id) if new_ids else None
             # Deleted/processed membership is part of the effective input identity.
             # A retry after retraction cannot reuse an earlier batch's conclusions.
-            fingerprint = _hash({"messages": [m.model_dump(mode="json") for m in request.messages
+            fingerprint = _hash({"messages": [m.model_dump(mode="json", exclude={"images"} if not m.images else set()) for m in request.messages
                                               if m.message_id not in deleted], "new_ids": sorted(new_ids)})
             candidate = current["request"].get(_EXTRACTION_CANDIDATE)
             now = datetime.now(timezone.utc)
             input_valid = current["input_expires_at"] and current["input_expires_at"] > now
             if not input_valid or not candidate or candidate["input_fingerprint"] != fingerprint:
                 candidate = None
-            stored_payload = {**payload, **({"legacy_buffers": cleanup} if cleanup else {}),
+            stored_payload = {**_stored_import_input(payload), **({"legacy_buffers": cleanup} if cleanup else {}),
                               **({_EXTRACTION_CANDIDATE: candidate} if candidate else {})}
             session.execute(update(operations).where(operations.c.id == op["id"])
                             .values(generation=lease.generation, status="processing", error=None,
@@ -709,9 +747,6 @@ async def import_source(user_id, project_id, request: ImportSource, *, legacy_bu
                 # Repeated messages may provide context for new statements, but are
                 # never accepted as a second independent evidence occurrence.
                 active = request.model_copy(update={"messages": [m for m in request.messages if m.message_id not in deleted]})
-                if new_ids:
-                    validate_budget(json.dumps(payload, ensure_ascii=False), EXTRACT_SYSTEM,
-                                    source_text="\n".join(m.content for m in active.messages))
                 async def persist_candidate(extraction):
                     await run_sql(save_candidate, lease, fingerprint, extraction)
                 extracted = await extract_source(active, rules=rules, project_id=project_id,
@@ -757,6 +792,8 @@ async def retry_operation(user_id, project_id, operation_id):
         if not op["input_expires_at"] or op["input_expires_at"] <= datetime.now(timezone.utc):
             await run_sql(purge_expired_inputs)
             raise SourceError("input_required", "Temporary input expired; query the receipt before resupplying the same batch and key", 409)
+        if any(message.get("image_count") for message in op["request"].get("messages", [])):
+            raise SourceError("input_required", "Image input is not stored; query the receipt and resupply the original batch and key", 409)
         body = {key: value for key, value in op["request"].items()
                 if key not in {"legacy_buffers", _EXTRACTION_CANDIDATE}}
         return await import_source(user_id, project_id, ImportSource.model_validate(body), explicit_retry=True)

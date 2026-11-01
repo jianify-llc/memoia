@@ -10,6 +10,29 @@ const source = { idempotency_key: "luvel:batch:1", source_id: sourceId, messages
 const json = (body, status = 200) => Response.json(body, { status });
 const client = (fetch, options = {}) => new MemoiaClient({ baseUrl: "https://memoia.example", apiKey: "private-project-token", fetch, ...options });
 
+describe("transient image import", () => {
+  const image = { url: "https://images.example/original.png", mimeType: "image/png", width: 600, height: 400, byteSize: 4096 };
+  const input = { ...source, messages: [{ ...source.messages[0], content: "", images: [image] }] };
+  it("sends image-only input once and preserves the original receipt", async () => {
+    let count = 0;
+    const api = client(async (_url, init) => {
+      count++;
+      assert.deepEqual(JSON.parse(init.body), input);
+      return json(complete);
+    });
+    assert.deepEqual(await api.importBlob(user, input), complete);
+    assert.equal(count, 1);
+  });
+  it("rejects oversized, unsupported or multiple image declarations before transport", () => {
+    const api = client(() => { throw new Error("must not fetch"); });
+    for (const images of [[], [{ ...image, byteSize: 10 * 1024 * 1024 + 1 }],
+      [{ ...image, mimeType: "image/svg+xml" }], [image, image]]) {
+      assert.throws(() => api.importBlob(user, { ...input, messages: [{ ...input.messages[0], images }] }),
+        error => error.code === "INVALID_INPUT");
+    }
+  });
+});
+
 describe("Standard-only Fact imports", () => {
   it("accepts the current import shape without a mode field", async () => {
     const api = client(async (url, init) => {
