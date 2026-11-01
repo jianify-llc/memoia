@@ -82,8 +82,11 @@ async def test_fact_commit_zero_failure_retry_and_noop_are_standard_without_mode
 @pytest.mark.asyncio
 async def test_expired_input_restores_original_request_without_mode(mode_user, bounded_source_model):
     pending = body("expired")
+    payload = pending.model_dump(mode="json", exclude_none=True)
+    for message in payload["messages"]:
+        message.pop("images", None)  # Match the text-only public import's canonical request.
     registered = source._register(mode_user, "__root__", pending.idempotency_key, "import",
-        pending.model_dump(mode="json", exclude_none=True), pending.source_id)
+        payload, pending.source_id)
     with Session.begin() as session:
         session.execute(update(memory_operations).where(memory_operations.c.id == registered["id"]).values(
             input_expires_at=func.now() - timedelta(seconds=1)))

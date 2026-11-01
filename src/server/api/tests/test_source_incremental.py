@@ -11,6 +11,7 @@ from tests.test_sources import source_user, models, request
 from tests.test_maintenance import ready
 from tests.maintenance_support import claim_for, derive, maintain, status
 from memoia_server.controllers import source, profile, maintenance
+from memoia_server.controllers.source import extract_source as extract_complete_source
 from memoia_server.connectors import Session
 from memoia_server.env import CONFIG
 from memoia_server.models.database import UserProfile, UserEvent
@@ -201,7 +202,8 @@ async def test_input_capacity_rejects_before_model_without_changing_prior_receip
     prior = await source.import_source(source_user, "__root__", request())
     monkeypatch.setattr(CONFIG, "source_context_window_tokens", 1)
     model = AsyncMock()
-    monkeypatch.setattr(source, "extract_source", model)
+    monkeypatch.setattr(source, "extract_source", extract_complete_source)
+    monkeypatch.setattr(source, "openai_complete", model)
     with pytest.raises(source.SourceError) as error:
         await source.import_source(source_user, "__root__", request("capacity", messages=[
             {"message_id": "3", "role": "user", "content": "a small new assertion", "occurred_at": day(3)}]))
