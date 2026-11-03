@@ -3,14 +3,13 @@ import ast
 import json
 from uuid import uuid4
 from datetime import timedelta
-from xml.etree import ElementTree
 
 import pytest
 from sqlalchemy import delete, select, update, func
 
 from tests.test_maintenance import source_user, batch, row
 from tests.test_search_bundle import search_users, seed_facts, seed_derived
-from tests.test_maintenance_agent import transport, completion, tool
+from tests.test_maintenance_agent import transport, completion, tool, xml_data
 from tests.maintenance_support import claim_for, maintain
 from memoia_server import maintenance_agent
 from memoia_server.connectors import Session
@@ -20,8 +19,7 @@ from memoia_server.models.source import DeleteMessages, memory_facts, memory_blo
 
 
 def initial_batch(transport):
-    text = transport["requests"][0]["input"][1]["content"][0]["text"]
-    return json.loads(ElementTree.fromstring(text).text)
+    return xml_data(transport["requests"][0], "maintenance_batch")
 
 
 def test_flush_reads_candidate_facts_once_not_once_per_blob(source_user):

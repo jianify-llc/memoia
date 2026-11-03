@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from sqlalchemy import insert, select, update, event as sql_event
 
 from tests.test_search_bundle import search_users, seed_facts, seed_derived
-from tests.test_maintenance_agent import transport, completion, tool
+from tests.test_maintenance_agent import transport, completion, tool, xml_data
 from tests.test_temporal_evidence import period
 from tests.maintenance_support import maintain, derive, claim_for
 from tests.test_maintenance import batch
@@ -126,8 +126,7 @@ async def test_one_correction_rebuilds_all_entries_in_a_broad_impact_set(
         completion(),
     ])
     assert await maintenance.execute_claim(claim_for(uid)) is (not omit_last)
-    from xml.etree import ElementTree
-    initial = json.loads(ElementTree.fromstring(transport["requests"][0]["input"][1]["content"][0]["text"]).text)
+    initial = xml_data(transport["requests"][0], "maintenance_batch")
     assert all(group["count"] == 4 for group in initial["remaining_review"].values())
     reads = {item["call_id"]: ast.literal_eval(item["output"]) for item in transport["requests"][2]["input"]}
     assert all(item["review_required"] for page in reads.values() for item in page["items"])
