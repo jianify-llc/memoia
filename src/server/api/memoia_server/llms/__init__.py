@@ -9,6 +9,7 @@ from ..models.database import DEFAULT_PROJECT_ID
 from ..telemetry import telemetry_manager, CounterMetricName, HistogramMetricName
 
 from .openai_model_llm import openai_complete
+from .utils import valid_cache_write_lifetimes
 
 
 # TODO: add TPM/Rate limiter
@@ -44,7 +45,8 @@ async def llm_complete(
 async def record_completion_usage(project_id, in_tokens, out_tokens, latency, *,
                                   kind="completion", model=None, service_tier=None,
                                   requested_service_tier="auto", cached_tokens=None,
-                                  cache_write_tokens=None):
+                                  cache_write_tokens=None, cache_write_30m_tokens=None,
+                                  cache_write_12h_tokens=None):
     # Await the small accounting write; it must not inherit a memory-write fence or
     # escape as a detached task after the request's lease and process have ended.
     attributes = {"project_id": project_id, "kind": kind, "model": model or "unknown",
@@ -62,6 +64,8 @@ async def record_completion_usage(project_id, in_tokens, out_tokens, latency, *,
                                      for value in (cached_tokens, cache_write_tokens))
     if cache_known and cached_tokens + cache_write_tokens > in_tokens:
         cache_known = False
+    write_lifetimes_known = cache_known and valid_cache_write_lifetimes(
+        cache_write_tokens, cache_write_30m_tokens, cache_write_12h_tokens)
     # Observability is best effort, independent of memory success and existing quota rules.
     # Read/write tokens are disjoint subsets of input; never double-debit cache writes.
     try:
@@ -73,7 +77,12 @@ async def record_completion_usage(project_id, in_tokens, out_tokens, latency, *,
         if cache_known:
             telemetry_manager.increment_counter_metric(CounterMetricName.LLM_CACHE_READ_TOKENS, cached_tokens, attributes)
             telemetry_manager.increment_counter_metric(CounterMetricName.LLM_CACHE_WRITE_TOKENS, cache_write_tokens, attributes)
+        if write_lifetimes_known:
+            telemetry_manager.increment_counter_metric(CounterMetricName.LLM_CACHE_WRITE_30M_TOKENS, cache_write_30m_tokens, attributes)
+            telemetry_manager.increment_counter_metric(CounterMetricName.LLM_CACHE_WRITE_12H_TOKENS, cache_write_12h_tokens, attributes)
         else:
+            # Keep known aggregate consumption; a missing/malformed split is not
+            # zero cost or evidence that every write used the requested TTL.
             telemetry_manager.increment_counter_metric(CounterMetricName.LLM_CACHE_USAGE_UNKNOWN, 1, attributes)
         telemetry_manager.increment_counter_metric(CounterMetricName.LLM_INVOCATIONS, 1, attributes)
         telemetry_manager.record_histogram_metric(HistogramMetricName.LLM_LATENCY_MS, latency, attributes)
@@ -81,10 +90,12 @@ async def record_completion_usage(project_id, in_tokens, out_tokens, latency, *,
             await capture_int_key(TelemetryKeyName.llm_usage_unknown, project_id=project_id)
     except Exception as error:
         LOG.error("Completion telemetry failed (%s)", type(error).__name__)
-    LOG.info("LLM usage: kind=%s model=%s tier=%s requested_tier=%s input=%s output=%s cache_read=%s cache_write=%s latency_ms=%.3f",
+    LOG.info("LLM usage: kind=%s model=%s tier=%s requested_tier=%s input=%s output=%s cache_read=%s cache_write=%s cache_write_30m=%s cache_write_12h=%s latency_ms=%.3f",
              kind, attributes["model"], attributes["service_tier"], requested_service_tier,
              in_tokens if usage_known else None, out_tokens if usage_known else None,
-             cached_tokens if cache_known else None, cache_write_tokens if cache_known else None, latency)
+             cached_tokens if cache_known else None, cache_write_tokens if cache_known else None,
+             cache_write_30m_tokens if write_lifetimes_known else None,
+             cache_write_12h_tokens if write_lifetimes_known else None, latency)
 
 async def llm_sanity_check():
     r = await llm_complete(

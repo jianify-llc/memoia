@@ -215,7 +215,8 @@ async def test_fact_client_does_not_hide_retries_and_observes_failed_usage(monke
 @pytest.mark.asyncio
 async def test_provider_cache_usage_is_scoped_and_logged_without_body(openai_transport, monkeypatch, caplog):
     state, client = openai_transport
-    state["cache_details"] = {"cached_tokens": 3, "cache_write_tokens": 2}
+    state["cache_details"] = {"cached_tokens": 3, "cache_write_tokens": 2,
+                              "cache_write_tokens_details": {"ttl_30m_tokens": 1, "ttl_12h_tokens": 1}}
     calls, histograms = [], []
     monkeypatch.setattr(llms.telemetry_manager, "increment_counter_metric", lambda *args: calls.append(args))
     monkeypatch.setattr(llms.telemetry_manager, "record_histogram_metric", lambda *args: histograms.append(args))
@@ -228,6 +229,8 @@ async def test_provider_cache_usage_is_scoped_and_logged_without_body(openai_tra
         values = {metric: count for metric, count, _ in calls}
         assert values[llms.CounterMetricName.LLM_CACHE_READ_TOKENS] == 3
         assert values[llms.CounterMetricName.LLM_CACHE_WRITE_TOKENS] == 2
+        assert values[llms.CounterMetricName.LLM_CACHE_WRITE_30M_TOKENS] == 1
+        assert values[llms.CounterMetricName.LLM_CACHE_WRITE_12H_TOKENS] == 1
         assert values[llms.CounterMetricName.LLM_INVOCATIONS] == 1
         assert llms.CounterMetricName.LLM_CACHE_USAGE_UNKNOWN not in values
         attributes = calls[0][2]
@@ -235,6 +238,7 @@ async def test_provider_cache_usage_is_scoped_and_logged_without_body(openai_tra
                               "service_tier": "default", "requested_service_tier": "default"}
         assert all(item[2] == attributes for item in calls + histograms)
         assert "cache_read=3 cache_write=2" in caplog.text
+        assert "cache_write_30m=1 cache_write_12h=1" in caplog.text
         assert "PRIVATE SOURCE" not in caplog.text and "PRIVATE INSTRUCTIONS" not in caplog.text
         llms.project_cost_token_billing.assert_awaited_once_with("__root__", 10, 5)
     finally:
@@ -562,5 +566,36 @@ async def test_luna_service_default_is_used_only_without_explicit_effort(openai_
         await openai_complete("gpt-6-luna", "default")
         await openai_complete("gpt-6-luna", "project override", reasoning={"effort": "high"})
         assert [body["reasoning"]["effort"] for body in state["requests"]] == ["low", "high"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("split", [None, {}, {"ttl_30m_tokens": 2},
+    {"ttl_30m_tokens": True, "ttl_12h_tokens": 1},
+    {"ttl_30m_tokens": -1, "ttl_12h_tokens": 3},
+    {"ttl_30m_tokens": 1, "ttl_12h_tokens": "PRIVATE INVALID VALUE"},
+    {"ttl_30m_tokens": 1, "ttl_12h_tokens": 0}])
+async def test_unknown_write_lifetimes_keep_consumption_without_guessing_ttl(
+        openai_transport, monkeypatch, caplog, split):
+    state, client = openai_transport
+    state["cache_details"] = {"cached_tokens": 3, "cache_write_tokens": 2,
+                              "cache_write_tokens_details": split}
+    calls = []
+    monkeypatch.setattr(llms.telemetry_manager, "increment_counter_metric", lambda *args: calls.append(args))
+    try:
+        with caplog.at_level("INFO"):
+            result = await llms.llm_complete("__root__", "PRIVATE SOURCE", system_prompt="fixed",
+                                             cache_fixed_prompt=True)
+        assert result.ok() and len(state["requests"]) == 1
+        values = {metric: count for metric, count, _ in calls}
+        assert values[llms.CounterMetricName.LLM_CACHE_READ_TOKENS] == 3
+        assert values[llms.CounterMetricName.LLM_CACHE_WRITE_TOKENS] == 2
+        assert values[llms.CounterMetricName.LLM_CACHE_USAGE_UNKNOWN] == 1
+        assert llms.CounterMetricName.LLM_CACHE_WRITE_30M_TOKENS not in values
+        assert llms.CounterMetricName.LLM_CACHE_WRITE_12H_TOKENS not in values
+        assert "cache_write_30m=None cache_write_12h=None" in caplog.text
+        assert "PRIVATE" not in caplog.text
+        llms.project_cost_token_billing.assert_awaited_once_with("__root__", 10, 5)
     finally:
         await client.close()

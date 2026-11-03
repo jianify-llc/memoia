@@ -90,6 +90,7 @@ async def run_quality(settings, *, cases=CASES, client=None):
     from . import connectors
     from .controllers import source
     from .env import CONFIG
+    from .llms.utils import valid_cache_write_lifetimes
     from .models.source import ImportSource
 
     own_client = client is None
@@ -110,13 +111,18 @@ async def run_quality(settings, *, cases=CASES, client=None):
 
     async def no_accounting(project_id, input_tokens, output_tokens, latency_ms, *,
                             kind, model=None, service_tier=None, requested_service_tier=None,
-                            cached_tokens=None, cache_write_tokens=None):
+                            cached_tokens=None, cache_write_tokens=None,
+                            cache_write_30m_tokens=None, cache_write_12h_tokens=None):
         # Retain provider observations without business/accounting writes.
+        if not valid_cache_write_lifetimes(cache_write_tokens, cache_write_30m_tokens, cache_write_12h_tokens):
+            cache_write_30m_tokens = cache_write_12h_tokens = None
         rows[-1]["model_calls"].append({
             "kind": kind, "model": model, "service_tier": service_tier,
             "requested_service_tier": requested_service_tier,
             "input_tokens": input_tokens, "output_tokens": output_tokens,
             "cached_tokens": cached_tokens, "cache_write_tokens": cache_write_tokens,
+            "cache_write_30m_tokens": cache_write_30m_tokens,
+            "cache_write_12h_tokens": cache_write_12h_tokens,
             "latency_ms": latency_ms,
         })
 

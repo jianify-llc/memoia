@@ -12,6 +12,12 @@ logging.getLogger("openai._base_client").setLevel(logging.WARNING)
 _global_openai_async_client = None
 
 
+def valid_cache_write_lifetimes(total, short, long) -> bool:
+    """Provider counts, not request TTLs, determine cache-write prices."""
+    return (all(type(value) is int and value >= 0 for value in (total, short, long))
+            and short + long == total)
+
+
 def get_openai_async_client_instance() -> AsyncOpenAI:
     global _global_openai_async_client
     if _global_openai_async_client is None:

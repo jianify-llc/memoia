@@ -302,10 +302,14 @@ async def test_positive_empty_is_quality_failure_not_protocol_error_or_retry():
 
 
 @pytest.mark.asyncio
-async def test_compute_only_retains_single_call_usage_without_summing_cache_again():
+@pytest.mark.parametrize("split", [{"ttl_30m_tokens": 10, "ttl_12h_tokens": 30},
+    None, {"ttl_30m_tokens": 40}, {"ttl_30m_tokens": True, "ttl_12h_tokens": 39},
+    {"ttl_30m_tokens": 10, "ttl_12h_tokens": 29}])
+async def test_compute_only_retains_single_call_usage_without_summing_cache_again(split):
     usages = [
         {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120,
-         "input_tokens_details": {"cached_tokens": 30, "cache_write_tokens": 40}},
+         "input_tokens_details": {"cached_tokens": 30, "cache_write_tokens": 40,
+             "cache_write_tokens_details": split}},
     ]
     client, bodies = model_transport(model_outputs([]), usages=usages)
     case = next(case for case in CASES if case.name == "smalltalk")
@@ -318,6 +322,8 @@ async def test_compute_only_retains_single_call_usage_without_summing_cache_agai
                 for call in calls] == [(100, 20, 30, 40)]
         assert calls[0]["input_tokens"] == 100
         assert calls[0]["output_tokens"] == 20
+        expected = (10, 30) if split == {"ttl_30m_tokens": 10, "ttl_12h_tokens": 30} else (None, None)
+        assert (calls[0]["cache_write_30m_tokens"], calls[0]["cache_write_12h_tokens"]) == expected
         assert all(call["latency_ms"] >= 0 for call in calls)
     finally:
         await client.close()

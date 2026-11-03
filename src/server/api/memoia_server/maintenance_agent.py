@@ -290,6 +290,7 @@ class _StrictMaintenanceModel(OpenAIResponsesModel):
         # Failed responses can consume tokens too. Account before validation/fallback;
         # read raw provider fields before Agents SDK normalizes missing details to zero.
         details = value(usage, "input_tokens_details")
+        writes = value(details, "cache_write_tokens_details")
         await record_completion_usage(self.context.project_id,
                                       input_tokens if complete else None,
                                       output_tokens if complete else None,
@@ -298,7 +299,9 @@ class _StrictMaintenanceModel(OpenAIResponsesModel):
                                       service_tier=service_tier,
                                       requested_service_tier=self.service_tier,
                                       cached_tokens=value(details, "cached_tokens"),
-                                      cache_write_tokens=value(details, "cache_write_tokens"))
+                                      cache_write_tokens=value(details, "cache_write_tokens"),
+                                      cache_write_30m_tokens=value(writes, "ttl_30m_tokens"),
+                                      cache_write_12h_tokens=value(writes, "ttl_12h_tokens"))
         if output_tokens is not None and output_tokens > MAX_COMPLETION_TOKENS:
             raise MaintenanceRunError("MAINTENANCE_COMPLETION_LENGTH")
         return complete
@@ -657,15 +660,18 @@ async def run_loop(context: MaintenanceContext) -> LoopPlan:
             refs = _LoopReferences()
             first_page = await context.read_changes(limit=MAX_PAGE_SIZE)
             await context.assert_active()
-            # Instructions are sent every round; only dynamic data enters the stored chain.
+            # Instructions are sent every round; the SDK owns incremental continuation input.
             request = [developer_data("project_context", {
                 "profile_topics": context.profile_topics, "event_tag_definitions": context.event_tag_definitions,
                 "language": context.language, "reference_time": reference_time}),
                 developer_data("maintenance_batch", {"change_count": len(context.changes),
                     **refs.change_page(first_page)})]
             if cache_supported:
-                # Preserve the shared prefix before changing batch data, without copying instructions.
-                request[0]["content"][0]["prompt_cache_breakpoint"] = {"mode": "explicit"}
+                # One public prefix boundary per new chain, before any dynamic data.
+                request.insert(0, {"role": "developer", "content": [{
+                    "type": "input_text", "text": "---",
+                    "prompt_cache_breakpoint": {"mode": "explicit", "ttl": "12h"},
+                }]})
             agent = Agent[MaintenanceContext](
                 name="Memoia memory maintenance",
                 instructions=MAINTENANCE_INSTRUCTIONS,
