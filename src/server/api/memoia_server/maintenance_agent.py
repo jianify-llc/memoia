@@ -660,15 +660,18 @@ async def run_loop(context: MaintenanceContext) -> LoopPlan:
             refs = _LoopReferences()
             first_page = await context.read_changes(limit=MAX_PAGE_SIZE)
             await context.assert_active()
-            # Instructions are sent every round; only dynamic data enters the stored chain.
+            # Instructions are sent every round; the SDK owns incremental continuation input.
             request = [developer_data("project_context", {
                 "profile_topics": context.profile_topics, "event_tag_definitions": context.event_tag_definitions,
                 "language": context.language, "reference_time": reference_time}),
                 developer_data("maintenance_batch", {"change_count": len(context.changes),
                     **refs.change_page(first_page)})]
             if cache_supported:
-                # Preserve the shared prefix before changing batch data, without copying instructions.
-                request[0]["content"][0]["prompt_cache_breakpoint"] = {"mode": "explicit"}
+                # One public prefix boundary per new chain, before any dynamic data.
+                request.insert(0, {"role": "developer", "content": [{
+                    "type": "input_text", "text": "---",
+                    "prompt_cache_breakpoint": {"mode": "explicit", "ttl": "12h"},
+                }]})
             agent = Agent[MaintenanceContext](
                 name="Memoia memory maintenance",
                 instructions=MAINTENANCE_INSTRUCTIONS,

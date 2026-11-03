@@ -1,13 +1,11 @@
 """Default topic/consumer contract; deterministic tools do not prove model semantics."""
-import json
-from xml.etree import ElementTree
 
 import pytest
 
 from memoia_server.prompts import user_profile_topics, zh_user_profile_topics
 from memoia_server.prompts.profile_init_utils import formate_profile_topic
 from memoia_server.maintenance_agent import run_loop, MAINTENANCE_INSTRUCTIONS
-from tests.test_maintenance_agent import Context, transport, completion
+from tests.test_maintenance_agent import Context, transport, completion, xml_data
 from tests.test_maintenance import source_user, batch
 from tests.maintenance_support import maintain
 from tests.test_search_bundle import search_users
@@ -37,7 +35,7 @@ async def test_three_context_topics_are_described_in_actual_runner_request(trans
     await run_loop(context)
     request = transport["requests"][0]
     assert len(request["input"][0]["content"]) == 1
-    project = json.loads(ElementTree.fromstring(request["input"][0]["content"][0]["text"]).text)
+    project = xml_data(request, "project_context")
     assert [item["topic"] for item in project["profile_topics"]] == TOPICS
     assert project["profile_topics"] == context.profile_topics
     assert request["instructions"] == MAINTENANCE_INSTRUCTIONS
