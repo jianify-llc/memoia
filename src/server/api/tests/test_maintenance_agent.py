@@ -837,7 +837,8 @@ async def test_custom_topic_definitions_reach_runner_without_guessed_meanings(tr
 async def test_stable_configuration_precedes_batch_and_raw_cache_usage_survives_sdk(transport):
     context = Context()
     first = completion(None, calls=[tool("read_memory", {"collection": "facts"})])
-    first["usage"]["input_tokens_details"] = {"cached_tokens": 3, "cache_write_tokens": 2}
+    first["usage"]["input_tokens_details"] = {"cached_tokens": 3, "cache_write_tokens": 2,
+        "cache_write_tokens_details": {"ttl_30m_tokens": 1, "ttl_12h_tokens": 1}}
     second = completion()
     del second["usage"]["input_tokens_details"]["cache_write_tokens"]
     transport["responses"] = [first, second]
@@ -852,24 +853,29 @@ async def test_stable_configuration_precedes_batch_and_raw_cache_usage_survives_
     assert list(batch) == ["change_count", "items", "next_cursor"]
     known, partial = transport["accounting_metadata"]
     assert known == {"kind": "agent_loop", "model": "gpt-6-luna", "service_tier": "flex",
-                     "requested_service_tier": "flex", "cached_tokens": 3, "cache_write_tokens": 2}
+                     "requested_service_tier": "flex", "cached_tokens": 3, "cache_write_tokens": 2,
+                     "cache_write_30m_tokens": 1, "cache_write_12h_tokens": 1}
     assert partial["cached_tokens"] == 0 and partial["cache_write_tokens"] is None
 
 
 @pytest.mark.asyncio
 async def test_cache_usage_includes_failed_flex_and_actual_standard_tier(transport):
     failed_usage = completion()["usage"]
-    failed_usage["input_tokens_details"] = {"cached_tokens": 4, "cache_write_tokens": 1}
+    failed_usage["input_tokens_details"] = {"cached_tokens": 4, "cache_write_tokens": 1,
+        "cache_write_tokens_details": {"ttl_30m_tokens": 0, "ttl_12h_tokens": 1}}
     success = completion()
     success["service_tier"] = "default"
-    success["usage"]["input_tokens_details"] = {"cached_tokens": 5, "cache_write_tokens": 0}
+    success["usage"]["input_tokens_details"] = {"cached_tokens": 5, "cache_write_tokens": 0,
+        "cache_write_tokens_details": {"ttl_30m_tokens": 0, "ttl_12h_tokens": 0}}
     transport["outcomes"] = [http_failure(503, usage=failed_usage), success]
     plan = await run_loop(Context())
     first, second = transport["accounting_metadata"]
     assert first["service_tier"] is None and first["requested_service_tier"] == "flex"
     assert (first["cached_tokens"], first["cache_write_tokens"]) == (4, 1)
+    assert (first["cache_write_30m_tokens"], first["cache_write_12h_tokens"]) == (0, 1)
     assert second["service_tier"] == second["requested_service_tier"] == "default"
     assert (second["cached_tokens"], second["cache_write_tokens"]) == (5, 0)
+    assert (second["cache_write_30m_tokens"], second["cache_write_12h_tokens"]) == (0, 0)
     assert plan.usage.turns == 2
     assert [body["text"]["verbosity"] for body in transport["requests"]] == ["low", "low"]
     assert all(body["prompt_cache_options"] == {"mode": "implicit", "ttl": "30m"}

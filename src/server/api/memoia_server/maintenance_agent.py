@@ -290,6 +290,7 @@ class _StrictMaintenanceModel(OpenAIResponsesModel):
         # Failed responses can consume tokens too. Account before validation/fallback;
         # read raw provider fields before Agents SDK normalizes missing details to zero.
         details = value(usage, "input_tokens_details")
+        writes = value(details, "cache_write_tokens_details")
         await record_completion_usage(self.context.project_id,
                                       input_tokens if complete else None,
                                       output_tokens if complete else None,
@@ -298,7 +299,9 @@ class _StrictMaintenanceModel(OpenAIResponsesModel):
                                       service_tier=service_tier,
                                       requested_service_tier=self.service_tier,
                                       cached_tokens=value(details, "cached_tokens"),
-                                      cache_write_tokens=value(details, "cache_write_tokens"))
+                                      cache_write_tokens=value(details, "cache_write_tokens"),
+                                      cache_write_30m_tokens=value(writes, "ttl_30m_tokens"),
+                                      cache_write_12h_tokens=value(writes, "ttl_12h_tokens"))
         if output_tokens is not None and output_tokens > MAX_COMPLETION_TOKENS:
             raise MaintenanceRunError("MAINTENANCE_COMPLETION_LENGTH")
         return complete

@@ -39,6 +39,8 @@ class CounterMetricName(Enum):
     LLM_TOKENS_OUTPUT = "llm_output_tokens_total"
     LLM_CACHE_READ_TOKENS = "llm_cache_read_tokens_total"
     LLM_CACHE_WRITE_TOKENS = "llm_cache_write_tokens_total"
+    LLM_CACHE_WRITE_30M_TOKENS = "llm_cache_write_30m_tokens_total"
+    LLM_CACHE_WRITE_12H_TOKENS = "llm_cache_write_12h_tokens_total"
     LLM_CACHE_USAGE_UNKNOWN = "llm_cache_usage_unknown_total"
     EMBEDDING_TOKENS = "embedding_tokens_total"
 
@@ -51,9 +53,11 @@ class CounterMetricName(Enum):
             CounterMetricName.LLM_USAGE_UNKNOWN: "LLM responses without valid token usage",
             CounterMetricName.LLM_TOKENS_INPUT: "Total number of input tokens",
             CounterMetricName.LLM_TOKENS_OUTPUT: "Total number of output tokens",
-            CounterMetricName.LLM_CACHE_READ_TOKENS: "Reported cache-read input tokens (complete cache usage only)",
-            CounterMetricName.LLM_CACHE_WRITE_TOKENS: "Reported cache-write input tokens (complete cache usage only)",
-            CounterMetricName.LLM_CACHE_USAGE_UNKNOWN: "LLM attempts without complete valid cache usage",
+            CounterMetricName.LLM_CACHE_READ_TOKENS: "Reported cache-read input tokens (validated aggregate counts only)",
+            CounterMetricName.LLM_CACHE_WRITE_TOKENS: "Reported cache-write input tokens (validated aggregate counts only)",
+            CounterMetricName.LLM_CACHE_WRITE_30M_TOKENS: "Reported 30-minute cache-write tokens (validated lifetime split only)",
+            CounterMetricName.LLM_CACHE_WRITE_12H_TOKENS: "Reported 12-hour cache-write tokens (validated lifetime split only)",
+            CounterMetricName.LLM_CACHE_USAGE_UNKNOWN: "LLM attempts without complete valid cache totals or lifetime split",
             CounterMetricName.EMBEDDING_TOKENS: "Total number of embedding tokens",
         }
         return descriptions[self]

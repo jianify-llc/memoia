@@ -45,10 +45,13 @@ async def openai_complete(
         def value(obj, name):
             return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
         details = value(usage, "input_tokens_details")
+        writes = value(details, "cache_write_tokens_details")
         await on_usage(value(usage, "input_tokens"), value(usage, "output_tokens"),
                        (time.monotonic() - started) * 1000,
                        cached_tokens=value(details, "cached_tokens"),
                        cache_write_tokens=value(details, "cache_write_tokens"),
+                       cache_write_30m_tokens=value(writes, "ttl_30m_tokens"),
+                       cache_write_12h_tokens=value(writes, "ttl_12h_tokens"),
                        model=actual_model, service_tier=service_tier,
                        requested_service_tier=kwargs.get("service_tier", "auto"))
 
