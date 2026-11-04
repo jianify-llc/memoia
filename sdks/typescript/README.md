@@ -9,7 +9,7 @@ reasoning effort and service tiers remain independent server settings.
 
 Fact `created_at` is its first database insertion time; `updated_at` is its latest content/evidence update. Unknown legacy times are null. Neither replaces message recording time or `fact_time`, and neither automatically overrides older statements. Strict ID exclusions still exclude an edited Fact in the current conversation.
 
-`queryFacts(userId, input)`, `queryEvents(userId, input)` and `queryProfiles(userId, input)` query independent pre-filtered pools; they do not slice `search` results. Query text stays in private read-only POST bodies, using the existing read timeout/retry policy. OpenAPI-derived `FactQuery`/`EventQuery`/`ProfileQuery` and result types are exported. Supported filters and the distinct recording/creation/calendar times are documented in [API-DESIGN](../../src/server/api/API-DESIGN.md#独立只读查询). `getProjectIdentity()` returns the authenticated `project_id` for server-owned cache scope; client input cannot override it. This SDK 0.11.0 local candidate requires schema revision 0015 and coordinated consumers.
+`queryFacts(userId, input)`, `queryEvents(userId, input)` and `queryProfiles(userId, input)` query independent pre-filtered pools; they do not slice `search` results. Query text stays in private read-only POST bodies, using the existing read timeout/retry policy. OpenAPI-derived `FactQuery`/`EventQuery`/`ProfileQuery` and result types are exported. Supported filters and the distinct recording/creation/calendar times are documented in [API-DESIGN](../../docs/api.md#独立只读查询). `getProjectIdentity()` returns the authenticated `project_id` for server-owned cache scope; client input cannot override it. This SDK 0.11.0 local candidate requires the matching source/Blob/Fact API and coordinated consumers. The Worker schema uses its own Drizzle migration ledger; the legacy data importer accepts known 0015/0016 source schemas.
 
 ```ts
 import { MemoiaClient } from "@jianify/memoia";
@@ -32,7 +32,7 @@ A Source is unique within the authenticated project and user. Every import or me
 
 Completed imports atomically erase raw input and retain their receipt, facts and message associations. Incomplete raw input defaults to seven days of temporary retention; retry does not extend it. After expiry, `retryOperation()` returns `input_required`. First query the original receipt, then explicitly resupply the identical batch using its original key if still incomplete. Failed correction requests return the original receipt: resupplying the identical proposal restores its expired payload but does not execute it; use `retryOperation()` explicitly after rechecking the target. The SDK never reconstructs or resends expired input automatically. Legacy groups (`legacy:` / `v1-flush:`) are not inferred external conversation identities.
 
-The base URL is an origin, without `/api`. `deadline` is an absolute Unix timestamp in milliseconds; `signal` may also cancel a request. Reads retain a 5-second per-attempt limit, writes a 90-second limit, both bounded by the caller's remaining deadline. The client never generates or replaces an idempotency key.
+The base URL is an origin, without `/api`. `deadline` is an absolute Unix timestamp in milliseconds; `signal` may also cancel a request. The SDK sends `X-Memoia-Deadline-Ms` as the positive remaining duration in milliseconds, calculated for each attempt; the server applies it from receipt time and also enforces its own execution limit. Reads retain a 5-second per-attempt limit, writes a 90-second limit, both bounded by the caller's remaining deadline. The client never generates or replaces an idempotency key.
 
 Completed results are schema-validated Fact receipts with an immutable `memory_version`, not a promise of completed Profile/Event. `processing` is not success. Every mutation is sent once, including explicitly retryable 409/429 responses. Only safe reads receive bounded backoff. A transport timeout, lost write response, or any write 5xx throws `MemoiaError` with `outcome === "unknown"`; it does not prove rollback. For source operations, query `getOperationByKey()` before deciding how to recover. For unkeyed management writes, read the affected resource before another deliberate mutation.
 
@@ -40,7 +40,7 @@ Completed results are schema-validated Fact receipts with an immutable `memory_v
 
 A flush selects a bounded prefix of whole Blobs (up to 100 scanned, 256 KiB of changes/current Facts); the tail remains in `pending_blob_count` for subsequent flushes. An indivisible oversized Blob fails explicitly without calling the model. Automatic backoff keeps the original Operation `processing` and its flush `pending`, with the last retryable error; only permanent failure or exhausted attempts becomes `failed`. Repeating recovery while processing does not reset attempts. SDK validation rejects contradictory Operation/progress states.
 
-`search()` returns complete `facts`, associated `events` and `profiles` as separate objects with stable IDs; a missing/deleted Event does not invalidate its Fact. `max_token_size` is the shared response budget (default 4000, range 1–10000). `exclude_fact_ids`, `exclude_event_ids` and `exclude_profile_ids` accept at most 500 UUIDs each and independently exclude those exact output IDs, without revision tracking. An excluded Fact may still locate unseen associated Events/Profiles, including entries generated later by maintenance or omitted from a previous response budget. Navigation anchors have a separate bounded candidate pool and never displace unseen Facts; all returned objects and evidence remain within the shared budget. `exclude_profile_topics` accepts at most 50 nonempty topic strings of at most 256 characters and filters only Profiles, not Facts or Events. Invalid or oversized exclusions fail locally rather than being silently shortened. Existing `include_events` / `event_max_tokens` options remain compatible; no execution controls enter the POST body. Story fields include title, summary, keywords, `event_time`, location, content and a separate interpretation which is not Fact evidence. Event `event_time` remains nullable prose, distinct from structured `FactTime`; no runtime alias reads the former Event `time` key. Search rejects that old key; list/query EventData retains its existing extensible response shape.
+`search()` returns complete `facts`, associated `events` and `profiles` as separate objects with stable IDs; a missing/deleted Event does not invalidate its Fact. `max_token_size` is the shared response budget (default 8192, range 1–10000). `exclude_fact_ids`, `exclude_event_ids` and `exclude_profile_ids` accept at most 500 UUIDs each and independently exclude those exact output IDs, without revision tracking. An excluded Fact may still locate unseen associated Events/Profiles, including entries generated later by maintenance or omitted from a previous response budget. Navigation anchors have a separate bounded candidate pool and never displace unseen Facts; all returned objects and evidence remain within the shared budget. `exclude_profile_topics` accepts at most 50 nonempty topic strings of at most 256 characters and filters only Profiles, not Facts or Events. Invalid or oversized exclusions fail locally rather than being silently shortened. Existing `include_events` / `event_max_tokens` options remain compatible; no execution controls enter the POST body. Story fields include title, summary, keywords, `event_time`, location, content and a separate interpretation which is not Fact evidence. Event `event_time` remains nullable prose, distinct from structured `FactTime`; no runtime alias reads the former Event `time` key. Search rejects that old key; list/query EventData retains its existing extensible response shape.
 
 HTTP 409 is recoverable only when the server explicitly supplies `detail.retryable: true` with `detail.code: "write_conflict"` or `"lease_lost"`. The SDK preserves that classification for the caller; `retryable` is not permission for SDK write replay. Other conflicts, including changed idempotent input, do not authorize recovery. Task consumers own receipt lookup and explicit `retryOperation()` on persisted input. `maxAttempts` controls read attempts only.
 
@@ -78,6 +78,27 @@ pnpm pack
 ```
 
 The generated validators are standalone JavaScript: runtime use requires no Node.js APIs, dynamic evaluation, or Ajv dependency. A fixed-version tarball can be copied into a consumer's `vendor/` directory and referenced through a `file:` dependency with its lockfile; no registry publication is required for first integration. Regenerate after exporting server OpenAPI. The generated-schema check must be part of verification before distribution.
+
+## Transient image input
+
+Import messages may include `images: [{ url, mimeType, width, height, byteSize }]`: at most one
+public HTTP(S) image per message, declared size at most 10 MiB, JPEG/PNG/WebP or non-animated GIF.
+`content` remains required and may be empty only with an image. The caller validates actual
+bytes, ownership and link availability. Memoia forwards the image to the extraction model with
+`store: false`; URLs exist only in the current extraction process/request and are never written to
+Operation input or durable memory. Stored input has only an image-count marker; message identity
+hashes include the original attachment. Text input and validated candidates retain their existing
+seven-day expiry. For unfinished image operations, `retryOperation()` returns `input_required`
+instead of attempting extraction without images. Query the original receipt first; after confirming
+resupply is needed, call `importBlob()` with the same key and complete original messages/images.
+This resumes an eligible original failure, reuses its saved candidate where available, returns a
+completed receipt unchanged and does not replay permanent failures. Never blindly resubmit an
+unknown write; inspect its original handle. Concurrent same-key requests retain one effect.
+An `input_required` receipt remains recoverable by explicit same-key resupply; it is not a permanent
+model/configuration rejection.
+Source evidence and search keep only existing message IDs/times, never image URLs. Resolve
+images from those IDs in the calling system. No new database migration or image retrieval
+field is introduced. This wire extension does not prove deployed vision-model quality.
 
 ## Time evidence (0.4)
 

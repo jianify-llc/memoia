@@ -33,8 +33,8 @@
 ## 冻结与执行边界
 
 基线源码：`3f3c3fd35aec24de1ddfecdcf573ab0803d8c3bf`。从该提交读取
-`src/server/api/memoia_server/controllers/source.py` 的 `EXTRACT_SYSTEM` 和
-`src/server/api/memoia_server/prompts/maintenance.md`，不另存运行时 Prompt 副本。
+`src/worker/prompts/fact_extraction.md` 和
+`src/worker/prompts/maintenance.md`，不另存运行时 Prompt 副本。
 这是**源码基线冻结，不是已完成的真实模型基线**。
 
 `cases.json` 最初固定六组正常输入和人工验收条件：中文四组、英文两组，

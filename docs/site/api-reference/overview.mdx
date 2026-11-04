@@ -1,7 +1,13 @@
 ---
-title: API contract
+title: API Reference
 ---
 
-All current endpoints live under `/api`. Health is public; all other calls require project Bearer authentication with read/write/admin scopes. Search and event context use POST JSON bodies with read scope. Success is a typed JSON object; errors use real HTTP status and controlled detail. Source import, operation recovery, message withdrawal, permanent forgetting and management share the same contract.
+The checked-in `openapi.json` is the public contract and the input to SDK type/validator generation. The API uses authenticated, unversioned `/api` paths. Use the repository's `docs/api.md` for evidence, time, deletion, correction, recovery and retrieval semantics.
 
-The generated `openapi.json` is the exact schema. No compatibility version routes, legacy envelope or standalone buffer/flush endpoint is exposed. Historical stored data and old source identities remain readable.
+- Messages: import fixed Blobs, read Sources and delete a Source's message contributions.
+- Memory: independently query Facts, Events and Profiles; search returns all three fields.
+- Corrections: update or delete an existing Fact with stable operation identity and revision checks.
+- Recovery: read the original Operation, retry an explicitly recoverable original operation, inspect maintenance and flush completed changes.
+- Administration: users, permanent forgetting, projects, keys, configuration, usage and profile/history management.
+
+SDK validation, HTTP success and a deployment receipt do not establish semantic model quality or completed maintenance. Inspect the corresponding Operation and maintenance result.

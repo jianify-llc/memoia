@@ -1,0 +1,11 @@
+{
+  "name": "memoia",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.12.4",
+  "scripts": {
+    "verify": "src/worker/node_modules/.bin/tsx scripts/verify.ts full",
+    "check:tools": "src/worker/node_modules/.bin/tsc --noEmit -p scripts/tsconfig.json"
+  }
+}

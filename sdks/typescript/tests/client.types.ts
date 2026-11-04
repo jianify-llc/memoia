@@ -1,4 +1,14 @@
 import type { BlobImport, Evidence, Events, FactTime, MemoiaClient, QueriedEvents, Search, UpdateFact, Usage } from "../dist/index.js";
+
+declare const importWithImage: BlobImport;
+const attachment: NonNullable<BlobImport["messages"][number]["images"]>[number] = {
+  url: "https://images.example/original.webp", mimeType: "image/webp", width: 600, height: 400, byteSize: 4096,
+};
+const imageOnly: BlobImport = { ...importWithImage, messages: [{ message_id: "image-1", role: "user",
+  content: "", occurred_at: "2026-11-01T00:00:00Z", images: [attachment] }] };
+declare const sourceObservation: NonNullable<Evidence["source_messages"]>[number];
+// @ts-expect-error Durable provenance returns message identity, not transient image URLs.
+sourceObservation.images;
 // @ts-expect-error The old public time type has been removed.
 import type { EventTime } from "../dist/index.js";
 

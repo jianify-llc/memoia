@@ -1,0 +1,50 @@
+{
+  "name": "@jianify/memoia-worker",
+  "version": "0.12.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@10.12.4",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "tsx --test --test-concurrency=1 tests/*.test.ts",
+    "dev": "wrangler dev",
+    "build": "tsx scripts/build.ts",
+    "types": "wrangler types",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx scripts/migrate.ts upgrade --target",
+    "db:init": "tsx scripts/migrate.ts init --target",
+    "build:node": "tsx scripts/build-node.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.6",
+    "@jianify/legato": "file:vendor/jianify-legato-0.1.0.tgz",
+    "@openai/agents-core": "0.21.0",
+    "@openai/agents-openai": "0.21.0",
+    "drizzle-orm": "0.45.4",
+    "gpt-tokenizer": "3.4.0",
+    "hono": "4.13.11",
+    "openai": "7.45.1",
+    "pg": "8.23.1",
+    "yaml": "2.8.3",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261029.1",
+    "@types/node": "24.19.2",
+    "@types/pg": "8.15.6",
+    "drizzle-kit": "0.31.11",
+    "esbuild": "0.25.11",
+    "miniflare": "5.20261023.2-beta",
+    "prettier": "3.6.2",
+    "redis": "5.10.0",
+    "tsx": "4.22.0",
+    "typescript": "5.9.3",
+    "wrangler": "4.155.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "@esbuild-kit/core-utils>esbuild": "0.25.11"
+    }
+  }
+}

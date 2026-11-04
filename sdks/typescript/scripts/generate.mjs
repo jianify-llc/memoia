@@ -7,7 +7,7 @@ import addFormats from "ajv-formats";
 import standaloneCode from "ajv/dist/standalone/index.js";
 import { build } from "esbuild";
 
-const apiUrl = new URL("../../../src/server/api/openapi.json", import.meta.url);
+const apiUrl = new URL("../../../openapi.json", import.meta.url);
 const apiText = await readFile(apiUrl, "utf8");
 const api = JSON.parse(apiText);
 const { version: sdkVersion } = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));

@@ -374,10 +374,12 @@ export class MemoiaClient {
     for (let attempt = 0; attempt < this.attempts; attempt++) {
       const remaining = deadline - Date.now();
       if (remaining <= 0 || options.signal?.aborted) throw new MemoiaError("BUDGET_EXHAUSTED", null, false);
+      const timeoutMs = Math.floor(Math.min(limit, remaining));
+      if (timeoutMs <= 0) throw new MemoiaError("BUDGET_EXHAUSTED", null, false);
       const controller = new AbortController();
       const cancel = () => controller.abort(options.signal?.reason);
       options.signal?.addEventListener("abort", cancel, { once: true });
-      const timer = setTimeout(() => controller.abort(), Math.min(limit, remaining));
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       let error: MemoiaError;
       try {
         // Runtime fetch requires its global receiver, not a MemoiaClient instance.
@@ -385,7 +387,7 @@ export class MemoiaClient {
         const transport = this.transport;
         const response = await transport(`${this.origin}${path}`, {
           method, redirect: "manual", cache: "no-store", signal: controller.signal,
-          headers: { Authorization: `Bearer ${this.apiKey}`, Accept: "application/json", ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+          headers: { Authorization: `Bearer ${this.apiKey}`, Accept: "application/json", "X-Memoia-Deadline-Ms": String(timeoutMs), ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         });
         // Never follow a redirect with project credentials. A mutation may

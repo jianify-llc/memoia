@@ -276,3 +276,34 @@ describe("Memoia SDK in the real workerd runtime", { concurrency: false }, () =>
     assertOriginOnly();
   });
 });
+
+it("uses a real Service Binding with the SDK deadline and Bearer headers", async () => {
+  const entry = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+  const bundle = await build({
+    stdin: { sourcefile: "service-binding-probe.js", resolveDir: fileURLToPath(new URL("..", import.meta.url)), contents: `
+      import { MemoiaClient } from ${JSON.stringify(entry)};
+      export default { async fetch(_request, env) {
+        const client = new MemoiaClient({baseUrl: ${JSON.stringify(origin)}, apiKey: ${JSON.stringify(apiKey)},
+          maxAttempts: 1, readTimeoutMs: 500, fetch: (input, init) => env.MEMOIA.fetch(input, init)});
+        return Response.json(await client.getProjectIdentity());
+      }};` },
+    bundle: true, write: false, platform: "browser", target: "es2022", format: "esm",
+  });
+  const observed = [];
+  const isolated = new Miniflare(convertV4MiniflareOptions({
+    modules: true, script: bundle.outputFiles[0].text, compatibilityDate: "2026-03-02",
+    compatibilityFlags: ["nodejs_compat"], telemetry: { enabled: false }, cf: false,
+    serviceBindings: { MEMOIA: async request => {
+      observed.push({ authorization: request.headers.get("authorization"), deadline: Number(request.headers.get("x-memoia-deadline-ms")), path: new URL(request.url).pathname });
+      return json({ project_id: "binding-project" });
+    } },
+  }));
+  try {
+    const response = await isolated.dispatchFetch("https://client.invalid/");
+    assert.deepEqual(await response.json(), { project_id: "binding-project" });
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0].authorization, `Bearer ${apiKey}`);
+    assert.equal(observed[0].path, "/api/project/identity");
+    assert.ok(observed[0].deadline > 0 && observed[0].deadline <= 500);
+  } finally { await isolated.dispose(); }
+});

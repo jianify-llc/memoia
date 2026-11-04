@@ -1,2 +1,2 @@
 #!/bin/sh
-exec python3 scripts/test_push.py check
+exec "$(git rev-parse --show-toplevel)/src/worker/node_modules/.bin/tsx" "$(git rev-parse --show-toplevel)/scripts/test-push.ts" check

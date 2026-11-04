@@ -2,4 +2,10 @@
 title: Memoia
 ---
 
-Memoia preserves source-supported personal facts, profiles and event time evidence. It is an Apache-2.0 fork of Memobase with an independently maintained, unversioned `/api` contract and one TypeScript SDK. Read the current Quickstart and OpenAPI reference; inherited pages outside this navigation are archived upstream material, not supported interfaces.
+Memoia is a TypeScript memory service for Cloudflare Workers and PostgreSQL/pgvector, derived from Memobase under Apache-2.0.
+
+Messages produce source-supported Facts synchronously. A recoverable Queue maintenance Loop organizes related Facts into Profiles and Events. The service exposes one authenticated `/api` contract, shared by the TypeScript SDK, Luvel Service Binding and Inspector HTTP client.
+
+Facts retain necessary source, message and support relationships after completed input bodies are removed. Message deletion removes its evidence immediately; derived text may remain readable until maintenance succeeds. Permanent user forgetting blocks reads and late writes immediately.
+
+See the [Quickstart](/quickstart), [API reference](/api-reference/overview) and the repository's deployment and migration guides. Historical benchmark datasets are not current API documentation.

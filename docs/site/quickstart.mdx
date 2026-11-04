@@ -2,8 +2,16 @@
 title: Quickstart
 ---
 
-Use the fixed `@jianify/memoia` TypeScript SDK described in the repository SDK README. Provide a service origin and project Bearer key through protected runtime configuration.
+Build the repository's `sdks/typescript` package or use its fixed released package. Create `MemoiaClient` with your service origin and project Bearer credential. Credentials are supplied by the caller, never embedded in source.
 
-Import full timestamped messages with caller source_id and stable idempotency_key. Query the original operation after unknown acknowledgement; never replay bodies blindly. Read profiles independently and use POST search/context queries. Delete source messages to withdraw their evidence; DELETE user permanently forgets that identity. There is no insert/flush pair or version alias.
+```typescript
+const receipt = await client.importBlob(userId, {
+  source_id: dialogId,
+  idempotency_key: fixedBatchKey,
+  messages: [{ message_id: messageId, role: "user", content: "I enjoy cycling.", occurred_at: messageTimestamp }]
+});
+```
 
-See the current OpenAPI reference for exact request and response schemas. Historical deployment/data migration records do not describe the current wire contract.
+The source groups related batches. Keep the key, message IDs, content and original timestamps unchanged across a business retry. `completed` confirms Facts and the durable receipt; automatic flush maintains Profiles and Events asynchronously. After an unknown acknowledgement, query the original Operation before retrying.
+
+`search` returns separate `facts`, `events` and `profiles`, within a complete-entry token budget (8192 by default). Independent query methods can filter each collection. Delete source messages to remove their memory contribution; correct an existing Fact using its revision when human review finds an error. Deleting an Event affects only that Event. Deleting a user permanently forgets the identity.

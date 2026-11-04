@@ -1,0 +1,23 @@
+[
+  {
+    "name": "reported_uncertainty",
+    "messages": [{"message_id":"u-busy","role":"user","content":"My colleague Zhou has been busy recently. I suspect Zhou might quit his job, but I do not know.","occurred_at":"2025-01-01T00:00:00Z"}],
+    "facts": [
+      {"content":"Zhou has been busy", "subject":"Zhou", "reporter":"user", "certainty":"asserted", "fact_time":null, "any_of":[{"all_of":["u-busy"]}]},
+      {"content":"Zhou might quit his job", "subject":"Zhou", "reporter":"user", "certainty":"uncertain", "fact_time":null, "any_of":[{"all_of":["u-busy"]}]}
+    ]
+  },
+  {
+    "name": "corrected_preference",
+    "messages": [
+      {"message_id":"u-old","role":"user","content":"My favorite drink is coffee.","occurred_at":"2025-01-01T00:00:00Z"},
+      {"message_id":"u-correct","role":"user","content":"Correction: my favorite drink is rooibos tea, not coffee.","occurred_at":"2025-01-02T00:00:00Z"}
+    ],
+    "facts": [{"content":"The user's favorite drink is rooibos tea", "subject":"user", "reporter":"user", "certainty":"asserted", "fact_time":null, "any_of":[{"all_of":["u-correct"]}]}]
+  },
+  {
+    "name": "smalltalk",
+    "messages": [{"message_id":"u-hello","role":"user","content":"Hello!","occurred_at":"2025-01-01T00:00:00Z"}],
+    "facts": []
+  }
+]

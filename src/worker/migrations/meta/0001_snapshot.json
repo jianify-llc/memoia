@@ -1,0 +1,3177 @@
+{
+  "id": "d6f044a6-9545-4fcc-aaab-37e60e630c76",
+  "prevId": "8731eaa6-623a-4a72-b593-100ed070a219",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "memoia.alembic_version": {
+      "name": "alembic_version",
+      "schema": "memoia",
+      "columns": {
+        "version_num": {
+          "name": "version_num",
+          "type": "varchar(32)",
+          "primaryKey": true,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.billings": {
+      "name": "billings",
+      "schema": "memoia",
+      "columns": {
+        "usage_left": {
+          "name": "usage_left",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "next_refill_at": {
+          "name": "next_refill_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.buffer_zones": {
+      "name": "buffer_zones",
+      "schema": "memoia",
+      "columns": {
+        "blob_type": {
+          "name": "blob_type",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "token_size": {
+          "name": "token_size",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "blob_id": {
+          "name": "blob_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_buffer_zones_user_id_blob_type": {
+          "name": "idx_buffer_zones_user_id_blob_type",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "blob_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "buffer_zones_blob_id_project_id_fkey": {
+          "name": "buffer_zones_blob_id_project_id_fkey",
+          "tableFrom": "buffer_zones",
+          "tableTo": "general_blobs",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "blob_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "cascade"
+        },
+        "buffer_zones_user_id_project_id_fkey": {
+          "name": "buffer_zones_user_id_project_id_fkey",
+          "tableFrom": "buffer_zones",
+          "tableTo": "users",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {
+        "buffer_zones_pkey": {
+          "name": "buffer_zones_pkey",
+          "columns": [
+            "project_id",
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.general_blobs": {
+      "name": "general_blobs",
+      "schema": "memoia",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "blob_type": {
+          "name": "blob_type",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "blob_data": {
+          "name": "blob_data",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "additional_fields": {
+          "name": "additional_fields",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_general_blobs_id_project_id": {
+          "name": "idx_general_blobs_id_project_id",
+          "columns": [
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_general_blobs_user_id_blob_type": {
+          "name": "idx_general_blobs_user_id_blob_type",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "blob_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_general_blobs_user_id_id": {
+          "name": "idx_general_blobs_user_id_id",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_general_blobs_user_id_project_id": {
+          "name": "idx_general_blobs_user_id_project_id",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "general_blobs_user_id_project_id_fkey": {
+          "name": "general_blobs_user_id_project_id_fkey",
+          "tableFrom": "general_blobs",
+          "tableTo": "users",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {
+        "general_blobs_pkey": {
+          "name": "general_blobs_pkey",
+          "columns": [
+            "project_id",
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.memory_blobs": {
+      "name": "memory_blobs",
+      "schema": "memoia",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "event_id": {
+          "name": "event_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "event_deleted": {
+          "name": "event_deleted",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "source_id": {
+          "name": "source_id",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "message_ids": {
+          "name": "message_ids",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'import'"
+        },
+        "fact_changes": {
+          "name": "fact_changes",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "fact_completed_at": {
+          "name": "fact_completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "flush_operation_id": {
+          "name": "flush_operation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "idx_memory_blob_unflushed": {
+          "name": "idx_memory_blob_unflushed",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "fact_completed_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "((flush_operation_id IS NULL) AND (fact_completed_at IS NOT NULL))",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_memory_blobs_group": {
+          "name": "idx_memory_blobs_group",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_memory_blobs_message_ids": {
+          "name": "idx_memory_blobs_message_ids",
+          "columns": [
+            {
+              "expression": "message_ids",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        },
+        "idx_memory_sources_user": {
+          "name": "idx_memory_sources_user",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "fk_memory_blob_flush": {
+          "name": "fk_memory_blob_flush",
+          "tableFrom": "memory_blobs",
+          "tableTo": "memory_operations",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "flush_operation_id",
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "user_id",
+            "project_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "memory_blobs_user_id_project_id_source_id_fkey": {
+          "name": "memory_blobs_user_id_project_id_source_id_fkey",
+          "tableFrom": "memory_blobs",
+          "tableTo": "memory_sources",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id",
+            "source_id"
+          ],
+          "columnsTo": [
+            "user_id",
+            "project_id",
+            "source_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "memory_sources_user_id_project_id_fkey": {
+          "name": "memory_sources_user_id_project_id_fkey",
+          "tableFrom": "memory_blobs",
+          "tableTo": "users",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "memory_blobs_id_user_id_project_id_key": {
+          "name": "memory_blobs_id_user_id_project_id_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id",
+            "user_id",
+            "project_id"
+          ]
+        },
+        "memory_blobs_id_user_id_project_id_source_id_key": {
+          "name": "memory_blobs_id_user_id_project_id_source_id_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id",
+            "user_id",
+            "project_id",
+            "source_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "ck_memory_blob_changes": {
+          "name": "ck_memory_blob_changes",
+          "value": "jsonb_typeof(fact_changes) = 'array'::text"
+        },
+        "ck_memory_blob_kind": {
+          "name": "ck_memory_blob_kind",
+          "value": "(kind)::text = ANY (ARRAY[('import'::character varying)::text, ('retract'::character varying)::text, ('correct'::character varying)::text])"
+        },
+        "memory_sources_status_check": {
+          "name": "memory_sources_status_check",
+          "value": "(status)::text = ANY (ARRAY[('active'::character varying)::text, ('retracted'::character varying)::text, ('rebuilding'::character varying)::text])"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "memoia.memory_deleted_events": {
+      "name": "memory_deleted_events",
+      "schema": "memoia",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "memory_deleted_events_user_id_project_id_fkey": {
+          "name": "memory_deleted_events_user_id_project_id_fkey",
+          "tableFrom": "memory_deleted_events",
+          "tableTo": "users",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "memory_deleted_events_pkey": {
+          "name": "memory_deleted_events_pkey",
+          "columns": [
+            "user_id",
+            "project_id",
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.memory_event_facts": {
+      "name": "memory_event_facts",
+      "schema": "memoia",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "event_id": {
+          "name": "event_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "fact_id": {
+          "name": "fact_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "idx_memory_event_facts_reverse": {
+          "name": "idx_memory_event_facts_reverse",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "fact_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "memory_event_facts_event_id_user_id_project_id_fkey": {
+          "name": "memory_event_facts_event_id_user_id_project_id_fkey",
+          "tableFrom": "memory_event_facts",
+          "tableTo": "user_events",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "event_id",
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "user_id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "memory_event_facts_fact_id_user_id_project_id_fkey": {
+          "name": "memory_event_facts_fact_id_user_id_project_id_fkey",
+          "tableFrom": "memory_event_facts",
+          "tableTo": "memory_facts",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "fact_id",
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "user_id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "memory_event_facts_pkey": {
+          "name": "memory_event_facts_pkey",
+          "columns": [
+            "project_id",
+            "event_id",
+            "fact_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.memory_facts": {
+      "name": "memory_facts",
+      "schema": "memoia",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "blob_id": {
+          "name": "blob_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "content": {
+          "name": "content",
+          "type": "varchar",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "topic": {
+          "name": "topic",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sub_topic": {
+          "name": "sub_topic",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "support_groups": {
+          "name": "support_groups",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "included": {
+          "name": "included",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "fact_time": {
+          "name": "fact_time",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "subject": {
+          "name": "subject",
+          "type": "varchar(512)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reporter": {
+          "name": "reporter",
+          "type": "varchar(512)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "certainty": {
+          "name": "certainty",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'legacy'"
+        },
+        "revision": {
+          "name": "revision",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "1"
+        },
+        "created_version": {
+          "name": "created_version",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "0"
+        },
+        "search_text": {
+          "name": "search_text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "embedding": {
+          "name": "embedding",
+          "type": "vector(1536)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_memory_facts_lexical": {
+          "name": "idx_memory_facts_lexical",
+          "columns": [
+            {
+              "expression": "to_tsvector('simple'::regconfig, COALESCE(search_text, content::text))",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        },
+        "idx_memory_facts_user": {
+          "name": "idx_memory_facts_user",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "blob_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "memory_facts_blob_id_user_id_project_id_fkey": {
+          "name": "memory_facts_blob_id_user_id_project_id_fkey",
+          "tableFrom": "memory_facts",
+          "tableTo": "memory_blobs",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "blob_id",
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "user_id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "memory_facts_user_id_project_id_fkey": {
+          "name": "memory_facts_user_id_project_id_fkey",
+          "tableFrom": "memory_facts",
+          "tableTo": "users",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_memory_facts_owner": {
+          "name": "uq_memory_facts_owner",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id",
+            "user_id",
+            "project_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "ck_memory_facts_certainty": {
+          "name": "ck_memory_facts_certainty",
+          "value": "(certainty)::text = ANY (ARRAY[('legacy'::character varying)::text, ('asserted'::character varying)::text, ('reported'::character varying)::text, ('uncertain'::character varying)::text])"
+        },
+        "ck_memory_facts_revision": {
+          "name": "ck_memory_facts_revision",
+          "value": "(revision > 0) AND (created_version >= 0)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "memoia.memory_messages": {
+      "name": "memory_messages",
+      "schema": "memoia",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_id": {
+          "name": "source_id",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "message_id": {
+          "name": "message_id",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "content_hash": {
+          "name": "content_hash",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "role": {
+          "name": "role",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "processed": {
+          "name": "processed",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "deleted": {
+          "name": "deleted",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "time_zone": {
+          "name": "time_zone",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "memory_messages_user_id_project_id_source_id_fkey": {
+          "name": "memory_messages_user_id_project_id_source_id_fkey",
+          "tableFrom": "memory_messages",
+          "tableTo": "memory_sources",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id",
+            "source_id"
+          ],
+          "columnsTo": [
+            "user_id",
+            "project_id",
+            "source_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "memory_messages_pkey": {
+          "name": "memory_messages_pkey",
+          "columns": [
+            "user_id",
+            "project_id",
+            "source_id",
+            "message_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "memory_messages_check": {
+          "name": "memory_messages_check",
+          "value": "deleted OR ((content_hash IS NOT NULL) AND (role IS NOT NULL) AND (occurred_at IS NOT NULL))"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "memoia.memory_operations": {
+      "name": "memory_operations",
+      "schema": "memoia",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "request_hash": {
+          "name": "request_hash",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "request": {
+          "name": "request",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "blob_id": {
+          "name": "blob_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "result": {
+          "name": "result",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "error": {
+          "name": "error",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "source_id": {
+          "name": "source_id",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "input_expires_at": {
+          "name": "input_expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lease_owner": {
+          "name": "lease_owner",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lease_until": {
+          "name": "lease_until",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "0"
+        },
+        "available_at": {
+          "name": "available_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "dispatch_reserved_until": {
+          "name": "dispatch_reserved_until",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "idx_memory_flush_ready": {
+          "name": "idx_memory_flush_ready",
+          "columns": [
+            {
+              "expression": "available_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "(((kind)::text = 'flush'::text) AND ((status)::text <> 'completed'::text))",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_memory_operations_user": {
+          "name": "idx_memory_operations_user",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "uq_memory_fact_operation_blob": {
+          "name": "uq_memory_fact_operation_blob",
+          "columns": [
+            {
+              "expression": "blob_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "((kind)::text = ANY (ARRAY[('import'::character varying)::text, ('retract'::character varying)::text, ('correct'::character varying)::text]))",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "uq_memory_flush_executor": {
+          "name": "uq_memory_flush_executor",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "(((kind)::text = 'flush'::text) AND (lease_owner IS NOT NULL))",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "memory_operations_blob_id_user_id_project_id_fkey": {
+          "name": "memory_operations_blob_id_user_id_project_id_fkey",
+          "tableFrom": "memory_operations",
+          "tableTo": "memory_blobs",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "blob_id",
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "user_id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "memory_operations_blob_id_user_id_project_id_source_id_fkey": {
+          "name": "memory_operations_blob_id_user_id_project_id_source_id_fkey",
+          "tableFrom": "memory_operations",
+          "tableTo": "memory_blobs",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "blob_id",
+            "user_id",
+            "project_id",
+            "source_id"
+          ],
+          "columnsTo": [
+            "id",
+            "user_id",
+            "project_id",
+            "source_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "memory_operations_user_id_project_id_fkey": {
+          "name": "memory_operations_user_id_project_id_fkey",
+          "tableFrom": "memory_operations",
+          "tableTo": "users",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "memory_operations_user_id_project_id_source_id_fkey": {
+          "name": "memory_operations_user_id_project_id_source_id_fkey",
+          "tableFrom": "memory_operations",
+          "tableTo": "memory_sources",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id",
+            "source_id"
+          ],
+          "columnsTo": [
+            "user_id",
+            "project_id",
+            "source_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "memory_operations_id_user_id_project_id_key": {
+          "name": "memory_operations_id_user_id_project_id_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id",
+            "user_id",
+            "project_id"
+          ]
+        },
+        "memory_operations_id_user_id_project_id_source_id_key": {
+          "name": "memory_operations_id_user_id_project_id_source_id_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id",
+            "user_id",
+            "project_id",
+            "source_id"
+          ]
+        },
+        "memory_operations_user_id_project_id_idempotency_key_key": {
+          "name": "memory_operations_user_id_project_id_idempotency_key_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "user_id",
+            "project_id",
+            "idempotency_key"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "ck_memory_fact_operation_blob": {
+          "name": "ck_memory_fact_operation_blob",
+          "value": "((kind)::text <> ALL (ARRAY[('import'::character varying)::text, ('retract'::character varying)::text, ('correct'::character varying)::text])) OR (blob_id IS NOT NULL)"
+        },
+        "ck_memory_flush_lease": {
+          "name": "ck_memory_flush_lease",
+          "value": "((lease_owner IS NULL) = (lease_until IS NULL)) AND ((attempts >= 0) AND (attempts <= 4)) AND (((kind)::text = 'flush'::text) OR ((lease_owner IS NULL) AND (attempts = 0) AND (available_at IS NULL)))"
+        },
+        "ck_memory_operation_scope": {
+          "name": "ck_memory_operation_scope",
+          "value": "(((kind)::text = 'flush'::text) AND (source_id IS NULL) AND (blob_id IS NULL)) OR (((kind)::text <> 'flush'::text) AND (source_id IS NOT NULL))"
+        },
+        "memory_operations_completion_check": {
+          "name": "memory_operations_completion_check",
+          "value": "(((status)::text <> 'completed'::text) OR ((result IS NOT NULL) AND (error IS NULL) AND (((kind)::text <> 'import'::text) OR (blob_id IS NOT NULL)))) AND (((status)::text <> 'failed'::text) OR (error IS NOT NULL))"
+        },
+        "memory_operations_kind_check": {
+          "name": "memory_operations_kind_check",
+          "value": "(kind)::text = ANY (ARRAY[('import'::character varying)::text, ('retract'::character varying)::text, ('correct'::character varying)::text, ('legacy_import'::character varying)::text, ('flush'::character varying)::text])"
+        },
+        "memory_operations_legacy_receipt_check": {
+          "name": "memory_operations_legacy_receipt_check",
+          "value": "((kind)::text <> 'legacy_import'::text) OR (((status)::text = 'completed'::text) AND (blob_id IS NOT NULL) AND (result IS NOT NULL) AND (error IS NULL) AND (NOT (request ? 'messages'::text)))"
+        },
+        "memory_operations_status_check": {
+          "name": "memory_operations_status_check",
+          "value": "(status)::text = ANY (ARRAY[('processing'::character varying)::text, ('completed'::character varying)::text, ('failed'::character varying)::text])"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "memoia.memory_profile_revisions": {
+      "name": "memory_profile_revisions",
+      "schema": "memoia",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "operation_id": {
+          "name": "operation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_id": {
+          "name": "source_id",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "profiles": {
+          "name": "profiles",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "added": {
+          "name": "added",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "removed": {
+          "name": "removed",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "maintenance_version": {
+          "name": "maintenance_version",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "idx_memory_profile_revisions_user": {
+          "name": "idx_memory_profile_revisions_user",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "memory_profile_revisions_operation_id_fkey": {
+          "name": "memory_profile_revisions_operation_id_fkey",
+          "tableFrom": "memory_profile_revisions",
+          "tableTo": "memory_operations",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "operation_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "memory_profile_revisions_operation_id_user_id_project_id_s_fkey": {
+          "name": "memory_profile_revisions_operation_id_user_id_project_id_s_fkey",
+          "tableFrom": "memory_profile_revisions",
+          "tableTo": "memory_operations",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "operation_id",
+            "user_id",
+            "project_id",
+            "source_id"
+          ],
+          "columnsTo": [
+            "id",
+            "user_id",
+            "project_id",
+            "source_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "memory_profile_revisions_user_id_project_id_fkey": {
+          "name": "memory_profile_revisions_user_id_project_id_fkey",
+          "tableFrom": "memory_profile_revisions",
+          "tableTo": "users",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "memory_profile_revisions_user_id_project_id_source_id_fkey": {
+          "name": "memory_profile_revisions_user_id_project_id_source_id_fkey",
+          "tableFrom": "memory_profile_revisions",
+          "tableTo": "memory_sources",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id",
+            "source_id"
+          ],
+          "columnsTo": [
+            "user_id",
+            "project_id",
+            "source_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_profile_maintenance": {
+          "name": "uq_profile_maintenance",
+          "nullsNotDistinct": false,
+          "columns": [
+            "user_id",
+            "project_id",
+            "maintenance_version"
+          ]
+        },
+        "memory_profile_revisions_operation_id_key": {
+          "name": "memory_profile_revisions_operation_id_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "operation_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.memory_sources": {
+      "name": "memory_sources",
+      "schema": "memoia",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_id": {
+          "name": "source_id",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "legacy": {
+          "name": "legacy",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "memory_sources_user_id_project_id_fkey1": {
+          "name": "memory_sources_user_id_project_id_fkey1",
+          "tableFrom": "memory_sources",
+          "tableTo": "users",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "memory_sources_pkey1": {
+          "name": "memory_sources_pkey1",
+          "columns": [
+            "user_id",
+            "project_id",
+            "source_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.memory_user_states": {
+      "name": "memory_user_states",
+      "schema": "memoia",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "generation": {
+          "name": "generation",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "version": {
+          "name": "version",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "writer_lease_until": {
+          "name": "writer_lease_until",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "memory_user_states_user_id_project_id_fkey": {
+          "name": "memory_user_states_user_id_project_id_fkey",
+          "tableFrom": "memory_user_states",
+          "tableTo": "users",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "memory_user_states_user_id_project_id_key": {
+          "name": "memory_user_states_user_id_project_id_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "user_id",
+            "project_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.memory_user_tombstones": {
+      "name": "memory_user_tombstones",
+      "schema": "memoia",
+      "columns": {
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "forgotten_at": {
+          "name": "forgotten_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "memory_user_tombstones_project_id_fkey": {
+          "name": "memory_user_tombstones_project_id_fkey",
+          "tableFrom": "memory_user_tombstones",
+          "tableTo": "projects",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "memory_user_tombstones_pkey": {
+          "name": "memory_user_tombstones_pkey",
+          "columns": [
+            "project_id",
+            "user_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.project_api_keys": {
+      "name": "project_api_keys",
+      "schema": "memoia",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "token_hash": {
+          "name": "token_hash",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scopes": {
+          "name": "scopes",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "revoked_at": {
+          "name": "revoked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_project_api_keys_project": {
+          "name": "idx_project_api_keys_project",
+          "columns": [
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "project_api_keys_project_id_fkey": {
+          "name": "project_api_keys_project_id_fkey",
+          "tableFrom": "project_api_keys",
+          "tableTo": "projects",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "project_api_keys_scopes_check": {
+          "name": "project_api_keys_scopes_check",
+          "value": "(jsonb_array_length(scopes) >= 1) AND (jsonb_array_length(scopes) <= 3)"
+        },
+        "project_api_keys_scopes_check1": {
+          "name": "project_api_keys_scopes_check1",
+          "value": "scopes <@ '[\"read\", \"write\", \"admin\"]'::jsonb"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "memoia.project_billings": {
+      "name": "project_billings",
+      "schema": "memoia",
+      "columns": {
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "billing_id": {
+          "name": "billing_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_project_billings_billing_id": {
+          "name": "idx_project_billings_billing_id",
+          "columns": [
+            {
+              "expression": "billing_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_project_billings_project_id": {
+          "name": "idx_project_billings_project_id",
+          "columns": [
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "project_billings_billing_id_fkey": {
+          "name": "project_billings_billing_id_fkey",
+          "tableFrom": "project_billings",
+          "tableTo": "billings",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "billing_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "cascade"
+        },
+        "project_billings_project_id_fkey": {
+          "name": "project_billings_project_id_fkey",
+          "tableFrom": "project_billings",
+          "tableTo": "projects",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {
+        "project_billings_pkey": {
+          "name": "project_billings_pkey",
+          "columns": [
+            "project_id",
+            "billing_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.projects": {
+      "name": "projects",
+      "schema": "memoia",
+      "columns": {
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "project_secret": {
+          "name": "project_secret",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "profile_config": {
+          "name": "profile_config",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_projects_project_id": {
+          "name": "idx_projects_project_id",
+          "columns": [
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.queue_tasks": {
+      "name": "queue_tasks",
+      "schema": "memoia",
+      "columns": {
+        "request_key": {
+          "name": "request_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "business_key": {
+          "name": "business_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "type": {
+          "name": "type",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "execution_mode": {
+          "name": "execution_mode",
+          "type": "varchar(8)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'queue'"
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "operation_id": {
+          "name": "operation_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "biz_params": {
+          "name": "biz_params",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "run_attempts": {
+          "name": "run_attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "execution_ms": {
+          "name": "execution_ms",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false,
+          "default": 0
+        },
+        "first_started_at": {
+          "name": "first_started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "finished_at": {
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "lease_id": {
+          "name": "lease_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lease_expires_at": {
+          "name": "lease_expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "next_run_at": {
+          "name": "next_run_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "clock_timestamp()"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "execution_state": {
+          "name": "execution_state",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "result": {
+          "name": "result",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "result_code": {
+          "name": "result_code",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "fail_reasons": {
+          "name": "fail_reasons",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "last_failed_run_attempt": {
+          "name": "last_failed_run_attempt",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_failed_at": {
+          "name": "last_failed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "attention_entered_at": {
+          "name": "attention_entered_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "dispatch_attempts": {
+          "name": "dispatch_attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "dispatch_failures": {
+          "name": "dispatch_failures",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "next_dispatch_at": {
+          "name": "next_dispatch_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_dispatch_attempt_at": {
+          "name": "last_dispatch_attempt_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "retry_of_task_id": {
+          "name": "retry_of_task_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "queue_tasks_operation_fkey": {
+          "name": "queue_tasks_operation_fkey",
+          "tableFrom": "queue_tasks",
+          "tableTo": "memory_operations",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "queue_task_status": {
+          "name": "queue_task_status",
+          "value": "\"memoia\".\"queue_tasks\".\"status\" IN ('pending','queued','running','succeeded','retry_wait','failed','manual')"
+        },
+        "queue_task_mode": {
+          "name": "queue_task_mode",
+          "value": "\"memoia\".\"queue_tasks\".\"execution_mode\" IN ('queue','inline')"
+        },
+        "queue_task_rounds": {
+          "name": "queue_task_rounds",
+          "value": "\"memoia\".\"queue_tasks\".\"run_attempts\">=0"
+        },
+        "queue_task_execution_ms": {
+          "name": "queue_task_execution_ms",
+          "value": "\"memoia\".\"queue_tasks\".\"execution_ms\" IS NULL OR \"memoia\".\"queue_tasks\".\"execution_ms\">=0"
+        },
+        "queue_task_retries": {
+          "name": "queue_task_retries",
+          "value": "\"memoia\".\"queue_tasks\".\"dispatch_attempts\">=0 AND \"memoia\".\"queue_tasks\".\"dispatch_failures\">=0"
+        },
+        "queue_task_fail_reasons_array": {
+          "name": "queue_task_fail_reasons_array",
+          "value": "jsonb_typeof(\"memoia\".\"queue_tasks\".\"fail_reasons\")='array'"
+        },
+        "queue_task_lease_pair": {
+          "name": "queue_task_lease_pair",
+          "value": "(\"memoia\".\"queue_tasks\".\"lease_id\" IS NULL)=(\"memoia\".\"queue_tasks\".\"lease_expires_at\" IS NULL)"
+        },
+        "queue_task_lease_state": {
+          "name": "queue_task_lease_state",
+          "value": "\"memoia\".\"queue_tasks\".\"lease_id\" IS NULL OR \"memoia\".\"queue_tasks\".\"status\"='running'"
+        },
+        "queue_task_running_lease": {
+          "name": "queue_task_running_lease",
+          "value": "\"memoia\".\"queue_tasks\".\"status\"<>'running' OR (\"memoia\".\"queue_tasks\".\"lease_id\" IS NOT NULL AND \"memoia\".\"queue_tasks\".\"started_at\" IS NOT NULL)"
+        },
+        "queue_task_terminal": {
+          "name": "queue_task_terminal",
+          "value": "(\"memoia\".\"queue_tasks\".\"status\" IN ('succeeded','failed'))=(\"memoia\".\"queue_tasks\".\"finished_at\" IS NOT NULL)"
+        },
+        "queue_task_failed_round_pair": {
+          "name": "queue_task_failed_round_pair",
+          "value": "(\"memoia\".\"queue_tasks\".\"last_failed_run_attempt\" IS NULL)=(\"memoia\".\"queue_tasks\".\"last_failed_at\" IS NULL) AND (\"memoia\".\"queue_tasks\".\"last_failed_run_attempt\" IS NULL OR (\"memoia\".\"queue_tasks\".\"last_failed_run_attempt\">0 AND \"memoia\".\"queue_tasks\".\"last_failed_run_attempt\"<=\"memoia\".\"queue_tasks\".\"run_attempts\"))"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "memoia.usage_counters": {
+      "name": "usage_counters",
+      "schema": "memoia",
+      "columns": {
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "period_type": {
+          "name": "period_type",
+          "type": "varchar(5)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "period_start": {
+          "name": "period_start",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "value": {
+          "name": "value",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "0"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "idx_usage_counters_expires_at": {
+          "name": "idx_usage_counters_expires_at",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "usage_counters_project_id_fkey": {
+          "name": "usage_counters_project_id_fkey",
+          "tableFrom": "usage_counters",
+          "tableTo": "projects",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "usage_counters_pkey": {
+          "name": "usage_counters_pkey",
+          "columns": [
+            "project_id",
+            "name",
+            "period_type",
+            "period_start"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "usage_counters_period_type_check": {
+          "name": "usage_counters_period_type_check",
+          "value": "(period_type)::text = ANY ((ARRAY['day'::character varying, 'month'::character varying])::text[])"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "memoia.user_events": {
+      "name": "user_events",
+      "schema": "memoia",
+      "columns": {
+        "event_data": {
+          "name": "event_data",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "embedding": {
+          "name": "embedding",
+          "type": "vector(1536)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "revision": {
+          "name": "revision",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "1"
+        }
+      },
+      "indexes": {
+        "idx_user_events_lexical": {
+          "name": "idx_user_events_lexical",
+          "columns": [
+            {
+              "expression": "to_tsvector('simple'::regconfig, COALESCE(event_data ->> 'event_tip', ''))",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "gin",
+          "with": {}
+        },
+        "idx_user_events_user_id_id_project_id": {
+          "name": "idx_user_events_user_id_id_project_id",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_user_events_user_id_project_id": {
+          "name": "idx_user_events_user_id_project_id",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "user_events_user_id_project_id_fkey": {
+          "name": "user_events_user_id_project_id_fkey",
+          "tableFrom": "user_events",
+          "tableTo": "users",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {
+        "user_events_pkey": {
+          "name": "user_events_pkey",
+          "columns": [
+            "project_id",
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {
+        "uq_user_events_owner": {
+          "name": "uq_user_events_owner",
+          "nullsNotDistinct": false,
+          "columns": [
+            "user_id",
+            "project_id",
+            "id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.user_profiles": {
+      "name": "user_profiles",
+      "schema": "memoia",
+      "columns": {
+        "content": {
+          "name": "content",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "attributes": {
+          "name": "attributes",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "revision": {
+          "name": "revision",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "1"
+        }
+      },
+      "indexes": {
+        "idx_user_profiles_user_id_id_project_id": {
+          "name": "idx_user_profiles_user_id_id_project_id",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_user_profiles_user_id_project_id": {
+          "name": "idx_user_profiles_user_id_project_id",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "user_profiles_user_id_project_id_fkey": {
+          "name": "user_profiles_user_id_project_id_fkey",
+          "tableFrom": "user_profiles",
+          "tableTo": "users",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {
+        "user_profiles_pkey": {
+          "name": "user_profiles_pkey",
+          "columns": [
+            "project_id",
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.user_statuses": {
+      "name": "user_statuses",
+      "schema": "memoia",
+      "columns": {
+        "type": {
+          "name": "type",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "attributes": {
+          "name": "attributes",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_user_statuses_user_id_id_project_id": {
+          "name": "idx_user_statuses_user_id_id_project_id",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_user_statuses_user_id_project_id": {
+          "name": "idx_user_statuses_user_id_project_id",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_user_statuses_user_id_project_id_type": {
+          "name": "idx_user_statuses_user_id_project_id_type",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "user_statuses_user_id_project_id_fkey": {
+          "name": "user_statuses_user_id_project_id_fkey",
+          "tableFrom": "user_statuses",
+          "tableTo": "users",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "user_id",
+            "project_id"
+          ],
+          "columnsTo": [
+            "id",
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {
+        "user_statuses_pkey": {
+          "name": "user_statuses_pkey",
+          "columns": [
+            "project_id",
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "memoia.users": {
+      "name": "users",
+      "schema": "memoia",
+      "columns": {
+        "additional_fields": {
+          "name": "additional_fields",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "project_id": {
+          "name": "project_id",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_users_id_project_id": {
+          "name": "idx_users_id_project_id",
+          "columns": [
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "project_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "users_project_id_fkey": {
+          "name": "users_project_id_fkey",
+          "tableFrom": "users",
+          "tableTo": "projects",
+          "schemaTo": "memoia",
+          "columnsFrom": [
+            "project_id"
+          ],
+          "columnsTo": [
+            "project_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "cascade"
+        }
+      },
+      "compositePrimaryKeys": {
+        "users_pkey": {
+          "name": "users_pkey",
+          "columns": [
+            "project_id",
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    }
+  },
+  "enums": {},
+  "schemas": {
+    "memoia": "memoia"
+  },
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
+  "_meta": {
+    "columns": {},
+    "schemas": {},
+    "tables": {}
+  }
+}

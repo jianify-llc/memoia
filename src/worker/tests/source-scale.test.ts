@@ -1,0 +1,38 @@
+import { test } from "node:test";
+import { execFileSync } from "node:child_process";
+import { unlinkSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+test(
+  "10,000-Fact source incremental imports and scoped deletion",
+  { skip: !process.env.MEMOIA_TEST_DATABASE_URL },
+  () => {
+    const output = fileURLToPath(
+      new URL(`./.scale-${crypto.randomUUID()}.mjs`, import.meta.url),
+    );
+    try {
+      execFileSync(
+        fileURLToPath(new URL("../node_modules/.bin/esbuild", import.meta.url)),
+        [
+          "tests/source-scale.fixture.ts",
+          "--bundle",
+          "--platform=node",
+          "--format=esm",
+          "--packages=external",
+          "--loader:.md=text",
+          `--outfile=${output}`,
+        ],
+        { cwd: fileURLToPath(new URL("..", import.meta.url)), stdio: "pipe" },
+      );
+      const env = { ...process.env };
+      delete env.NODE_TEST_CONTEXT;
+      execFileSync(process.execPath, ["--test", output], {
+        env,
+        stdio: "inherit",
+      });
+    } finally {
+      try {
+        unlinkSync(output);
+      } catch {}
+    }
+  },
+);

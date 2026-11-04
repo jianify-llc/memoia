@@ -1,0 +1,86 @@
+{
+  "en": [
+    {
+      "topic": "user_profile",
+      "description": "Brief overview of the user's important stable identity, life context and long-term priorities; not a copy of every detailed profile or another person's biography.",
+      "sub_topics": []
+    },
+    {
+      "topic": "personal_background",
+      "description": "The user's basic identity, residence and family background, only as supported and relevant; do not solicit or infer sensitive fields to complete a template.",
+      "sub_topics": []
+    },
+    {
+      "topic": "work",
+      "description": "The user's occupation, working environment, skills and sustained projects.",
+      "sub_topics": []
+    },
+    {
+      "topic": "education",
+      "description": "The user's educational history and learning background.",
+      "sub_topics": []
+    },
+    {
+      "topic": "interests_preferences",
+      "description": "The user's stable interests, tastes, activities and preferences. Use sub_topic=interaction_preferences for explicitly expressed lasting conversation preferences; exclude one-off instructions, temporary mood and assistant guesses. Keep other preferences in meaningful subtopics.",
+      "sub_topics": []
+    },
+    {
+      "topic": "lifestyle",
+      "description": "The user's sustained daily habits, routines and lifestyle; a single episode is not a habit.",
+      "sub_topics": []
+    },
+    {
+      "topic": "goals_values",
+      "description": "The user's long-term goals and explicitly expressed values and trade-offs; do not infer personality labels.",
+      "sub_topics": []
+    },
+    {
+      "topic": "relationships",
+      "description": "Evidence-backed relatives, friends and colleagues and their attributes; distinguish subjects and do not merge uncertain identities.",
+      "sub_topics": []
+    }
+  ],
+  "zh": [
+    {
+      "topic": "user_profile",
+      "description": "用户本人的简短长期概况：重要稳定身份、生活背景及长期重点；不拼接所有详细画像，不写成他人的传记。",
+      "sub_topics": []
+    },
+    {
+      "topic": "personal_background",
+      "description": "用户本人的基本身份、居住和家庭背景，只保留有依据且相关的信息；不为填模板主动补全或推断敏感字段。",
+      "sub_topics": []
+    },
+    {
+      "topic": "work",
+      "description": "用户本人的职业、工作环境、技能和持续项目。",
+      "sub_topics": []
+    },
+    {
+      "topic": "education",
+      "description": "用户本人的教育经历和学习背景。",
+      "sub_topics": []
+    },
+    {
+      "topic": "interests_preferences",
+      "description": "用户本人的稳定兴趣、口味、活动及偏好。明确表达的长期交流偏好使用二级分类 interaction_preferences；不包含一次性指示、短期情绪或助手推测，其它偏好保留有意义的二级分类。",
+      "sub_topics": []
+    },
+    {
+      "topic": "lifestyle",
+      "description": "用户本人的持续日常习惯、作息及生活方式；一次经历不等于习惯。",
+      "sub_topics": []
+    },
+    {
+      "topic": "goals_values",
+      "description": "用户本人的长期目标、明确表达的价值观与取舍；不推断人格标签。",
+      "sub_topics": []
+    },
+    {
+      "topic": "relationships",
+      "description": "有证据的家人、朋友、同事及其背景；明确区分事实主体，不合并身份不确定的人物。",
+      "sub_topics": []
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "@jianify/memoia-mcp",
+  "version": "0.12.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.12.4",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "check": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@jianify/memoia": "file:../../sdks/typescript",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "tsx": "4.22.0",
+    "typescript": "5.9.3"
+  }
+}

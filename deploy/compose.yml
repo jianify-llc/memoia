@@ -1,0 +1,38 @@
+services:
+  postgres:
+    restart: unless-stopped
+    image: pgvector/pgvector:pg17@sha256:7d0a41464797aeb9862dfdc0bbf1526b82cfd324cdd8036df19e3545f4a9ccb8
+    environment:
+      POSTGRES_USER: memoia
+      POSTGRES_DB: memoia
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - memoia-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memoia -d memoia"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  api:
+    restart: unless-stopped
+    image: ${MEMOIA_IMAGE:-memoia:local}
+    build:
+      context: ..
+    env_file: ${MEMOIA_ENV_FILE:-docker.env}
+    ports:
+      - "127.0.0.1:${MEMOIA_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    stop_grace_period: 16m
+  worker:
+    restart: unless-stopped
+    image: ${MEMOIA_IMAGE:-memoia:local}
+    command: ["node", "dist-node/node-worker.js"]
+    env_file: ${MEMOIA_ENV_FILE:-docker.env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    stop_grace_period: 16m
+volumes:
+  memoia-postgres:

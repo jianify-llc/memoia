@@ -616,7 +616,7 @@ export interface components {
             query?: string | null;
             /**
              * Max Token Size
-             * @default 500
+             * @default 8192
              */
             max_token_size?: number;
         };
@@ -977,6 +977,25 @@ export interface components {
              * @description The UUID identifier
              */
             id: string;
+        };
+        /** ImageAttachment */
+        ImageAttachment: {
+            /**
+             * Url
+             * @description Temporary extraction input; never returned as durable message evidence.
+             */
+            url: string;
+            /**
+             * Mimetype
+             * @enum {string}
+             */
+            mimeType: "image/jpeg" | "image/png" | "image/webp" | "image/gif";
+            /** Width */
+            width: number;
+            /** Height */
+            height: number;
+            /** Bytesize */
+            byteSize: number;
         };
         /** ImportSource */
         ImportSource: {
@@ -1405,7 +1424,7 @@ export interface components {
             limit?: number;
             /**
              * Max Token Size
-             * @default 4000
+             * @default 8192
              */
             max_token_size?: number;
             /** Exclude Fact Ids */
@@ -1500,6 +1519,8 @@ export interface components {
             role: "user" | "assistant" | "system" | "tool";
             /** Content */
             content: string;
+            /** Images */
+            images?: components["schemas"]["ImageAttachment"][];
             /**
              * Occurred At
              * Format: date-time

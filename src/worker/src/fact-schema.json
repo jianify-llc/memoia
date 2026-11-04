@@ -1,0 +1,197 @@
+{
+  "$defs": {
+    "DatedFactTime": {
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "format": "date",
+          "title": "Start",
+          "type": "string"
+        },
+        "end": {
+          "format": "date",
+          "title": "End",
+          "type": "string"
+        },
+        "precision": {
+          "enum": ["year", "month", "day", "range"],
+          "title": "Precision",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/TimeEvidence"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": ["start", "end", "precision", "evidence"],
+      "title": "DatedFactTime",
+      "type": "object"
+    },
+    "EvidenceAlternative": {
+      "additionalProperties": false,
+      "properties": {
+        "all_of": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "All Of",
+          "type": "array"
+        }
+      },
+      "required": ["all_of"],
+      "title": "EvidenceAlternative",
+      "type": "object"
+    },
+    "MessageFact": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "subject": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Subject",
+          "type": "string"
+        },
+        "reporter": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Reporter",
+          "type": "string"
+        },
+        "certainty": {
+          "pattern": "^(asserted|reported|uncertain)$",
+          "title": "Certainty",
+          "type": "string"
+        },
+        "fact_time": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DatedFactTime"
+            },
+            {
+              "$ref": "#/$defs/UnresolvedFactTime"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Fact Time"
+        },
+        "any_of": {
+          "items": {
+            "$ref": "#/$defs/EvidenceAlternative"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Any Of",
+          "type": "array"
+        }
+      },
+      "required": [
+        "content",
+        "subject",
+        "reporter",
+        "certainty",
+        "fact_time",
+        "any_of"
+      ],
+      "title": "MessageFact",
+      "type": "object"
+    },
+    "MessageFacts": {
+      "additionalProperties": false,
+      "properties": {
+        "message_id": {
+          "title": "Message Id",
+          "type": "string"
+        },
+        "facts": {
+          "items": {
+            "$ref": "#/$defs/MessageFact"
+          },
+          "maxItems": 200,
+          "title": "Facts",
+          "type": "array"
+        }
+      },
+      "required": ["message_id", "facts"],
+      "title": "MessageFacts",
+      "type": "object"
+    },
+    "TimeEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "message_id": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Message Id",
+          "type": "string"
+        },
+        "expression": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Expression",
+          "type": "string"
+        }
+      },
+      "required": ["message_id", "expression"],
+      "title": "TimeEvidence",
+      "type": "object"
+    },
+    "UnresolvedFactTime": {
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "title": "Start",
+          "type": "null"
+        },
+        "end": {
+          "title": "End",
+          "type": "null"
+        },
+        "precision": {
+          "const": "unknown",
+          "title": "Precision",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/TimeEvidence"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": ["start", "end", "precision", "evidence"],
+      "title": "UnresolvedFactTime",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "messages": {
+      "items": {
+        "$ref": "#/$defs/MessageFacts"
+      },
+      "maxItems": 1000,
+      "title": "Messages",
+      "type": "array"
+    }
+  },
+  "required": ["messages"],
+  "title": "MessageExtraction",
+  "type": "object"
+}

@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "NodeNext", "moduleResolution": "NodeNext",
+    "strict": true, "skipLibCheck": true, "noEmit": true,
+    "types": ["node"], "typeRoots": ["../src/worker/node_modules/@types"]
+  },
+  "include": ["*.ts", "tests/*.ts", "../deploy/*.ts"]
+}
