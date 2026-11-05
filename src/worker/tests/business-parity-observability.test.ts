@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { APIError } from "openai";
 import { inSpan } from "../src/observability";
 import { SourceError } from "../src/errors";
 
@@ -69,6 +70,76 @@ test("tracing failures never replay work or hide business failures", async () =>
     (error) => error === failure,
   );
   assert.equal(calls, 2);
+});
+
+test("model spans retain only safe OpenAI rejection metadata", async () => {
+  const run = async (error: APIError, name = "memoia.model") => {
+    const attributes: Record<string, unknown> = {};
+    const tracing = {
+      enterSpan(_name: string, fn: (span: unknown) => unknown) {
+        return fn({
+          setAttributes(values: object) {
+            Object.assign(attributes, values);
+          },
+          setAttribute(key: string, value: unknown) {
+            attributes[key] = value;
+          },
+          setStatus() {},
+        });
+      },
+    } as unknown as Tracing;
+    let calls = 0;
+    await assert.rejects(
+      inSpan(tracing, name, {}, async () => {
+        calls++;
+        throw error;
+      }),
+      (value) => value === error,
+    );
+    assert.equal(calls, 1);
+    return attributes;
+  };
+  const denied = APIError.generate(
+    403,
+    {
+      error: {
+        code: "unsupported_country_region_territory",
+        type: "request_forbidden",
+        message: "fixture user content and provider body",
+        param: "fixture request input",
+      },
+    },
+    undefined,
+    new Headers({
+      "x-request-id": "req_Fixture403",
+      "set-cookie": "sk-private",
+    }),
+  );
+  assert.deepEqual(await run(denied), {
+    "error.code": "internal_error",
+    "upstream.status": 403,
+    "upstream.error.code": "unsupported_country_region_territory",
+    "upstream.error.type": "request_forbidden",
+    "upstream.request_id": "req_Fixture403",
+  });
+  assert.deepEqual(await run(denied, "memoia.http"), {
+    "error.code": "internal_error",
+  });
+  const unsafe = APIError.generate(
+    403,
+    {
+      error: {
+        code: "sk_fixture_secret",
+        type: "request_forbidden\n",
+      },
+    },
+    undefined,
+    new Headers({ "x-request-id": "sk-private" }),
+  );
+  assert.deepEqual(await run(unsafe), {
+    "error.code": "internal_error",
+    "upstream.status": 403,
+  });
 });
 
 test("usage logs correlate the operation without changing project aggregates", async () => {
