@@ -57,6 +57,8 @@ Test 的资源清单、首次注册、停写迁移顺序、命令及完整链路
 
 发布由 `deploy/release.ts` 调用锁定的 Wrangler 4.155.0，使用 `versions upload --no-x-provision` 上传，读取该版本的 Hyperdrive、Queue 和开关绑定，确认后切换 100% 流量，再读回活动版本与绑定；不会更新 consumer 或 Cron。Online 使用审批前生成、绑定源码和配置的制品以及单独传递的 manifest SHA256，审批后校验全部文件并通过 `--no-bundle` 上传，不再构建源码。失败后先核对平台实际状态，不假定已回滚。部署凭据只注入发布步骤，入口使用本批空 env 文件，不读取业务 `.env`。实际发布、平台资源、业务和模型验收与本地检查分别记录。
 
+Memoia Test 的 HTTP Placement 为 `aws:ap-northeast-1`，不指定 Queue 或 Cron 的执行地点。Fact 抽取和维护模型请求通过 `OPENAI_RELAY` 绑定复用 `test-nginx-relay`，仅转发 `POST /v1/responses`。Embedding 使用自己的连接配置。发布在切流前和切流后核对版本中的区域、传输模式与绑定，CI 身份需要能绑定现有 VPC Service。参考 [Cloudflare VPC 绑定权限](https://developers.cloudflare.com/workers-vpc/configuration/vpc-services/#required-roles)。
+
 ## 版本恢复
 
 已明确授权并确认数据库和队列兼容后，使用 `deploy/release.ts rollback test|online <Worker-Version-UUID>` 恢复指定 Worker 版本。恢复前核对当前环境的 Hyperdrive 和 Queue 归属、consumer、Cron 及缓存；目标版本的 Hyperdrive 和 Queue 必须属于同一环境，开关必须是合法的 `true`／`false`，可以保留历史值。切流后再次核对实际活动版本和绑定。数据库结构与数据恢复须另行评估，版本恢复不会撤销数据库变更。

@@ -28,6 +28,7 @@ test(
     await db.connect();
     const project = `runtime_${crypto.randomUUID()}`;
     let externalCalls = 0;
+    let relayCalls = 0;
     const mf = new Miniflare(
       convertV4MiniflareOptions({
         workers: [
@@ -40,13 +41,22 @@ test(
             hyperdrives: { HYPERDRIVE: process.env.MEMOIA_TEST_DATABASE_URL! },
             bindings: {
               OPENAI_API_KEY: "unused",
-              OPENAI_BASE_URL: "https://provider.invalid/v1",
+              OPENAI_BASE_URL: "https://api.openai.com/v1",
+              OPENAI_TRANSPORT: "vpc",
               ACCESS_TOKEN: "local-root",
             },
-            outboundService: (request: Request) => {
-              externalCalls++;
-              const pathname = new URL(request.url).pathname;
-              if (pathname === "/v1/responses")
+            serviceBindings: {
+              OPENAI_RELAY: (request: Request) => {
+                relayCalls++;
+                assert.equal(
+                  request.url,
+                  "http://openai-relay.internal/v1/responses",
+                );
+                assert.equal(request.method, "POST");
+                assert.equal(
+                  request.headers.get("authorization"),
+                  "Bearer unused",
+                );
                 return Response.json({
                   status: "completed",
                   model: "fake-model",
@@ -79,7 +89,11 @@ test(
                     },
                   ],
                 });
-              if (pathname === "/v1/embeddings")
+              },
+            },
+            outboundService: (request: Request) => {
+              externalCalls++;
+              if (new URL(request.url).pathname === "/v1/embeddings")
                 return Response.json({
                   data: [{ index: 0, embedding: Array(1536).fill(0.01) }],
                 });
@@ -201,7 +215,8 @@ test(
       };
       assert.equal(receipt.status, "completed");
       assert.equal(receipt.result.fact_ids.length, 1);
-      assert.equal(externalCalls, 2);
+      assert.equal(relayCalls, 1);
+      assert.equal(externalCalls, 1);
       const elapsed = await api(
         "POST",
         `/api/users/${user}/blobs`,
@@ -218,7 +233,8 @@ test(
         ((await elapsed.json()) as { detail: { code: string } }).detail.code,
         "execution_deadline",
       );
-      assert.equal(externalCalls, 2);
+      assert.equal(relayCalls, 1);
+      assert.equal(externalCalls, 1);
       assert.equal(
         (await api("DELETE", `/api/users/${user}`, credential.token)).status,
         200,
@@ -231,7 +247,8 @@ test(
         ).status,
         403,
       );
-      assert.equal(externalCalls, 2);
+      assert.equal(relayCalls, 1);
+      assert.equal(externalCalls, 1);
     } finally {
       await mf.dispose();
       await db.query("DELETE FROM memoia.projects WHERE project_id=$1", [

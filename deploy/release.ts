@@ -33,6 +33,15 @@ export async function release(options: {args?: string[], configPath?: string, ap
   const selected = config.env?.[stage];
   const expected = stage === 'test' ? 'luvel-memoia-test' : 'memoia-online';
   if (selected?.name !== expected) throw new Error('Missing or incorrect environment Worker identity');
+  const checkTestRouting = action === 'deploy' && stage === 'test';
+  const relay = selected.vpc_services?.[0];
+  if (checkTestRouting && (
+    selected.placement?.region !== 'aws:ap-northeast-1' ||
+    selected.vars?.OPENAI_TRANSPORT !== 'vpc' ||
+    selected.vpc_services?.length !== 1 ||
+    relay?.binding !== 'OPENAI_RELAY' ||
+    !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(relay.service_id ?? '')
+  )) throw new Error('Memoia Test requires Tokyo placement and the existing OpenAI VPC binding');
   if (config.workers_dev !== false || config.preview_urls !== false || selected.workers_dev === true || selected.preview_urls === true) throw new Error('Public workers.dev and preview URLs must be disabled');
   let bundleEntry: string | undefined;
   if (action === 'deploy' && stage === 'online') {
@@ -71,6 +80,19 @@ export async function release(options: {args?: string[], configPath?: string, ap
     };
     requireBinding('HYPERDRIVE','hyperdrive','id',selected.hyperdrive[0].id);
     requireBinding('MAINTENANCE_QUEUE','queue','queue_name',selected.queues.producers[0].queue);
+    if (checkTestRouting) {
+      requireBinding('OPENAI_RELAY','vpc_service','service_id',relay.service_id);
+      requireBinding('OPENAI_TRANSPORT','plain_text','text','vpc');
+      const placement = uploadedVersion.resources?.script?.placement;
+      const targets = placement?.target;
+      if (
+        placement?.mode !== 'targeted' ||
+        !Array.isArray(targets) ||
+        targets.length !== 1 ||
+        targets[0]?.region !== selected.placement.region ||
+        targets[0]?.type !== 'region'
+      ) throw new Error('Uploaded version placement differs from the Test region');
+    }
     for (const name of ['MEMOIA_WRITES_ENABLED','MAINTENANCE_ENABLED']) {
       if (action === 'deploy') requireBinding(name,'plain_text','text',selected.vars[name]);
       else {

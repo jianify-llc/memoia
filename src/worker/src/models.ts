@@ -136,7 +136,7 @@ class UsageOpenAI extends OpenAI {
 }
 export function provider(
   runtime: Runtime,
-  fetcher: typeof fetch = fetch,
+  fetcher: typeof fetch = runtime.modelFetch ?? fetch,
   timeoutMs = 120_000,
 ): OpenAI {
   assertRunning(runtime);

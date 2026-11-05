@@ -1,12 +1,26 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Database } from "../src/db";
+import { createCloudflareRuntime } from "../src/cloudflare-runtime";
 import { getConfig } from "../src/models";
 import { MaintenanceContext } from "../src/maintenance";
 import { runMaintenance } from "../src/maintenance-agent";
 
 test("maintenance final SDK request carries configured header, query and normalized topic", async () => {
-  const db = new Database("postgresql://unused:unused@127.0.0.1:1/unused");
+  let relayFetch: (request: Request) => Promise<Response>;
+  const runtime = createCloudflareRuntime({
+    DATABASE_URL: "postgresql://unused:unused@127.0.0.1:1/unused",
+    OPENAI_API_KEY: "local-test",
+    OPENAI_BASE_URL: "https://api.openai.com/v1",
+    OPENAI_TRANSPORT: "vpc",
+    OPENAI_RELAY: {
+      fetch: async (request) => relayFetch(new Request(request)),
+    },
+    MEMOIA_CONFIG: JSON.stringify({
+      llm_openai_default_header: { "X-Provider-Custom": "local-value" },
+      llm_openai_default_query: { deployment: "test-deployment" },
+    }),
+  });
+  const { db } = runtime;
   const project = {
     overwrite_user_profiles: [
       { topic: " Work Life ", sub_topics: [" Side Projects "] },
@@ -18,18 +32,6 @@ test("maintenance final SDK request carries configured header, query and normali
       rowCount: 1,
     }) as never;
   db.transaction = async () => undefined as never;
-  const runtime = {
-    db,
-    env: {
-      OPENAI_API_KEY: "local-test",
-      OPENAI_BASE_URL: "https://model.invalid/v1",
-      MEMOIA_CONFIG: JSON.stringify({
-        llm_openai_default_header: { "X-Provider-Custom": "local-value" },
-        llm_openai_default_query: { deployment: "test-deployment" },
-      }),
-    },
-    deadline: Date.now() + 60000,
-  };
   const claim = {
     userId: crypto.randomUUID(),
     projectId: "p",
@@ -52,9 +54,12 @@ test("maintenance final SDK request carries configured header, query and normali
     correctHeader = false,
     correctQuery = false,
     correctTopic = false;
-  globalThis.fetch = async (input, init) => {
+  globalThis.fetch = async () => {
+    throw new Error("Unexpected public fetch");
+  };
+  relayFetch = async (request) => {
     calls++;
-    const request = input instanceof Request ? input : new Request(input, init);
+    assert.equal(new URL(request.url).origin, "http://openai-relay.internal");
     correctHeader = request.headers.get("x-provider-custom") === "local-value";
     correctQuery =
       new URL(request.url).searchParams.get("deployment") === "test-deployment";
@@ -89,6 +94,30 @@ test("maintenance final SDK request carries configured header, query and normali
     });
   };
   try {
+    assert.ok(runtime.modelFetch);
+    await assert.rejects(
+      runtime.modelFetch("https://api.openai.com/v1/embeddings", {
+        method: "POST",
+      }),
+      /OpenAI relay request is not allowed/,
+    );
+    assert.throws(
+      () =>
+        createCloudflareRuntime({
+          OPENAI_API_KEY: "local-test",
+          OPENAI_TRANSPORT: "vpc",
+        }),
+      /OpenAI relay binding is invalid/,
+    );
+    assert.throws(
+      () =>
+        createCloudflareRuntime({
+          OPENAI_BASE_URL: "https://other.example/v1",
+          OPENAI_TRANSPORT: "vpc",
+          OPENAI_RELAY: { fetch: globalThis.fetch },
+        }),
+      /OpenAI relay requires the OpenAI API base URL/,
+    );
     await runMaintenance(context);
     assert.equal(calls, 1);
     assert.equal(correctHeader, true);

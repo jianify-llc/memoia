@@ -664,7 +664,7 @@ export async function runMaintenance(
     });
   }
   const model = new MaintenanceModel(
-    provider(context.runtime, fetch, 600_000),
+    provider(context.runtime, undefined, 600_000),
     context,
     continuation && {
       budget: continuation.budget,

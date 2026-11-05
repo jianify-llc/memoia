@@ -139,6 +139,7 @@ test("startup on an occupied port exits with an error", async () => {
           DATABASE_URL: "postgres://unused",
           ACCESS_TOKEN: "test-token",
           OPENAI_API_KEY: "test-key",
+          OPENAI_TRANSPORT: "direct",
           MAINTENANCE_ENABLED: "true",
           MEMOIA_WRITES_ENABLED: "true",
         },

@@ -12,7 +12,9 @@
     "test": {
       "name": "luvel-memoia-test",
       "secrets": { "required": ["ACCESS_TOKEN", "OPENAI_API_KEY"] },
-      "vars": { "MAINTENANCE_ENABLED": "true", "MEMOIA_WRITES_ENABLED": "true" },
+      "vars": { "MAINTENANCE_ENABLED": "true", "MEMOIA_WRITES_ENABLED": "true", "OPENAI_TRANSPORT": "vpc" },
+      "placement": { "region": "aws:ap-northeast-1" },
+      "vpc_services": [{ "binding": "OPENAI_RELAY", "service_id": "01a10c21-68a8-7712-a6a7-022d4e6544f6" }],
       "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "fd98a84c954446b4afc1b1311d35fb28" }],
       "queues": {
         "producers": [{ "binding": "MAINTENANCE_QUEUE", "queue": "luvel-memoia-maintenance-test" }],

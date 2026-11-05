@@ -34,6 +34,7 @@ export interface Runtime {
   db: Database;
   ownsDatabase?: boolean;
   maintenanceWakeup?: MaintenanceWakeup;
+  modelFetch?: typeof fetch;
   env: RuntimeEnv;
   deadline: number;
   signal?: AbortSignal;
