@@ -1,5 +1,14 @@
 # Memoia TypeScript SDK
 
+On Cloudflare Workers, pass the configured Service Binding directly:
+
+```ts
+const memoia = new MemoiaClient({ binding: env.MEMOIA, apiKey: projectToken });
+```
+
+The binding selects the Worker. For a reachable HTTP deployment, pass `baseUrl`
+instead. Both transports use the same authenticated API and operation receipts.
+
 `importBlob(userId, input)` does not accept `reasoning_mode`. Fact extraction and
 Profile/Event maintenance always use Standard, including retries, tool turns and
 Flex recovery. The SDK rejects the retired field locally before transport; models,

@@ -10,6 +10,13 @@ const source = { idempotency_key: "luvel:batch:1", source_id: sourceId, messages
 const json = (body, status = 200) => Response.json(body, { status });
 const client = (fetch, options = {}) => new MemoiaClient({ baseUrl: "https://memoia.example", apiKey: "private-project-token", fetch, ...options });
 
+it("requires exactly one destination for a bound client", () => {
+  const apiKey = "fixture";
+  const binding = { fetch: async () => { throw new Error("unexpected call"); } };
+  assert.throws(() => new MemoiaClient({ apiKey, binding: undefined }), TypeError);
+  assert.throws(() => new MemoiaClient({ apiKey, binding, baseUrl: "https://elsewhere.invalid" }), TypeError);
+});
+
 describe("transient image import", () => {
   const image = { url: "https://images.example/original.png", mimeType: "image/png", width: 600, height: 400, byteSize: 4096 };
   const input = { ...source, messages: [{ ...source.messages[0], content: "", images: [image] }] };

@@ -283,8 +283,8 @@ it("uses a real Service Binding with the SDK deadline and Bearer headers", async
     stdin: { sourcefile: "service-binding-probe.js", resolveDir: fileURLToPath(new URL("..", import.meta.url)), contents: `
       import { MemoiaClient } from ${JSON.stringify(entry)};
       export default { async fetch(_request, env) {
-        const client = new MemoiaClient({baseUrl: ${JSON.stringify(origin)}, apiKey: ${JSON.stringify(apiKey)},
-          maxAttempts: 1, readTimeoutMs: 500, fetch: (input, init) => env.MEMOIA.fetch(input, init)});
+        const client = new MemoiaClient({binding: env.MEMOIA, apiKey: ${JSON.stringify(apiKey)},
+          maxAttempts: 1, readTimeoutMs: 500});
         return Response.json(await client.getProjectIdentity());
       }};` },
     bundle: true, write: false, platform: "browser", target: "es2022", format: "esm",
@@ -293,6 +293,7 @@ it("uses a real Service Binding with the SDK deadline and Bearer headers", async
   const isolated = new Miniflare(convertV4MiniflareOptions({
     modules: true, script: bundle.outputFiles[0].text, compatibilityDate: "2026-03-02",
     compatibilityFlags: ["nodejs_compat"], telemetry: { enabled: false }, cf: false,
+    outboundService: () => { throw new Error("Bound requests cannot use public fetch"); },
     serviceBindings: { MEMOIA: async request => {
       observed.push({ authorization: request.headers.get("authorization"), deadline: Number(request.headers.get("x-memoia-deadline-ms")), path: new URL(request.url).pathname });
       return json({ project_id: "binding-project" });

@@ -82,14 +82,17 @@ const operationValidator: Validator = (value) => {
 };
 const operationsValidator: Validator = (value) => validators.validateOperations(value) && (value as Operations).operations.every(operationValidator);
 
-export interface ClientOptions {
-  baseUrl: string;
+export type ClientOptions = {
   apiKey: string;
-  fetch?: typeof fetch;
   readTimeoutMs?: number;
   writeTimeoutMs?: number;
   maxAttempts?: number;
-}
+} & (
+  | { baseUrl: string; fetch?: typeof fetch; binding?: never }
+  | { binding: { fetch(input: string, init?: RequestInit): Promise<Response> }; baseUrl?: never; fetch?: never }
+);
+
+const BINDING_ORIGIN = "https://memoia.invalid";
 
 export interface RequestOptions {
   /** Absolute Unix time in milliseconds; retries share this same budget. */
@@ -127,14 +130,24 @@ export class MemoiaClient {
   private readonly attempts: number;
 
   constructor(options: ClientOptions) {
-    const url = new URL(options.baseUrl);
-    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== "/") {
-      throw new TypeError("Memoia baseUrl must be an HTTP(S) origin without credentials or an API path");
-    }
     if (!options.apiKey.trim()) throw new TypeError("Memoia apiKey is required");
-    this.origin = url.origin;
+    if ("binding" in options) {
+      const { binding } = options;
+      if (!binding || typeof binding.fetch !== "function" || options.baseUrl !== undefined || options.fetch !== undefined) {
+        throw new TypeError("Memoia requires a Service Binding without baseUrl or fetch");
+      }
+      // The binding selects the target Worker. Its fetch method still takes an absolute URL.
+      this.origin = BINDING_ORIGIN;
+      this.transport = (input, init) => binding.fetch(String(input), init);
+    } else {
+      const url = new URL(options.baseUrl);
+      if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== "/") {
+        throw new TypeError("Memoia baseUrl must be an HTTP(S) origin without credentials or an API path");
+      }
+      this.origin = url.origin;
+      this.transport = options.fetch ?? fetch;
+    }
     this.apiKey = options.apiKey;
-    this.transport = options.fetch ?? fetch;
     this.readTimeout = positive(options.readTimeoutMs ?? 5_000, "readTimeoutMs");
     this.writeTimeout = positive(options.writeTimeoutMs ?? 90_000, "writeTimeoutMs");
     this.attempts = positive(options.maxAttempts ?? 3, "maxAttempts");

@@ -1,4 +1,9 @@
-import type { BlobImport, Evidence, Events, FactTime, MemoiaClient, QueriedEvents, Search, UpdateFact, Usage } from "../dist/index.js";
+import type { BlobImport, ClientOptions, Evidence, Events, FactTime, MemoiaClient, QueriedEvents, Search, UpdateFact, Usage } from "../dist/index.js";
+
+declare const serviceBinding: { fetch: typeof fetch };
+const boundOptions: ClientOptions = { binding: serviceBinding, apiKey: "fixture" };
+// @ts-expect-error A bound client cannot be given a second destination.
+const ambiguousOptions: ClientOptions = { ...boundOptions, baseUrl: "https://memoia.example" };
 
 declare const importWithImage: BlobImport;
 const attachment: NonNullable<BlobImport["messages"][number]["images"]>[number] = {

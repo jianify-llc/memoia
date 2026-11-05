@@ -36,7 +36,7 @@ The compatibility date is pinned to `2026-10-30`, the supported maximum of the l
 
 Database calls use a bounded connection wait, client query timeout and short transaction deadline; timed-out or broken connections are discarded, including when rollback or pool shutdown cannot complete. Temporary transport failures are retryable, while permanent SQL and business failures keep their original classification. The database layer never replays a statement or transaction. If a COMMIT response is lost, its outcome is unknown: maintenance locks and reads the original Task receipt before recording failure, and an already successful Task cannot be overwritten. Recovery retains the same Operation and checkpoint; it does not repeat completed model work or create a replacement receipt. Other callers must resolve uncertain writes using their own original receipt.
 
-Cloudflare Test Inspector keeps its authenticated public website and reaches Memoia through Service Binding using the logical origin `https://test-memoia.luvel.app`. A standalone Docker Inspector uses reachable HTTP transport. Inspector and Luvel must select the same database/project after cutover; existing pages and optional Playground behavior are unchanged.
+Cloudflare Test Inspector keeps its authenticated public website and reaches Memoia through the `MEMOIA` Service Binding. The SDK supplies the request URL internally. A standalone Docker Inspector uses reachable HTTP transport. Inspector and Luvel must select the same database/project after cutover; existing pages and optional Playground behavior are unchanged.
 
 ## Test cutover checklist
 
