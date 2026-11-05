@@ -112,6 +112,7 @@ test("maintenance final SDK request carries configured header, query and normali
     assert.throws(
       () =>
         createCloudflareRuntime({
+          OPENAI_API_KEY: "local-test",
           OPENAI_BASE_URL: "https://other.example/v1",
           OPENAI_TRANSPORT: "vpc",
           OPENAI_RELAY: { fetch: globalThis.fetch },
