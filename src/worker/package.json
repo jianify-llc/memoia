@@ -23,7 +23,7 @@
     "@openai/agents-openai": "0.21.0",
     "drizzle-orm": "0.45.4",
     "gpt-tokenizer": "3.4.0",
-    "hono": "4.13.11",
+    "hono": "4.13.16",
     "openai": "7.45.1",
     "pg": "8.23.1",
     "yaml": "2.8.3",

@@ -12,7 +12,7 @@
     "test": {
       "name": "luvel-memoia-test",
       "secrets": { "required": ["ACCESS_TOKEN", "OPENAI_API_KEY"] },
-      "vars": { "MAINTENANCE_ENABLED": "false", "MEMOIA_WRITES_ENABLED": "false" },
+      "vars": { "MAINTENANCE_ENABLED": "true", "MEMOIA_WRITES_ENABLED": "true" },
       "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "fd98a84c954446b4afc1b1311d35fb28" }],
       "queues": {
         "producers": [{ "binding": "MAINTENANCE_QUEUE", "queue": "luvel-memoia-maintenance-test" }],

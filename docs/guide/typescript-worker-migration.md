@@ -14,7 +14,7 @@ Tool proposals are committed together. The task checkpoint retains the last comp
 
 ## Configuration and readiness
 
-`wrangler.jsonc` records the approved Test resource bindings, including the nonsecret Hyperdrive ID, and contains no credentials. Test writes and consumption are initially disabled through `MEMOIA_WRITES_ENABLED=false` and `MAINTENANCE_ENABLED=false`. The write pause also blocks new Queue/Cron mutations, including input cleanup. Existing invocations must still be drained; changing a flag does not cancel them. Shared resource creation, role grants, binding activation, routing and deployment require the separately approved cutover.
+`wrangler.jsonc` records the approved Test resource bindings, including the nonsecret Hyperdrive ID, and contains no credentials. The initial closed target uses `MEMOIA_WRITES_ENABLED=false` and `MAINTENANCE_ENABLED=false`. After the approved fresh-Test readiness checks, the versioned candidate enables both flags. The write pause blocks new Queue/Cron mutations, including input cleanup. Existing invocations must still be drained; changing a flag does not cancel them. Shared resource creation, role grants, binding activation, routing and deployment require the separately approved cutover.
 
 | Binding/config | Source and purpose |
 | --- | --- |
@@ -36,7 +36,7 @@ The compatibility date is pinned to `2026-10-30`, the supported maximum of the l
 
 Database calls use a bounded connection wait, client query timeout and short transaction deadline; timed-out or broken connections are discarded, including when rollback or pool shutdown cannot complete. Temporary transport failures are retryable, while permanent SQL and business failures keep their original classification. The database layer never replays a statement or transaction. If a COMMIT response is lost, its outcome is unknown: maintenance locks and reads the original Task receipt before recording failure, and an already successful Task cannot be overwritten. Recovery retains the same Operation and checkpoint; it does not repeat completed model work or create a replacement receipt. Other callers must resolve uncertain writes using their own original receipt.
 
-The existing Inspector keeps its authenticated HTTP transport. Its API URL and Luvel's Binding must reach the same database after cutover. No UI rebuild or Playground changes are included.
+Cloudflare Test Inspector keeps its authenticated public website and reaches Memoia through Service Binding using the logical origin `https://test-memoia.luvel.app`. A standalone Docker Inspector uses reachable HTTP transport. Inspector and Luvel must select the same database/project after cutover; existing pages and optional Playground behavior are unchanged.
 
 ## Test cutover checklist
 
@@ -60,7 +60,7 @@ This checklist prepares a Test-only cutover; it does not authorize commits, shar
 
 ### Execution order and completion checks
 
-For an explicitly approved fresh Test installation, use `init` and `bootstrap`, create new scoped project keys, and verify that all callers select that project. Skip historical copy and usage transfer; keep the old environment intact until normal-chain acceptance. Old Luvel receipts and external IDs do not demonstrate memory coverage in the new project. Pause callers during their coordinated target/key switch, and do not start a global backfill as part of initialization. The sequence below covers the separate data-preserving cutover.
+For an explicitly approved fresh Test installation, use `init` and `bootstrap`, create new scoped project keys, and verify that all callers select that project. Skip historical copy and usage transfer; keep the old environment intact until normal-chain acceptance. After checking the target schema/project, restricted runtime role, Hyperdrive, Queue and absence of pending or unknown work, publish the enabled candidate once through normal Actions. There is no need to publish disabled business code first. Verify internal health and the protected Inspector before resuming callers. Old Luvel receipts and external IDs do not demonstrate memory coverage in the new project. Pause callers during their coordinated target/key switch, and do not start a global backfill as part of initialization. The sequence below covers the separate data-preserving cutover.
 
 | Step | Action | Completion evidence |
 | --- | --- | --- |

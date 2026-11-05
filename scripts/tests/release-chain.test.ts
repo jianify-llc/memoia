@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
-for (const scenario of ['success','documented-consumer-owner','conflicting-consumer-owner','missing-consumer-owner','consumer-owner-drift','online-artifact','tampered-artifact','expired-before-upload','missing-consumer','consumer-drift','cron-drift','wrong-hyperdrive','hyperdrive-cache-enabled','missing-secret','wrong-secret-type','wrong-version-binding','wrong-version-var','public-entry','wrong-active-version','rollback-success','rollback-wrong-hyperdrive','rollback-wrong-queue','rollback-missing-config']) test(`release chain: ${scenario}`,{timeout:60000},async()=>{
+for (const scenario of ['success','documented-consumer-owner','conflicting-consumer-owner','missing-consumer-owner','consumer-owner-drift','online-artifact','tampered-artifact','expired-before-upload','missing-consumer','consumer-drift','cron-drift','wrong-hyperdrive','hyperdrive-cache-enabled','missing-secret','wrong-secret-type','wrong-version-binding','wrong-version-var','public-entry','preview-entry','configured-public-route','wrong-active-version','rollback-success','rollback-wrong-hyperdrive','rollback-wrong-queue','rollback-missing-config']) test(`release chain: ${scenario}`,{timeout:60000},async()=>{
   const root=resolve(import.meta.dirname,'../..'), worker=resolve(root,'src/worker'), dir=await mkdtemp(resolve(tmpdir(),'memoia-chain-'));
   const online=scenario==='online-artifact' || scenario==='tampered-artifact', stage=online?'online':'test';
   const rollback=scenario.startsWith('rollback-');
@@ -17,7 +17,7 @@ for (const scenario of ['success','documented-consumer-owner','conflicting-consu
   const server=createServer(async(req,res)=>{
     const path=new URL(req.url!,'http://localhost').pathname, method=req.method!;calls.push(`${method} ${path}`);if(method!=='GET')writes.push(`${method} ${path}`);let result:any;
     if(path===`${script}/settings`)result={bindings:[{name:'HYPERDRIVE',type:'hyperdrive',id:scenario==='wrong-hyperdrive'?'c'.repeat(32):hyper},{name:'MAINTENANCE_QUEUE',type:'queue',queue_name:'fixture-queue'}],compatibility_date:'2026-10-30',compatibility_flags:['nodejs_compat']};
-    else if(path===`${script}/subdomain`)result={enabled:scenario==='public-entry',previews_enabled:false};
+    else if(path===`${script}/subdomain`)result={enabled:scenario==='public-entry',previews_enabled:scenario==='preview-entry'};
     else if(path===`${base}/hyperdrive/configs/${hyper}`)result={id:hyper,caching:{disabled:scenario!=='hyperdrive-cache-enabled'}};
     else if(path===`${base}/queues`)result=[{queue_id:'queue-id',queue_name:'fixture-queue'}];
     else if(path===`${base}/queues/queue-id`)result={queue_id:'queue-id',queue_name:'fixture-queue',consumers:scenario==='missing-consumer'?[]:[scenario==='consumer-owner-drift' && active===version?{...consumer,script:'other-worker'}:consumer],consumers_total_count:scenario==='missing-consumer'?0:1};
@@ -35,7 +35,7 @@ for (const scenario of ['success','documented-consumer-owner','conflicting-consu
   await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));
   try{
     const origin=`http://127.0.0.1:${(server.address() as any).port}`;const config=resolve(dir,'wrangler.json');
-    const configText=JSON.stringify({main:resolve(worker,'src/index.ts'),compatibility_date:'2026-10-30',compatibility_flags:['nodejs_compat'],workers_dev:false,preview_urls:false,rules:[{type:'Text',globs:['**/*.md'],fallthrough:true}],env:{[stage]:{name,secrets:{required:['ACCESS_TOKEN','OPENAI_API_KEY']},vars:{MEMOIA_WRITES_ENABLED:'false',MAINTENANCE_ENABLED:'false'},...(scenario==='rollback-missing-config'?{}:{hyperdrive:[{binding:'HYPERDRIVE',id:hyper}]}),queues:{producers:[{binding:'MAINTENANCE_QUEUE',queue:'fixture-queue'}],consumers:[{queue:'fixture-queue',max_batch_size:1,max_concurrency:4,max_retries:3}]},triggers:{crons:['* * * * *']}}}});await writeFile(config,configText);
+    const configText=JSON.stringify({main:resolve(worker,'src/index.ts'),...(scenario==='configured-public-route'?{routes:[{pattern:'memoia.example.com/*',zone_name:'example.com'}]}:{}),compatibility_date:'2026-10-30',compatibility_flags:['nodejs_compat'],workers_dev:false,preview_urls:false,rules:[{type:'Text',globs:['**/*.md'],fallthrough:true}],env:{[stage]:{name,secrets:{required:['ACCESS_TOKEN','OPENAI_API_KEY']},vars:{MEMOIA_WRITES_ENABLED:'false',MAINTENANCE_ENABLED:'false'},...(scenario==='rollback-missing-config'?{}:{hyperdrive:[{binding:'HYPERDRIVE',id:hyper}]}),queues:{producers:[{binding:'MAINTENANCE_QUEUE',queue:'fixture-queue'}],consumers:[{queue:'fixture-queue',max_batch_size:1,max_concurrency:4,max_retries:3}]},triggers:{crons:['* * * * *']}}}});await writeFile(config,configText);
     let releaseArgs=rollback?['rollback',stage,version]:['deploy',stage];
     if(online){
       const artifact=resolve(dir,'artifact'),bundle=resolve(artifact,'bundle'),empty=resolve(dir,'empty.env');await mkdir(artifact);await writeFile(empty,'',{mode:0o600});

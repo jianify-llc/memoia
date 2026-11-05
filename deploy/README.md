@@ -31,6 +31,10 @@ Node packaging and isolated PostgreSQL recovery are covered by local tests. The 
 
 ## Cloudflare Workers
 
+Luvel Test 的 `luvel-memoia-test` 仅通过 Service Binding 调用，`https://test-memoia.luvel.app` 是 SDK 的逻辑 origin，不配置公网域名、路由或 workers.dev。Luvel 的健康探针也使用既有绑定。Inspector 独立部署在受 Access 保护的 `https://test-memoia-inspector.jianify.dev`，通过同一 SDK 和绑定访问 Memoia；独立 Docker 安装仍使用可达的 HTTP 地址。
+
+Test CI 只需 Memoia 自身的 Individual Workers Editor，以及 Queues Read、Hyperdrive Read。发布器拒绝配置中的公网路由，并核对远端 workers.dev 和 preview URLs 均关闭；Custom Domains 及各域名路由由资源负责人在发布前后用既有管理权限只读核对，不为 CI 增加账户级 Access 或跨域扫描权限。
+
 Memoia 使用 TypeScript Worker。普通 push 不触发发布；Test 仅在明确验收时手动运行 `deploy-test.yml`，并要求所选 SHA 仍是当前 `test` HEAD。Online 使用当前 `release` HEAD 上的 `vMAJOR.MINOR.PATCH` 标签，先运行完整验证并构建固定制品，发布 Job 等待 GitHub `online` Environment 审批，审批后再次确认标签及 HEAD 并校验制品。`MEMOIA_TEST_DEPLOY_ENABLED` 必须为 `true` 才执行 Test 发布。两环境的 Cloudflare token 和 account ID 分别由对应 GitHub Environment 的 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID` 提供，不共享凭据。
 
 ## 本地验证和推送
@@ -49,7 +53,7 @@ src/worker/node_modules/.bin/tsx scripts/test-push.ts push
 
 Test 的资源清单、首次注册、停写迁移顺序、命令及完整链路通过条件统一见 [Test 切换清单](../docs/guide/typescript-worker-migration.md#test-cutover-checklist)。首次 Worker 注册须先按确认的资源初始化流程完成；现有发布器要求目标及绑定已存在，不承担自动创建，不能通过删检查或手工发布业务候选绕过门禁。
 
-`src/worker/wrangler.jsonc` 的环境配置是发布输入，需明确环境 Worker 名称和现有 Hyperdrive ID，关闭 workers.dev 与 preview URLs；Hyperdrive 必须禁用缓存。环境必须声明并预先配置 `ACCESS_TOKEN` 和 `OPENAI_API_KEY`；发布仅读取密钥名称及类型，不读取或创建密钥。域名及 Queue consumer 的实际连接由人员维护。配置中的 consumer 和 Cron 声明用于与云端只读比对，缺失或漂移阻断发布。Test 已记录专属 Hyperdrive 绑定，写入与维护仍默认关闭；Online 配置尚未完成。绑定存在不表示密钥、数据迁移或业务验收已完成，负责人仍需逐项核实。不要以部署脚本创建或重绑资源。环境配置和 Cloudflare 权限、Secrets、数据库兼容性需在真实部署前单独核验。
+`src/worker/wrangler.jsonc` 的环境配置是发布输入，需明确环境 Worker 名称和现有 Hyperdrive ID，关闭 workers.dev 与 preview URLs；Hyperdrive 必须禁用缓存。环境必须声明并预先配置 `ACCESS_TOKEN` 和 `OPENAI_API_KEY`；发布仅读取密钥名称及类型，不读取或创建密钥。域名及 Queue consumer 的实际连接由人员维护。配置中的 consumer 和 Cron 声明用于与云端只读比对，缺失或漂移阻断发布。Test 候选在新库、专属 Hyperdrive 和 Queue 核对后将写入与维护开关均设为 `true`，实际启用须在正常 Actions 发布后读回确认；Online 配置尚未完成。绑定存在不表示密钥、数据迁移或业务验收已完成，负责人仍需逐项核实。不要以部署脚本创建或重绑资源。环境配置和 Cloudflare 权限、Secrets、数据库兼容性需在真实部署前单独核验。
 
 发布由 `deploy/release.ts` 调用锁定的 Wrangler 4.155.0，使用 `versions upload --no-x-provision` 上传，读取该版本的 Hyperdrive、Queue 和开关绑定，确认后切换 100% 流量，再读回活动版本与绑定；不会更新 consumer 或 Cron。Online 使用审批前生成、绑定源码和配置的制品以及单独传递的 manifest SHA256，审批后校验全部文件并通过 `--no-bundle` 上传，不再构建源码。失败后先核对平台实际状态，不假定已回滚。部署凭据只注入发布步骤，入口使用本批空 env 文件，不读取业务 `.env`。实际发布、平台资源、业务和模型验收与本地检查分别记录。
 
