@@ -1,4 +1,4 @@
-import { createRuntime, type RuntimeEnv } from "./runtime.js";
+import { createRuntime, usesOpenAIBaseUrl, type RuntimeEnv } from "./runtime.js";
 import { SourceError } from "./errors.js";
 
 export interface CloudflareRuntimeEnv extends RuntimeEnv {
@@ -21,11 +21,7 @@ export function createCloudflareRuntime(
       "OpenAI relay binding is invalid",
       503,
     );
-  if (
-    usesRelay &&
-    env.OPENAI_BASE_URL !== undefined &&
-    !/^https:\/\/api\.openai\.com(?::443)?\/v1\/?$/.test(env.OPENAI_BASE_URL)
-  )
+  if (usesRelay && !usesOpenAIBaseUrl(env.OPENAI_BASE_URL))
     throw new SourceError(
       "model_configuration_rejected",
       "OpenAI relay requires the OpenAI API base URL",
@@ -44,11 +40,13 @@ export function createCloudflareRuntime(
         redirect: "manual",
       });
       const url = new URL(request.url);
+      const allowedPath =
+        url.pathname === "/v1/responses" || url.pathname === "/v1/embeddings";
       if (
         url.origin !== "https://api.openai.com" ||
         url.username ||
         url.password ||
-        url.pathname !== "/v1/responses" ||
+        !allowedPath ||
         request.method !== "POST"
       )
         throw new SourceError(

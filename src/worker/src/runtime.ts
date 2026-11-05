@@ -41,6 +41,15 @@ export interface Runtime {
   tracing?: Tracing;
   operationId?: string;
 }
+export function usesOpenAIBaseUrl(base: string | undefined): boolean {
+  if (base === undefined) return true;
+  try {
+    const href = new URL(base).href;
+    return href === "https://api.openai.com/v1" || href === "https://api.openai.com/v1/";
+  } catch {
+    return false;
+  }
+}
 export function createRuntime(
   env: RuntimeEnv,
   signal?: AbortSignal,

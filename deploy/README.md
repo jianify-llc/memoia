@@ -33,9 +33,9 @@ Node packaging and isolated PostgreSQL recovery are covered by local tests. The 
 
 Luvel Test 的 `luvel-memoia-test` 仅通过 Service Binding 调用，`https://test-memoia.luvel.app` 是 SDK 的逻辑 origin，不配置公网域名、路由或 workers.dev。Luvel 的健康探针也使用既有绑定。Inspector 独立部署在受 Access 保护的 `https://test-memoia-inspector.jianify.dev`，通过同一 SDK 和绑定访问 Memoia；独立 Docker 安装仍使用可达的 HTTP 地址。
 
-Test CI 只需 Memoia 自身的 Individual Workers Editor，以及 Queues Read、Hyperdrive Read。发布器拒绝配置中的公网路由，并核对远端 workers.dev 和 preview URLs 均关闭；Custom Domains 及各域名路由由资源负责人在发布前后用既有管理权限只读核对，不为 CI 增加账户级 Access 或跨域扫描权限。
+Test CI 使用 Memoia 自身的 Individual Workers Editor、Queues Read、Hyperdrive Read 和绑定现有 VPC Service 所需的 Connectivity Directory Bind。发布器拒绝配置中的公网路由，并核对远端 workers.dev 和 preview URLs 均关闭；Custom Domains 及各域名路由由资源负责人在发布前后用既有管理权限只读核对。
 
-Memoia 使用 TypeScript Worker。普通 push 不触发发布；Test 仅在明确验收时手动运行 `deploy-test.yml`，并要求所选 SHA 仍是当前 `test` HEAD。Online 使用当前 `release` HEAD 上的 `vMAJOR.MINOR.PATCH` 标签，先运行完整验证并构建固定制品，发布 Job 等待 GitHub `online` Environment 审批，审批后再次确认标签及 HEAD 并校验制品。`MEMOIA_TEST_DEPLOY_ENABLED` 必须为 `true` 才执行 Test 发布。两环境的 Cloudflare token 和 account ID 分别由对应 GitHub Environment 的 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID` 提供，不共享凭据。
+Memoia 使用 TypeScript Worker。普通 push 不触发发布；Test 仅在明确验收时手动运行 `deploy-test.yml`，并要求所选 SHA 仍是当前 `test` HEAD。Online 使用当前 `release` HEAD 上的 `vMAJOR.MINOR.PATCH` 标签，先运行完整验证并构建固定制品，发布 Job 等待 GitHub `online` Environment 审批，审批后再次确认标签及 HEAD 并校验制品。`MEMOIA_TEST_DEPLOY_ENABLED` 必须为 `true` 才执行 Test 发布。两环境共用组织 Actions Secret `CLOUDFLARE_ACCOUNT_ID`，各自的 GitHub Environment 提供独立的 `CLOUDFLARE_API_TOKEN`。仓库和 Environment 不重复配置 Account ID，以免覆盖组织值。
 
 ## 本地验证和推送
 
@@ -57,7 +57,7 @@ Test 的资源清单、首次注册、停写迁移顺序、命令及完整链路
 
 发布由 `deploy/release.ts` 调用锁定的 Wrangler 4.155.0，使用 `versions upload --no-x-provision` 上传，读取该版本的 Hyperdrive、Queue 和开关绑定，确认后切换 100% 流量，再读回活动版本与绑定；不会更新 consumer 或 Cron。Online 使用审批前生成、绑定源码和配置的制品以及单独传递的 manifest SHA256，审批后校验全部文件并通过 `--no-bundle` 上传，不再构建源码。失败后先核对平台实际状态，不假定已回滚。部署凭据只注入发布步骤，入口使用本批空 env 文件，不读取业务 `.env`。实际发布、平台资源、业务和模型验收与本地检查分别记录。
 
-Memoia Test 的 HTTP Placement 为 `aws:ap-northeast-1`，不指定 Queue 或 Cron 的执行地点。Fact 抽取和维护模型请求通过 `OPENAI_RELAY` 绑定复用 `test-nginx-relay`，仅转发 `POST /v1/responses`。Embedding 使用自己的连接配置。发布在切流前和切流后核对版本中的区域、传输模式与绑定，CI 身份需要能绑定现有 VPC Service。参考 [Cloudflare VPC 绑定权限](https://developers.cloudflare.com/workers-vpc/configuration/vpc-services/#required-roles)。
+Memoia Test 的 HTTP Placement 为 `aws:ap-northeast-1`，不指定 Queue 或 Cron 的执行地点。Fact 抽取和维护模型请求通过 `OPENAI_RELAY` 绑定复用 `test-nginx-relay` 的 `POST /v1/responses`。使用官方 OpenAI 地址的 Embedding 通过同一绑定的 `POST /v1/embeddings` 发送，继续使用自身的凭据、模型和维度。发布在切流前和切流后核对版本中的区域、传输模式与绑定，CI 身份需要能绑定现有 VPC Service。参考 [Cloudflare VPC 绑定权限](https://developers.cloudflare.com/workers-vpc/configuration/vpc-services/#required-roles)。
 
 ## 版本恢复
 

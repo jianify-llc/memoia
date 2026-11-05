@@ -4,7 +4,7 @@ import { addUsage, debitBilling, type Sql } from "./db.js";
 import defaultTopics from "./default-topics.json";
 import { encode } from "gpt-tokenizer/encoding/o200k_base";
 import { parse } from "yaml";
-import { assertRunning, type Runtime } from "./runtime.js";
+import { assertRunning, usesOpenAIBaseUrl, type Runtime } from "./runtime.js";
 import { SourceError } from "./errors.js";
 import { inSpan } from "./observability.js";
 import { readServiceConfig } from "./config.js";
@@ -627,6 +627,7 @@ async function embed(
       const client = new UsageOpenAI({
         apiKey: key,
         baseURL: base,
+        fetch: usesOpenAIBaseUrl(base) ? runtime.modelFetch : undefined,
         maxRetries: phase === "query" ? 0 : 2,
         timeout: Math.max(1, Math.min(10_000, runtime.deadline - Date.now())),
       });

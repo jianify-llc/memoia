@@ -96,7 +96,7 @@ test("maintenance final SDK request carries configured header, query and normali
   try {
     assert.ok(runtime.modelFetch);
     await assert.rejects(
-      runtime.modelFetch("https://api.openai.com/v1/embeddings", {
+      runtime.modelFetch("https://api.openai.com/v1/embeddings/extra", {
         method: "POST",
       }),
       /OpenAI relay request is not allowed/,

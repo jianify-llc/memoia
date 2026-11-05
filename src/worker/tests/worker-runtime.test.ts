@@ -29,6 +29,7 @@ test(
     const project = `runtime_${crypto.randomUUID()}`;
     let externalCalls = 0;
     let relayCalls = 0;
+    let embeddingCalls = 0;
     const mf = new Miniflare(
       convertV4MiniflareOptions({
         workers: [
@@ -42,17 +43,29 @@ test(
             bindings: {
               OPENAI_API_KEY: "unused",
               OPENAI_BASE_URL: "https://api.openai.com/v1",
+              EMBEDDING_API_KEY: "embedding-fixture",
+              EMBEDDING_BASE_URL: "https://API.OPENAI.COM/v1",
               OPENAI_TRANSPORT: "vpc",
               ACCESS_TOKEN: "local-root",
             },
             serviceBindings: {
-              OPENAI_RELAY: (request: Request) => {
+              OPENAI_RELAY: async (request: Request) => {
+                assert.equal(request.method, "POST");
+                if (request.url === "http://openai-relay.internal/v1/embeddings") {
+                  embeddingCalls++;
+                  assert.equal(request.headers.get("authorization"), "Bearer embedding-fixture");
+                  const payload = (await request.json()) as { model: string; dimensions: number };
+                  assert.equal(payload.model, "text-embedding-3-large");
+                  assert.equal(payload.dimensions, 1536);
+                  return Response.json({
+                    data: [{ index: 0, embedding: Array(1536).fill(0.01) }],
+                  });
+                }
                 relayCalls++;
                 assert.equal(
                   request.url,
                   "http://openai-relay.internal/v1/responses",
                 );
-                assert.equal(request.method, "POST");
                 assert.equal(
                   request.headers.get("authorization"),
                   "Bearer unused",
@@ -91,12 +104,8 @@ test(
                 });
               },
             },
-            outboundService: (request: Request) => {
+            outboundService: () => {
               externalCalls++;
-              if (new URL(request.url).pathname === "/v1/embeddings")
-                return Response.json({
-                  data: [{ index: 0, embedding: Array(1536).fill(0.01) }],
-                });
               return Response.json(
                 { error: "Unexpected provider call" },
                 { status: 500 },
@@ -216,7 +225,14 @@ test(
       assert.equal(receipt.status, "completed");
       assert.equal(receipt.result.fact_ids.length, 1);
       assert.equal(relayCalls, 1);
-      assert.equal(externalCalls, 1);
+      assert.equal(embeddingCalls, 1);
+      const search = await api("POST", `/api/users/${user}/search`, credential.token, {
+        query: "tea",
+      });
+      assert.equal(search.status, 200);
+      const matches = (await search.json()) as { facts: { id: string }[] };
+      assert.ok(matches.facts.some(({ id }) => id === receipt.result.fact_ids[0]));
+      assert.equal(embeddingCalls, 2);
       const elapsed = await api(
         "POST",
         `/api/users/${user}/blobs`,
@@ -234,7 +250,7 @@ test(
         "execution_deadline",
       );
       assert.equal(relayCalls, 1);
-      assert.equal(externalCalls, 1);
+      assert.equal(embeddingCalls, 2);
       assert.equal(
         (await api("DELETE", `/api/users/${user}`, credential.token)).status,
         200,
@@ -248,7 +264,8 @@ test(
         403,
       );
       assert.equal(relayCalls, 1);
-      assert.equal(externalCalls, 1);
+      assert.equal(embeddingCalls, 2);
+      assert.equal(externalCalls, 0);
     } finally {
       await mf.dispose();
       await db.query("DELETE FROM memoia.projects WHERE project_id=$1", [
