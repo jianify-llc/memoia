@@ -1,4 +1,5 @@
 /** Agents SDK owns tool execution; the adapter preserves one native Responses chain per attempt. */
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   Agent,
   Runner,
@@ -39,6 +40,26 @@ export async function maintenancePromptHash(): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
+}
+
+const quotaErrors = new Set([
+  "insufficient_quota",
+  "credit_balance_exhausted",
+  "project_spend_limit_exceeded",
+  "organization_spend_limit_exceeded",
+  "organization_usage_limit_exceeded",
+  "usage_limit_exceeded",
+]);
+
+function retryAfterMs(error: unknown): number {
+  if (!(error instanceof OpenAI.APIError)) return 0;
+  const header = error.headers?.get("retry-after")?.trim();
+  if (!header) return 0;
+  const seconds = Number(header);
+  const delay = Number.isFinite(seconds)
+    ? seconds * 1000
+    : Date.parse(header) - Date.now();
+  return Number.isFinite(delay) ? Math.max(0, delay) : 0;
 }
 
 export class References {
@@ -248,13 +269,19 @@ export class MaintenanceModel extends OpenAIResponsesModel {
           callIds: [...ids],
           input,
         });
-        if (this.continuation.budget.shouldYield(30_000)) throw new TaskYield();
+        if (this.continuation.budget.shouldYield()) throw new TaskYield();
       }
       next = { ...request, input, previousResponseId: this.previous.id };
     }
-    let providerFailure: SourceError | undefined;
+    const budget = this.continuation?.budget;
     for (const tier of ["flex", "default"] as const) {
       await this.context.active();
+      const timeout = budget?.requestTimeout(600_000, 0);
+      const requestTimeout =
+        timeout === undefined ? undefined : AbortSignal.timeout(timeout);
+      const signals = [next.signal, budget?.signal, requestTimeout].filter(
+        (signal): signal is AbortSignal => signal !== undefined,
+      );
       const started = Date.now();
       const requestNumber = ++this.requests;
       try {
@@ -266,18 +293,13 @@ export class MaintenanceModel extends OpenAIResponsesModel {
             super._fetchResponse(
               {
                 ...next,
+                signal: signals.length ? AbortSignal.any(signals) : undefined,
                 modelSettings: {
                   ...next.modelSettings,
                   providerData: {
                     ...next.modelSettings.providerData,
                     service_tier: tier,
                   },
-                  timeoutMs: this.continuation
-                    ? this.continuation.budget.requestTimeout(600_000)
-                    : Math.min(
-                        600_000,
-                        this.context.runtime.deadline - Date.now() - 30_000,
-                      ),
                 },
               },
               false,
@@ -308,12 +330,6 @@ export class MaintenanceModel extends OpenAIResponsesModel {
               response.error?.code ?? "",
             )
           ) {
-            providerFailure = new SourceError(
-              "model_unavailable",
-              "Maintenance provider request failed",
-              503,
-              true,
-            );
             continue;
           }
           throw new SourceError(
@@ -356,8 +372,12 @@ export class MaintenanceModel extends OpenAIResponsesModel {
         );
         return response;
       } catch (error) {
-        if (error instanceof TaskYield && providerFailure)
-          throw providerFailure;
+        budget?.assertActive();
+        next.signal?.throwIfAborted();
+        const requestTimedOut =
+          requestTimeout?.aborted === true &&
+          error instanceof OpenAI.APIUserAbortError;
+        const retryAt = Date.now() + retryAfterMs(error);
         if (error instanceof OpenAI.APIError)
           await recordUsage(
             this.context.runtime,
@@ -384,23 +404,32 @@ export class MaintenanceModel extends OpenAIResponsesModel {
             true,
           );
         const transient =
+          requestTimedOut ||
           error instanceof OpenAI.APIConnectionError ||
           (error instanceof OpenAI.APIError &&
+            !quotaErrors.has(error.code ?? "") &&
+            !quotaErrors.has(error.type ?? "") &&
+            error.headers?.get("x-should-retry")?.toLowerCase() !== "false" &&
             ([408, 429].includes(error.status ?? 0) ||
               (error.status ?? 0) >= 500 ||
               ((error.status ?? 0) === 400 &&
                 (error.param === "service_tier" ||
                   error.code === "conversation_locked"))));
+        if (transient && budget?.shouldYield()) throw new TaskYield();
         if (tier === "flex" && transient) {
-          providerFailure = new SourceError(
-            "model_unavailable",
-            "Maintenance provider request failed",
-            503,
-            true,
-          );
+          const wait = Math.max(0, retryAt - Date.now());
+          // The provider's Flex wait must fit in this slice. Otherwise try Standard immediately.
+          if (budget && wait > 0 && !budget.shouldYield(wait)) {
+            try {
+              await sleep(wait, undefined, { signal: budget.signal });
+            } catch (error) {
+              budget.assertActive();
+              throw error;
+            }
+          }
           continue;
         }
-        if (error instanceof OpenAI.APIError)
+        if (requestTimedOut || error instanceof OpenAI.APIError)
           throw new SourceError(
             "model_unavailable",
             "Maintenance provider request failed",
@@ -704,10 +733,9 @@ export async function runMaintenance(
           (context.error instanceof SourceError &&
             !!continuation &&
             continuation.budget.shouldYield(
-              30_000 +
-                (context.providerAdvice?.retryAfterMs ??
-                  context.normalized.retryAfterMs ??
-                  0),
+              context.providerAdvice?.retryAfterMs ??
+                context.normalized.retryAfterMs ??
+                0,
             )) ||
           (context.error instanceof SourceError &&
             (context.error.code !== "model_unavailable" ||

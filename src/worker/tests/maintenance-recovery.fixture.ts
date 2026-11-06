@@ -334,7 +334,7 @@ try {
       if (first && task && id === op.operation_id) {
         first = false;
         const row = await tx.query<{ started_at: Date }>(
-          "UPDATE memoia.queue_tasks SET started_at=clock_timestamp()-interval '11 minutes 31 seconds' WHERE id=$1 RETURNING started_at",
+          "UPDATE memoia.queue_tasks SET started_at=clock_timestamp()-interval '12 minutes' WHERE id=$1 RETURNING started_at",
           [id],
         );
         task.startedAt = row.rows[0].started_at;

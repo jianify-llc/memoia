@@ -957,7 +957,7 @@ export async function consume(runtime: Runtime, message: Wakeup) {
               });
             }
           }
-          if (budget.shouldYield(30_000)) throw new TaskYield();
+          if (budget.shouldYield()) throw new TaskYield();
           await context.commit();
           try {
             console.info(

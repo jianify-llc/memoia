@@ -473,7 +473,7 @@ test("conversation_locked falls back on the same parent and native tool result",
   }
 });
 
-test("Flex failures consume failure budget when Standard cannot fit, then a new slice starts with Flex", async () => {
+test("Flex failure at the soft deadline yields and the next slice resumes from Flex", async () => {
   const original = globalThis.fetch;
   const ctx = localContext();
   let now = Date.now();
@@ -487,7 +487,7 @@ test("Flex failures consume failure budget when Standard cannot fit, then a new 
   globalThis.fetch = async (_input, init) => {
     tiers.push(JSON.parse(String(init?.body)).service_tier);
     if (tiers.length === 1) return modelResponse("resp_tool", readCall);
-    if (tiers.length <= 3) {
+    if (tiers.length === 2) {
       now = budget.softDeadlineAt;
       return Response.json(
         {
@@ -514,31 +514,20 @@ test("Flex failures consume failure budget when Standard cannot fit, then a new 
   try {
     await assert.rejects(
       runMaintenance(ctx, { budget, referenceTime, save }),
-      (error: unknown) =>
-        error instanceof SourceError &&
-        error.code === "model_unavailable" &&
-        error.retryable,
+      TaskYield,
     );
     assert.deepEqual(tiers, ["flex", "flex"]);
     assert.equal(saved.parentId, "resp_tool");
     budget = new SliceBudget(now, undefined, () => now);
     const restored = localContext();
     restored.restore(saved.state);
-    await assert.rejects(
-      runMaintenance(restored, { budget, referenceTime, resume: saved, save }),
-      (error: unknown) =>
-        error instanceof SourceError &&
-        error.code === "model_unavailable" &&
-        error.retryable,
-    );
-    assert.deepEqual(tiers, ["flex", "flex", "flex"]);
     await runMaintenance(restored, {
-      budget: new SliceBudget(now, undefined, () => now),
+      budget,
       referenceTime,
       resume: saved,
       save,
     });
-    assert.deepEqual(tiers, ["flex", "flex", "flex", "flex"]);
+    assert.deepEqual(tiers, ["flex", "flex", "flex"]);
     assert.equal(reads, 2);
     await restored.runtime.db.close();
   } finally {
@@ -547,15 +536,17 @@ test("Flex failures consume failure budget when Standard cannot fit, then a new 
   }
 });
 
-test("initial Flex failure cannot become a free yield, while no request can yield normally", async () => {
+test("Flex Retry-After that reaches the soft deadline switches to Standard immediately", async () => {
   const original = globalThis.fetch;
   const ctx = localContext();
   let now = Date.now();
-  let budget = new SliceBudget(now, undefined, () => now);
-  let requests = 0;
-  globalThis.fetch = async () => {
-    requests++;
-    now = budget.softDeadlineAt;
+  const budget = new SliceBudget(now, undefined, () => now);
+  const tiers: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    tiers.push(JSON.parse(String(init?.body)).service_tier);
+    assert.ok(init?.signal);
+    if (tiers.length > 1) return modelResponse("resp_done", done);
+    now = budget.softDeadlineAt - 10_000;
     return Response.json(
       {
         error: {
@@ -564,7 +555,7 @@ test("initial Flex failure cannot become a free yield, while no request can yiel
           message: "retry",
         },
       },
-      { status: 429 },
+      { status: 429, headers: { "Retry-After": "20" } },
     );
   };
   const referenceTime = {
@@ -573,23 +564,104 @@ test("initial Flex failure cannot become a free yield, while no request can yiel
     time_zone_source: "service_default",
   };
   try {
-    for (let slice = 0; slice < 2; slice++) {
-      budget = new SliceBudget(now, undefined, () => now);
-      await assert.rejects(
-        runMaintenance(ctx, { budget, referenceTime, save: async () => {} }),
-        (error: unknown) =>
-          error instanceof SourceError &&
-          error.code === "model_unavailable" &&
-          error.retryable,
-      );
-    }
-    assert.equal(requests, 2);
-    budget = new SliceBudget(now - 12 * 60_000, undefined, () => now);
+    await runMaintenance(ctx, { budget, referenceTime, save: async () => {} });
+    assert.deepEqual(tiers, ["flex", "default"]);
+    now = budget.softDeadlineAt;
     await assert.rejects(
       runMaintenance(ctx, { budget, referenceTime, save: async () => {} }),
       TaskYield,
     );
-    assert.equal(requests, 2);
+    assert.deepEqual(tiers, ["flex", "default"]);
+  } finally {
+    globalThis.fetch = original;
+    await ctx.runtime.db.close();
+  }
+});
+
+test("the SDK aborts a pending provider request at the soft deadline", async () => {
+  const original = globalThis.fetch;
+  const ctx = localContext();
+  let now = Date.now();
+  const budget = new SliceBudget(now, undefined, () => now);
+  now = budget.softDeadlineAt - 20;
+  let requests = 0;
+  let aborted = false;
+  globalThis.fetch = async (_input, init) => {
+    requests++;
+    const signal = init?.signal;
+    assert.ok(signal);
+    return new Promise<Response>((_, reject) => {
+      const abort = () => {
+        aborted = true;
+        now = budget.softDeadlineAt;
+        reject(signal.reason);
+      };
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", abort, { once: true });
+    });
+  };
+  const watchdog = setTimeout(() => {}, 1_000);
+  try {
+    await assert.rejects(
+      runMaintenance(ctx, {
+        budget,
+        referenceTime: {
+          current_date: "2026-11-04",
+          time_zone: "UTC",
+          time_zone_source: "service_default",
+        },
+        save: async () => {},
+      }),
+      TaskYield,
+    );
+    assert.equal(requests, 1);
+    assert.equal(aborted, true);
+  } finally {
+    clearTimeout(watchdog);
+    globalThis.fetch = original;
+    await ctx.runtime.db.close();
+  }
+});
+
+test("a permanent provider error stays permanent if its usage write reaches the soft deadline", async () => {
+  const original = globalThis.fetch;
+  const ctx = localContext();
+  let now = Date.now();
+  const budget = new SliceBudget(now, undefined, () => now);
+  now = budget.softDeadlineAt - 20;
+  let requests = 0;
+  ctx.runtime.db.transaction = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    now = budget.softDeadlineAt;
+    return undefined as never;
+  };
+  globalThis.fetch = async () => {
+    requests++;
+    return Response.json(
+      {
+        error: {
+          type: "invalid_request_error",
+          code: "invalid_request",
+          message: "invalid",
+        },
+      },
+      { status: 400 },
+    );
+  };
+  try {
+    await assert.rejects(
+      runMaintenance(ctx, {
+        budget,
+        referenceTime: {
+          current_date: "2026-11-04",
+          time_zone: "UTC",
+          time_zone_source: "service_default",
+        },
+        save: async () => {},
+      }),
+      (error: unknown) => error instanceof SourceError && !error.retryable,
+    );
+    assert.equal(requests, 1);
   } finally {
     globalThis.fetch = original;
     await ctx.runtime.db.close();
