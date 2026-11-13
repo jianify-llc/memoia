@@ -35,7 +35,11 @@ import {
 } from "./temporal";
 import { SourceError } from "./errors";
 import { sourceObservations } from "./temporal";
-import { readServiceConfig } from "./config";
+import {
+  readServiceConfig,
+  reasoningEffort,
+  type ReasoningEffort,
+} from "./config";
 
 function inputRetention(runtime: Runtime) {
   return readServiceConfig(runtime.env.MEMOIA_CONFIG)
@@ -326,6 +330,7 @@ type ImportInput = {
   source_id: string;
   messages: SourceMessage[];
   metadata?: Record<string, unknown>;
+  maintenance_reasoning_effort?: ReasoningEffort;
 };
 type DeleteInput = { idempotency_key: string; message_ids: string[] };
 type LegacyBuffers = { buffer_ids: string[]; blob_ids: string[] };
@@ -340,6 +345,11 @@ const canonical = (v: any): any =>
         )
       : v;
 const hash = pythonHash;
+function importMaintenanceOptions(
+  effort: ImportInput["maintenance_reasoning_effort"],
+) {
+  return effort === undefined ? {} : { maintenance_reasoning_effort: effort };
+}
 function storedImport(input: ImportInput) {
   return {
     ...input,
@@ -409,6 +419,7 @@ async function register(
   payload: any,
   legacyBuffers?: LegacyBuffers,
   retryReceipt?: { id: string; hash: string },
+  maintenanceEffort?: ImportInput["maintenance_reasoning_effort"],
 ) {
   const digest = retryReceipt?.hash ?? (await hash({ kind, request: payload }));
   const uid = scope.userId,
@@ -534,6 +545,9 @@ async function register(
             existing.id,
             pythonJson({
               ...storedImport(payload),
+              ...importMaintenanceOptions(
+                existing.request?.maintenance_reasoning_effort,
+              ),
               ...(existing.request?.legacy_buffers
                 ? { legacy_buffers: existing.request.legacy_buffers }
                 : {}),
@@ -571,6 +585,7 @@ async function register(
       kind === "import"
         ? {
             ...storedImport(payload),
+            ...importMaintenanceOptions(maintenanceEffort),
             ...(legacyBuffers ? { legacy_buffers: legacyBuffers } : {}),
           }
         : payload;
@@ -662,6 +677,8 @@ async function processImport(
   retryReceipt?: { id: string; hash: string },
 ) {
   validateImport(input);
+  // Effort belongs to the first accepted request. Replaying an import after a
+  // plan change still compares the same source content and resumes its original setting.
   const payload = importPayload(input);
   const op = await register(
     runtime,
@@ -671,6 +688,10 @@ async function processImport(
     payload,
     legacyBuffers,
     retryReceipt,
+    input.maintenance_reasoning_effort,
+  );
+  const maintenanceOptions = importMaintenanceOptions(
+    op.request.maintenance_reasoning_effort,
   );
   if (
     !canProcess(
@@ -773,6 +794,7 @@ async function processImport(
           }
           const request = {
             ...storedImport(payload),
+            ...maintenanceOptions,
             ...(cleanup ? { legacy_buffers: cleanup } : {}),
             ...(saved ? { fact_review_candidate: saved } : {}),
           };
@@ -909,6 +931,7 @@ async function processImport(
               JSON.stringify({
                 source_id: payload.source_id,
                 idempotency_key: payload.idempotency_key,
+                ...maintenanceOptions,
               }),
             ],
           );
@@ -1574,7 +1597,7 @@ async function correctFact(
 export async function purgeExpiredInputs(runtime: Runtime) {
   await runtime.db.transaction(async (tx) => {
     await tx.query(
-      "UPDATE memoia.memory_operations SET request=jsonb_build_object('source_id',source_id,'idempotency_key',idempotency_key),input_expires_at=NULL WHERE kind='import' AND input_expires_at<=clock_timestamp()",
+      "UPDATE memoia.memory_operations SET request=jsonb_strip_nulls(jsonb_build_object('source_id',source_id,'idempotency_key',idempotency_key,'maintenance_reasoning_effort',request->'maintenance_reasoning_effort')),input_expires_at=NULL WHERE kind='import' AND input_expires_at<=clock_timestamp()",
     );
     await tx.query(
       "UPDATE memoia.memory_operations SET request=request-'content'-'subject'-'reporter'-'certainty'-'support_groups'-'fact_time',input_expires_at=NULL,error=CASE WHEN status='processing' THEN jsonb_build_object('code','input_required','retryable',false) ELSE error END,status=CASE WHEN status='processing' THEN 'failed' ELSE status END WHERE kind='correct' AND status<>'completed' AND (input_expires_at<=clock_timestamp() OR (input_expires_at IS NULL AND status='processing'))",
@@ -1802,6 +1825,8 @@ function validateImage(
 function validateImport(input: ImportInput) {
   if (
     !input ||
+    !reasoningEffort.optional().safeParse(input.maintenance_reasoning_effort)
+      .success ||
     !validKey(input.idempotency_key) ||
     !validKey(input.source_id) ||
     !Array.isArray(input.messages) ||

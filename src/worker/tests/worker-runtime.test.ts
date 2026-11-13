@@ -201,6 +201,7 @@ test(
       const input = {
         idempotency_key: "deadline-fact",
         source_id: "deadline-source",
+        maintenance_reasoning_effort: "medium",
         messages: [
           {
             message_id: "m1",

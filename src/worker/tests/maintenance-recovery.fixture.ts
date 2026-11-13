@@ -19,7 +19,7 @@ import { createUser } from "../src/management";
 import worker from "../src/index";
 import type { Runtime } from "../src/runtime";
 import { SourceError } from "../src/errors";
-import { getOperation, listOperations } from "../src/facts";
+import { getOperation, importSource, listOperations } from "../src/facts";
 import { maintenanceTasks, projectOperation } from "../src/maintenance-task";
 
 const db = new Database(process.env.MEMOIA_TEST_DATABASE_URL!);
@@ -189,7 +189,8 @@ try {
     const op = await flush(runtime, scope, "agent-completed-resume");
     const writer = await acquireUserLease(db, scope, 60_000);
     let calls = 0;
-    globalThis.fetch = async () => {
+    globalThis.fetch = async (_input, init) => {
+      assert.equal(JSON.parse(String(init?.body)).reasoning.effort, "high");
       calls++;
       return response();
     };
@@ -222,10 +223,83 @@ try {
   });
   await test("a saved tool round resumes from its native parent after a failed slice", async () => {
     const scope = await user();
-    await batch(scope, "added");
+    const extractionEfforts: unknown[] = [];
+    globalThis.fetch = async (_input, init) => {
+      const request = JSON.parse(String(init?.body));
+      extractionEfforts.push(request.reasoning?.effort);
+      const payload = (await response().json()) as {
+        output: { content: { text: string }[] }[];
+      };
+      payload.output[0].content[0].text = JSON.stringify({
+        messages: [
+          {
+            message_id: "m1",
+            facts: [
+              {
+                content: "The user likes tea.",
+                subject: "the user",
+                reporter: "the user",
+                certainty: "asserted",
+                fact_time: null,
+                any_of: [{ all_of: ["m1"] }],
+              },
+            ],
+          },
+        ],
+      });
+      return Response.json(payload);
+    };
+    const first = {
+      source_id: "s",
+      idempotency_key: "first-import",
+      maintenance_reasoning_effort: "high" as const,
+      messages: [
+        {
+          message_id: "m1",
+          role: "user" as const,
+          content: "I like tea.",
+          occurred_at: "2026-11-13T10:00:00Z",
+        },
+      ],
+    };
+    const imported = await importSource(runtime, scope, first);
+    assert.equal(imported.status, "completed");
+    assert.equal(imported.result.fact_ids.length, 1);
+    assert.deepEqual(
+      await importSource(runtime, scope, {
+        ...first,
+        maintenance_reasoning_effort: "medium",
+      }),
+      imported,
+    );
+    const second = await importSource(runtime, scope, {
+      ...first,
+      source_id: "another-source",
+      idempotency_key: "second-import",
+      maintenance_reasoning_effort: "medium",
+    });
+    assert.equal(second.status, "completed");
+    assert.equal(second.result.fact_ids.length, 1);
+    const noop = await importSource(runtime, scope, {
+      ...first,
+      idempotency_key: "repeated-message",
+    });
+    assert.deepEqual(noop.result.fact_ids, []);
+    assert.deepEqual(extractionEfforts, ["high", "high"]);
+    assert.equal((await getStatus(runtime, scope)).pending_blob_count, 3);
     const op = await flush(runtime, scope, "native-round-resume");
+    assert.deepEqual(
+      (
+        await db.transaction((tx) =>
+          maintenanceTasks.readInTx(tx, op.operation_id),
+        )
+      )?.bizParams,
+      { reasoning_effort: "medium" },
+    );
     let calls = 0;
-    globalThis.fetch = async () => {
+    const requestedEfforts: unknown[] = [];
+    globalThis.fetch = async (_input, init) => {
+      requestedEfforts.push(JSON.parse(String(init?.body)).reasoning?.effort);
       calls++;
       if (calls > 1)
         return Response.json(
@@ -275,6 +349,9 @@ try {
     assert.equal(done?.status, "succeeded");
     assert.equal(done.failureCount, 1);
     assert.equal(resumed.service_tier, "flex");
+    assert.equal(resumed.reasoning.effort, "medium");
+    assert.ok(requestedEfforts.length >= 2);
+    assert.ok(requestedEfforts.every((effort) => effort === "medium"));
     assert.equal(resumed.previous_response_id, "resp_saved");
     assert.deepEqual(
       resumed.input.map((item: any) => item.call_id),

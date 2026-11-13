@@ -1009,6 +1009,11 @@ export interface components {
             metadata?: {
                 [key: string]: unknown;
             };
+            /**
+             * @description Optional maintenance-only effort. The first accepted import fixes its value. When no selected Blob supplies an override, the project setting applies.
+             * @enum {string}
+             */
+            maintenance_reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
         };
         /** IssuedKey */
         IssuedKey: {

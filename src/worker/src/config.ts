@@ -1,6 +1,16 @@
 import { z } from "zod";
 import { SourceError } from "./errors.js";
 
+export const reasoningEffort = z.enum([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+]);
+export type ReasoningEffort = z.infer<typeof reasoningEffort>;
+
 const positiveInteger = z.number().int().positive();
 const description = z.string().nullish();
 const subTopic = z.union([
@@ -39,9 +49,7 @@ const serviceConfig = z
       .string()
       .refine((value) => !!value.trim())
       .optional(),
-    llm_reasoning_effort: z
-      .enum(["none", "minimal", "low", "medium", "high", "xhigh"])
-      .optional(),
+    llm_reasoning_effort: reasoningEffort.optional(),
     llm_prompt_cache_options: z.boolean().nullish(),
     llm_openai_default_header: stringMap,
     llm_openai_default_query: stringMap,

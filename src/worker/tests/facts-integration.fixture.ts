@@ -188,6 +188,7 @@ test("configured input retention preserves live retries and purges expired input
   const request = {
     source_id: "source",
     idempotency_key: "retention",
+    maintenance_reasoning_effort: "medium" as const,
     messages: [
       {
         message_id: "m",
@@ -235,6 +236,7 @@ test("configured input retention preserves live retries and purges expired input
     assert.deepEqual(purged.request, {
       source_id: request.source_id,
       idempotency_key: request.idempotency_key,
+      maintenance_reasoning_effort: "medium",
     });
     assert.deepEqual(
       (
@@ -245,9 +247,15 @@ test("configured input retention preserves live retries and purges expired input
       ).rows.map((row) => row.id),
       [recentBlob],
     );
-    await assert.rejects(importSource(runtime, scope, request));
+    await assert.rejects(
+      importSource(runtime, scope, {
+        ...request,
+        maintenance_reasoning_effort: "high",
+      }),
+    );
     const restored = await read();
     assert.equal(restored.id, first.id);
+    assert.equal(restored.request.maintenance_reasoning_effort, "medium");
     assert.ok(
       Number(restored.remaining) > 0 && Number(restored.remaining) <= 30,
     );

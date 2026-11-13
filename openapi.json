@@ -3410,6 +3410,11 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Metadata"
+          },
+          "maintenance_reasoning_effort": {
+            "type": "string",
+            "enum": ["none", "minimal", "low", "medium", "high", "xhigh"],
+            "description": "Optional maintenance-only effort. The first accepted import fixes its value. When no selected Blob supplies an override, the project setting applies."
           }
         },
         "additionalProperties": false,

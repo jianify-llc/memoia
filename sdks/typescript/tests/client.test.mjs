@@ -50,6 +50,18 @@ describe("Standard-only Fact imports", () => {
     await api.importBlob(user, source);
   });
 
+  it("serializes valid maintenance effort and rejects unsupported values before fetching", async () => {
+    const api = client(async (_url, init) => {
+      assert.deepEqual(JSON.parse(init.body), { ...source, maintenance_reasoning_effort: "medium" });
+      return json(complete);
+    });
+    await api.importBlob(user, { ...source, maintenance_reasoning_effort: "medium" });
+    for (const value of [null, "pro", 1]) {
+      assert.throws(() => api.importBlob(user, { ...source, maintenance_reasoning_effort: value }),
+        error => error.code === "INVALID_INPUT");
+    }
+  });
+
   it("rejects every retired mode locally before fetching", () => {
     const api = client(() => { throw new Error("must not fetch"); });
     assert.equal(api.setReasoningPolicy, undefined);

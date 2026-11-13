@@ -6,6 +6,7 @@ import {
   retryPolicies,
   tool,
   type ModelRequest,
+  type ModelSettings,
 } from "@openai/agents-core";
 import { OpenAIResponsesModel } from "@openai/agents-openai";
 import OpenAI from "openai";
@@ -690,7 +691,11 @@ export async function runMaintenance(
       store: true,
       truncation: "disabled",
       reasoning: {
-        effort: context.config.reasoning_effort as "high",
+        effort:
+          context.effortOverride ??
+          (context.config.reasoning_effort as NonNullable<
+            ModelSettings["reasoning"]
+          >["effort"]),
         mode: "standard",
       },
       text: { verbosity: "low" },

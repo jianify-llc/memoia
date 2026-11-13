@@ -13,6 +13,7 @@ import {
   type UserScope,
 } from "./db.js";
 import { SourceError } from "./errors.js";
+import { reasoningEffort, type ReasoningEffort } from "./config.js";
 import { inSpan } from "./observability.js";
 import {
   assertRunning,
@@ -353,7 +354,11 @@ async function seal(
     }
     const rows = (
       await tx.query(
-        `SELECT * FROM memoia.memory_blobs WHERE user_id=$1 AND project_id=$2 AND fact_completed_at IS NOT NULL AND flush_operation_id IS NULL ORDER BY fact_completed_at,id LIMIT 100 FOR UPDATE`,
+        `SELECT b.id,b.fact_changes,o.request->>'maintenance_reasoning_effort' AS maintenance_effort
+        FROM memoia.memory_blobs b LEFT JOIN memoia.memory_operations o
+          ON o.blob_id=b.id AND o.user_id=b.user_id AND o.project_id=b.project_id AND o.kind='import'
+        WHERE b.user_id=$1 AND b.project_id=$2 AND b.fact_completed_at IS NOT NULL AND b.flush_operation_id IS NULL
+        ORDER BY b.fact_completed_at,b.id LIMIT 100 FOR UPDATE OF b`,
         scoped(scope),
       )
     ).rows;
@@ -376,6 +381,7 @@ async function seal(
       : [];
     const chosen: QueryResultRow[] = [];
     let size = 0;
+    let effort: ReasoningEffort | undefined;
     for (const row of rows) {
       const ids = new Set(row.fact_changes.map((c: Change) => c.fact_id));
       const cost = bytes({
@@ -384,6 +390,11 @@ async function seal(
       });
       if (chosen.length && size + cost > 262144) break;
       chosen.push(row);
+      if (row.fact_changes.some((change: Change) => change.kind !== "noop")) {
+        // The existing seal order already puts the latest completed Blob last.
+        effort =
+          reasoningEffort.safeParse(row.maintenance_effort).data ?? effort;
+      }
       size += cost;
       if (size > 262144) break;
     }
@@ -428,7 +439,7 @@ async function seal(
       requestKey: id,
       businessKey: id,
       type: "maintenance_flush",
-      bizParams: {},
+      bizParams: effort === undefined ? {} : { reasoning_effort: effort },
     });
     if (!task) throw new Error("Could not create flush task");
     if (empty) {
@@ -808,6 +819,9 @@ export async function consume(runtime: Runtime, message: Wakeup) {
             version: MAINTENANCE_CHECKPOINT_VERSION,
             prompt: await maintenancePromptHash(),
             config: context.config,
+            ...(context.effortOverride === undefined
+              ? {}
+              : { reasoning_effort: context.effortOverride }),
             provider: {
               modelBaseUrl: runtime.env.OPENAI_BASE_URL ?? null,
               embeddingBaseUrl: runtime.env.EMBEDDING_BASE_URL ?? null,
@@ -1009,6 +1023,14 @@ export class MaintenanceContext {
   readonly seen = new Set<number>();
   readonly unresolved = new Map<string, string | null>();
   config!: Awaited<ReturnType<typeof getConfig>>;
+  get effortOverride() {
+    const params = this.claim.task?.bizParams;
+    return reasoningEffort.safeParse(
+      params && typeof params === "object" && !Array.isArray(params)
+        ? params.reasoning_effort
+        : undefined,
+    ).data;
+  }
   constructor(
     readonly runtime: Runtime,
     readonly claim: Claim,

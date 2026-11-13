@@ -40,7 +40,7 @@ completed **只表示 Fact 操作已提交**。回执中的 memory_version 固�
 
 长计算由 compare-and-expire 原子续租、compare-and-delete 释放的 Redis lease 协调；所有正式写入仍比较 SQL generation/version。短事务共用用户级 pg_advisory_xact_lock，与永久遗忘线性化，不跨模型 await。失锁、冲突或提交未知不能写入失败假回执，也不能只重试 INSERT。
 
-原文只临时保存在未完成 import 的 memory_operations.request，Source 和 Blob 不保存正文副本。完成结果、回执和清理同事务提交；完成后 request 只保留操作身份。旧 chat GeneralBlob 同事务清除，不受 persistent_blob 影响。旧 summary Blob 是摘要输入，保留原有独立语义，不把它宣称为完整聊天存档。
+原文只临时保存在未完成 import 的 memory_operations.request，Source 和 Blob 不保存正文副本。完成结果、回执和清理同事务提交；完成后 request 只保留操作身份及可选的维护强度。旧 chat GeneralBlob 同事务清除，不受 persistent_blob 影响。旧 summary Blob 是摘要输入，保留原有独立语义，不把它宣称为完整聊天存档。
 
 Fact 由一次 Standard 请求同时输出正文、主体、报告者、确定性、证据和事件时间，使用 fact_extraction.md 与内部 MessageExtraction：每条用户消息一项，可含零条或多条 Fact，any_of 中的 all_of 表示独立或联合支持。入口检查消息覆盖与所属消息支撑，再无损转为现有 Extraction.support_groups；完整候选、数据库和公开 API 仍使用原格式，不保存两套表示。不同消息的独立确认允许产生相同陈述，不用后文的细节替代前文可独立成立的内容；结构检查不能证明模型没有语义漏抽。保持项目模型/思考等级、text.verbosity=low、store:false、完整固定规则和转义的 source_material；只缓存固定规则，不给动态原文打断点，不使用历史续接、Session 或 previous_response_id。正常非空输入最多一次模型调用，返回空事实同样有效；全部消息已处理/删除的 noop 不调用模型。
 
@@ -88,7 +88,9 @@ Source／用户整组清理仍由 PostgreSQL 外键在原事务内完成。0016 
 
 主动 POST flush 或 Worker 定时 flush，在短事务按完成顺序选取完整 Blob；可跨 Source，不跨项目/用户。每次扫描最多 100 个，变更引用与当前有效 Fact 的 JSON 总预算为 256 KiB，不能拆开 Blob。剩余、在途及随后完成的 Blob 留给下一次，pending_blob_count 可见；同键重试不扩大集合。单个 Blob 已超限时固定原集合并明确报 maintenance_capacity，不无限调用模型；恢复仍受容量校验。查询不改变计时，自动静默 30 秒、最长等待 120 秒。空 flush 直接 completed，不调用模型。
 
-Operation(kind=flush) 是唯一调度和恢复身份，source_id/blob_id 为 null；保存固定 Blob 集合、执行租约、generation、尝试次数和下次执行时间，不新增任务 ID 或维护 Task 表。每个项目/用户最多一个有效执行者；短事务领取后释放连接，模型等待不占 Fact 写入锁。失败/退避释放执行权，新批次可继续。首次加三次恢复，间隔 5/15/60 分钟；耗尽保留原失败，显式 retry 原 operation_id 才重开预算，新批次不重置旧次数。
+导入可传 `maintenance_reasoning_effort`，只用于 Profile/Event 维护。首次受理固定该值，同键重试沿用原值。封批按现有 Blob 完成顺序，取实际有 Fact 变更且显式提供该字段的最后一批，写入维护 Task 的 `biz_params.reasoning_effort`。没有覆盖值时沿用项目的 `reasoning_effort`。已封批的 Task 与分片续跑沿用原参数。
+
+Operation(kind=flush) 是公开恢复身份，source_id/blob_id 为 null，保存固定 Blob 集合。封批时用同一 ID 创建 Legato Task，由 Task 保存租约、尝试次数、下次执行时间和检查点。每个项目/用户最多一个有效执行者；短事务领取后释放连接，模型等待不占 Fact 写入锁。失败/退避释放执行权，新批次可继续。首次加三次恢复，间隔 5/15/60 分钟；耗尽保留原失败，显式 retry 原 operation_id 才重开预算，新批次不重置旧次数。
 
 Operation.status 是终态真相源：待领取、执行及自动退避均为 processing，退避可携带 retryable 的末次错误；不可恢复或四次耗尽才为 failed，提交回执后才为 completed。flush.status 对应 pending/running、failed、completed，不独立猜终态。Worker 每轮独立回收过期租约，第四次崩溃也收敛到 failed；重复恢复 processing 不重置预算。
 

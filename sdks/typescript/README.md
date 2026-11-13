@@ -9,10 +9,12 @@ const memoia = new MemoiaClient({ binding: env.MEMOIA, apiKey: projectToken });
 The binding selects the Worker. For a reachable HTTP deployment, pass `baseUrl`
 instead. Both transports use the same authenticated API and operation receipts.
 
-`importBlob(userId, input)` does not accept `reasoning_mode`. Fact extraction and
-Profile/Event maintenance always use Standard, including retries, tool turns and
-Flex recovery. The SDK rejects the retired field locally before transport; models,
-reasoning effort and service tiers remain independent server settings.
+`importBlob(userId, input)` accepts optional `maintenance_reasoning_effort`.
+It applies to Profile/Event maintenance. The first accepted import fixes the
+value for that idempotency key, and a flush without an override uses the project
+setting. Fact extraction still uses its server configuration. The SDK rejects
+the retired `reasoning_mode` field before transport. Deploy a server that
+supports the new field before sending it.
 
 `updateFact(userId, factId, input)` and `deleteFact(userId, factId, input)` correct an existing extraction using a caller-owned idempotency key, `expected_revision` and a short `reason`. Updates replace the complete editable content, subject, reporter, certainty, support groups and event time; identity and original Blob remain unchanged. Support must reference undeleted messages from that original Blob. These are human-reviewed repairs, not a new source of facts: Memoia no longer has the original chat body to verify semantics. A `kind: "correct"` Operation confirms the Fact/index change, while its new correction Blob enters normal timed flush. Old Profile/Event text can remain readable until that flush succeeds. A stale revision requires a fresh read and deliberate proposal, not an automatic merge or retry. Deleting a Fact does not delete messages or other Facts.
 
