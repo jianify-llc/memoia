@@ -28,6 +28,7 @@ export interface RuntimeEnv
   ADMIN_URL?: string;
   ADMIN_TOKEN?: string;
   MEMOIA_CONFIG?: string;
+  MEMOIA_HEALTHCHECK_DB_TRACE?: string;
   tracing?: Tracing;
 }
 export interface Runtime {
@@ -66,7 +67,7 @@ export function createRuntime(
         503,
         true,
       );
-    db = new Database(connection);
+    db = new Database(connection, { tracing: env.tracing });
   }
   return {
     db,

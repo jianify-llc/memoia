@@ -1572,18 +1572,21 @@ async function correctFact(
   }
 }
 export async function purgeExpiredInputs(runtime: Runtime) {
-  await runtime.db.transaction(async (tx) => {
-    await tx.query(
-      "UPDATE memoia.memory_operations SET request=jsonb_build_object('source_id',source_id,'idempotency_key',idempotency_key),input_expires_at=NULL WHERE kind='import' AND input_expires_at<=clock_timestamp()",
-    );
-    await tx.query(
-      "UPDATE memoia.memory_operations SET request=request-'content'-'subject'-'reporter'-'certainty'-'support_groups'-'fact_time',input_expires_at=NULL,error=CASE WHEN status='processing' THEN jsonb_build_object('code','input_required','retryable',false) ELSE error END,status=CASE WHEN status='processing' THEN 'failed' ELSE status END WHERE kind='correct' AND status<>'completed' AND (input_expires_at<=clock_timestamp() OR (input_expires_at IS NULL AND status='processing'))",
-    );
-    await tx.query(
-      "DELETE FROM memoia.general_blobs WHERE blob_type='chat' AND created_at<clock_timestamp()-$1::double precision*interval '1 second'",
-      [inputRetention(runtime)],
-    );
-  });
+  await runtime.db.transaction(
+    async (tx) => {
+      await tx.query(
+        "UPDATE memoia.memory_operations SET request=jsonb_build_object('source_id',source_id,'idempotency_key',idempotency_key),input_expires_at=NULL WHERE kind='import' AND input_expires_at<=clock_timestamp()",
+      );
+      await tx.query(
+        "UPDATE memoia.memory_operations SET request=request-'content'-'subject'-'reporter'-'certainty'-'support_groups'-'fact_time',input_expires_at=NULL,error=CASE WHEN status='processing' THEN jsonb_build_object('code','input_required','retryable',false) ELSE error END,status=CASE WHEN status='processing' THEN 'failed' ELSE status END WHERE kind='correct' AND status<>'completed' AND (input_expires_at<=clock_timestamp() OR (input_expires_at IS NULL AND status='processing'))",
+      );
+      await tx.query(
+        "DELETE FROM memoia.general_blobs WHERE blob_type='chat' AND created_at<clock_timestamp()-$1::double precision*interval '1 second'",
+        [inputRetention(runtime)],
+      );
+    },
+    { operation: "purge_expired_inputs" },
+  );
 }
 export async function retryOperation(
   runtime: Runtime,

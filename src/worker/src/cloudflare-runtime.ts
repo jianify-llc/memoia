@@ -29,7 +29,8 @@ export function createCloudflareRuntime(
     );
   const runtime = createRuntime(
     Object.assign(Object.create(env), {
-      DATABASE_URL: env.HYPERDRIVE?.connectionString ?? env.DATABASE_URL,
+      // Shadow a Node URL on the inherited environment. Workers require Hyperdrive.
+      DATABASE_URL: env.HYPERDRIVE?.connectionString,
     }),
     signal,
   );

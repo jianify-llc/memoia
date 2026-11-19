@@ -8,7 +8,9 @@ import { runMaintenance } from "../src/maintenance-agent";
 test("maintenance final SDK request carries configured header, query and normalized topic", async () => {
   let relayFetch: (request: Request) => Promise<Response>;
   const runtime = createCloudflareRuntime({
-    DATABASE_URL: "postgresql://unused:unused@127.0.0.1:1/unused",
+    HYPERDRIVE: {
+      connectionString: "postgresql://unused:unused@127.0.0.1:1/unused",
+    },
     OPENAI_API_KEY: "local-test",
     OPENAI_BASE_URL: "https://api.openai.com/v1",
     OPENAI_TRANSPORT: "vpc",

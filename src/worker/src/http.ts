@@ -262,7 +262,34 @@ export function createApp(
   const runtime = (c: C): Runtime => c.get("runtime");
   const principal = (c: C): Principal => c.get("principal");
   app.get("/api/healthcheck", async (c) => {
-    await runtime(c).db.query("SELECT 1");
+    const { db, env, tracing } = runtime(c);
+    if (env.MEMOIA_HEALTHCHECK_DB_TRACE === "true" && tracing) {
+      const {
+        rows: [backend],
+      } = await db.query<{
+        pid: number;
+        started_at_ms: number;
+      }>(
+        `SELECT pg_backend_pid() AS pid,
+                (EXTRACT(EPOCH FROM backend_start) * 1000)::double precision AS started_at_ms
+           FROM pg_catalog.pg_stat_activity
+          WHERE pid = pg_backend_pid()`,
+        undefined,
+        "healthcheck",
+      );
+      if (backend) {
+        try {
+          tracing.getActiveSpan()?.setAttributes({
+            "memoia.db.backend_pid": backend.pid,
+            "memoia.db.backend_started_at_ms": Math.trunc(
+              backend.started_at_ms,
+            ),
+          });
+        } catch {}
+      }
+    } else {
+      await db.query("SELECT 1", undefined, "healthcheck");
+    }
     return c.json({ status: "ok" });
   });
   app.get("/api/project/identity", (c) =>

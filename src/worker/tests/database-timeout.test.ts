@@ -1,16 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import pg from "pg";
 import { Database, DatabaseUnavailableError } from "../src/db";
+import { createApp } from "../src/http";
+import type { Runtime } from "../src/runtime";
 
 const never = () => new Promise<never>(() => {});
 function fixture(
   query: (sql: string) => Promise<unknown>,
   end = async () => {},
+  tracing?: Tracing,
+  checkoutError?: Error,
 ) {
   const db = new Database("postgres://unused", {
     transactionTimeoutMs: 35,
     closeTimeoutMs: 20,
+    tracing,
   });
   const releases: boolean[] = [];
   const client = Object.assign(new EventEmitter(), {
@@ -18,7 +24,10 @@ function fixture(
     release: (discard: boolean) => releases.push(discard),
   });
   (db as unknown as { pool: unknown }).pool = {
-    connect: async () => client,
+    connect: async () => {
+      if (checkoutError) throw checkoutError;
+      return client;
+    },
     end,
   };
   return { db, releases, client };
@@ -159,4 +168,174 @@ test("client error while query rejects is consumed and cannot double release", a
   assert.deepEqual(releases, [true]);
   assert.equal(client.listenerCount("error"), 0);
   await db.close();
+});
+
+test("traces distinguish checkout, PostgreSQL rejection at BEGIN, and local deadline", async () => {
+  const events: Array<{ name: string; attributes: Record<string, unknown> }> =
+    [];
+  const tracing = {
+    enterSpan(name: string, callback: (span: unknown) => Promise<unknown>) {
+      const attributes: Record<string, unknown> = {};
+      events.push({ name, attributes });
+      return callback({
+        setAttribute(key: string, value: unknown) {
+          attributes[key] = value;
+        },
+        setAttributes(values: object) {
+          Object.assign(attributes, values);
+        },
+        setStatus() {},
+      });
+    },
+  } as unknown as Tracing;
+  const rejected = Object.assign(
+    new pg.DatabaseError("private-role-canary", 0, "error"),
+    {
+      code: "53300",
+    },
+  );
+  const { db } = fixture(
+    async (sql) => {
+      if (sql.startsWith("BEGIN")) throw rejected;
+      return result;
+    },
+    undefined,
+    tracing,
+  );
+  await assert.rejects(
+    db.query("private-sql-canary", undefined, "healthcheck"),
+    DatabaseUnavailableError,
+  );
+  assert.equal(events[0]?.name, "memoia.db.acquire");
+  assert.equal(events[0]?.attributes["db.operation.name"], "healthcheck");
+  assert.equal(events[1]?.name, "memoia.db.query");
+  assert.equal(events[1]?.attributes["memoia.db.phase"], "begin");
+  assert.equal(events[1]?.attributes["db.response.status_code"], "53300");
+  assert.ok(!JSON.stringify(events).includes("canary"));
+  assert.ok(!events.some((event) => event.name === "memoia.db.deadline"));
+  await db.close();
+
+  const slow = fixture(never, undefined, tracing);
+  await assert.rejects(
+    slow.db.transaction(async () => {}, { operation: "purge_expired_inputs" }),
+    DatabaseUnavailableError,
+  );
+  const deadline = events.find((event) => event.name === "memoia.db.deadline");
+  assert.equal(
+    deadline?.attributes["db.operation.name"],
+    "purge_expired_inputs",
+  );
+  assert.deepEqual(slow.releases, [true]);
+  await slow.db.close();
+});
+
+test("healthcheck returns a safe 503 when PostgreSQL rejects checkout or BEGIN", async () => {
+  const rejected = Object.assign(
+    new pg.DatabaseError("private-role-canary", 0, "error"),
+    {
+      code: "53300",
+    },
+  );
+  for (const phase of ["checkout", "begin"]) {
+    const queries: string[] = [];
+    const { db, releases } = fixture(
+      async (sql) => {
+        queries.push(sql);
+        throw rejected;
+      },
+      undefined,
+      undefined,
+      phase === "checkout" ? rejected : undefined,
+    );
+    const app = createApp(() => ({
+      db,
+      env: { OPENAI_API_KEY: "unused" },
+      deadline: Date.now() + 1000,
+    }));
+    const response = await app.request("/api/healthcheck");
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      detail: {
+        code: "database_unavailable",
+        message: "Database temporarily unavailable",
+        retryable: true,
+      },
+    });
+    assert.deepEqual(queries, phase === "checkout" ? [] : ["BEGIN"]);
+    assert.deepEqual(releases, phase === "checkout" ? [] : [true]);
+  }
+});
+
+test("a 53300 after BEGIN keeps the original write error", async () => {
+  const rejected = Object.assign(
+    new pg.DatabaseError("private-role-canary", 0, "error"),
+    {
+      code: "53300",
+    },
+  );
+  const calls: string[] = [];
+  const { db } = fixture(async (sql) => {
+    calls.push(sql);
+    if (sql === "COMMIT") throw rejected;
+    return result;
+  });
+  await assert.rejects(
+    db.query("fixture-write"),
+    (error) => error === rejected,
+  );
+  assert.equal(calls.filter((sql) => sql === "fixture-write").length, 1);
+  assert.equal(calls.filter((sql) => sql === "COMMIT").length, 1);
+  await db.close();
+});
+
+test("healthcheck records the origin session only when enabled", async () => {
+  const startedAt = 1795047846222;
+  for (const enabled of [false, true]) {
+    const queries: string[] = [];
+    const attributes: Record<string, unknown> = {};
+    const tracing = {
+      enterSpan(_name: string, callback: (span: unknown) => Promise<unknown>) {
+        return callback({ setAttributes() {} });
+      },
+      getActiveSpan() {
+        return {
+          setAttributes(values: object) {
+            Object.assign(attributes, values);
+          },
+        };
+      },
+    } as unknown as Tracing;
+    const { db } = fixture(
+      async (sql) => {
+        queries.push(sql);
+        return { ...result, rows: [{ pid: 123, started_at_ms: startedAt }] };
+      },
+      undefined,
+      tracing,
+    );
+    const env: Runtime["env"] = {
+      OPENAI_API_KEY: "unused",
+      ...(enabled ? { MEMOIA_HEALTHCHECK_DB_TRACE: "true" } : {}),
+    };
+    const app = createApp(() => ({
+      db,
+      env,
+      tracing,
+      deadline: Date.now() + 1000,
+    }));
+    const response = await app.request("/api/healthcheck");
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { status: "ok" });
+    assert.equal(queries.length, 4);
+    assert.equal(queries[2]?.includes("pg_backend_pid()"), enabled);
+    assert.deepEqual(
+      attributes,
+      enabled
+        ? {
+            "memoia.db.backend_pid": 123,
+            "memoia.db.backend_started_at_ms": startedAt,
+          }
+        : {},
+    );
+  }
 });

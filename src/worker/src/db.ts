@@ -1,6 +1,7 @@
 import pg from "pg";
 import type { QueryResult, QueryResultRow } from "pg";
 import { SourceError } from "./errors.js";
+import { inSpan } from "./observability.js";
 
 export function isDatabaseTransportError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -30,6 +31,10 @@ export function isDatabaseTransportError(error: unknown): boolean {
   );
 }
 
+function isConnectionLimit(error: unknown): boolean {
+  return error instanceof pg.DatabaseError && error.code === "53300";
+}
+
 export class DatabaseUnavailableError extends SourceError {
   constructor() {
     super(
@@ -51,6 +56,7 @@ export type UserScope = { userId: string; projectId: string };
 export type TransactionOptions = {
   isolation?: "read committed" | "repeatable read" | "serializable";
   readOnly?: boolean;
+  operation?: "healthcheck" | "purge_expired_inputs";
 };
 
 /** Owns a bounded pool; its invocation or Node process owner closes it after work drains. */
@@ -59,6 +65,7 @@ export class Database {
   private readonly active = new Set<() => void>();
   private readonly transactionTimeoutMs: number;
   private readonly closeTimeoutMs: number;
+  private readonly tracing?: Tracing;
 
   constructor(
     connectionString: string,
@@ -66,10 +73,12 @@ export class Database {
       transactionTimeoutMs?: number;
       closeTimeoutMs?: number;
       maxConnections?: number;
+      tracing?: Tracing;
     } = {},
   ) {
     this.transactionTimeoutMs = options.transactionTimeoutMs ?? 35_000;
     this.closeTimeoutMs = options.closeTimeoutMs ?? 5_000;
+    this.tracing = options.tracing;
     this.pool = new pg.Pool({
       connectionString,
       max: options.maxConnections ?? 4,
@@ -103,8 +112,9 @@ export class Database {
   async query<T extends QueryResultRow = QueryResultRow>(
     sql: string,
     values?: unknown[],
+    operation?: TransactionOptions["operation"],
   ): Promise<QueryResult<T>> {
-    return this.transaction((tx) => tx.query<T>(sql, values));
+    return this.transaction((tx) => tx.query<T>(sql, values), { operation });
   }
 
   async transaction<T>(
@@ -132,9 +142,19 @@ export class Database {
       .join(" ");
     let client: import("pg").PoolClient;
     try {
-      client = await this.pool.connect();
+      client = await inSpan(
+        this.tracing,
+        "memoia.db.acquire",
+        {
+          "db.operation.name": options.operation,
+          "db.pool.idle": this.pool.idleCount,
+          "db.pool.waiting": this.pool.waitingCount,
+        },
+        () => this.pool.connect(),
+      );
     } catch (error) {
-      if (isDatabaseTransportError(error)) throw new DatabaseUnavailableError();
+      if (isConnectionLimit(error) || isDatabaseTransportError(error))
+        throw new DatabaseUnavailableError();
       throw error;
     }
     let released = false;
@@ -153,23 +173,46 @@ export class Database {
     const onClientError = () => destroy();
     client.on("error", onClientError);
     this.active.add(destroy);
-    const tx: Sql = {
-      query: async (sql, values) => {
-        if (released) throw new DatabaseUnavailableError();
-        try {
-          return await client.query(sql, values);
-        } catch (error) {
-          if (broken || isDatabaseTransportError(error)) {
-            destroy();
-            throw new DatabaseUnavailableError();
-          }
-          throw error;
+    const query = async <R extends QueryResultRow>(
+      sql: string,
+      values?: unknown[],
+      phase: "begin" | "query" | "commit" | "rollback" = "query",
+    ): Promise<QueryResult<R>> => {
+      if (released) throw new DatabaseUnavailableError();
+      try {
+        return await inSpan(
+          this.tracing,
+          "memoia.db.query",
+          { "db.operation.name": options.operation, "memoia.db.phase": phase },
+          () => client.query<R>(sql, values),
+        );
+      } catch (error) {
+        // A rejected BEGIN has not run any business SQL. Discard the client
+        // without attempting another source connection for ROLLBACK.
+        if (
+          (phase === "begin" && isConnectionLimit(error)) ||
+          broken ||
+          isDatabaseTransportError(error)
+        ) {
+          destroy();
+          throw new DatabaseUnavailableError();
         }
-      },
+        throw error;
+      }
     };
+    const tx: Sql = { query };
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
+        void inSpan(
+          this.tracing,
+          "memoia.db.deadline",
+          {
+            "db.operation.name": options.operation,
+            "memoia.db.phase": "transaction",
+          },
+          async () => {},
+        );
         const error = new DatabaseUnavailableError();
         destroy();
         reject(error);
@@ -177,15 +220,15 @@ export class Database {
     });
     const work = async () => {
       try {
-        await tx.query(begin);
+        await query(begin, undefined, "begin");
         await this.configureSearchPath(tx);
         const result = await fn(tx);
-        await tx.query("COMMIT");
+        await query("COMMIT", undefined, "commit");
         return result;
       } catch (error) {
         if (!broken) {
           try {
-            await tx.query("ROLLBACK");
+            await query("ROLLBACK", undefined, "rollback");
           } catch {
             destroy();
           }

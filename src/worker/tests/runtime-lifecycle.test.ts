@@ -1,10 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Database } from "../src/db.js";
+import { SourceError } from "../src/errors.js";
 import { closeRuntime, createRuntime } from "../src/runtime.js";
 import { createCloudflareRuntime } from "../src/cloudflare-runtime.js";
 
 const env = { OPENAI_API_KEY: "unused", DATABASE_URL: "postgresql://unused" };
+const HYPERDRIVE = { connectionString: "postgresql://hyperdrive-unused" };
+
+test("Cloudflare requires Hyperdrive even when a direct database URL is available", () => {
+  assert.throws(
+    () => createCloudflareRuntime(env),
+    (error) =>
+      error instanceof SourceError &&
+      error.code === "database_unavailable" &&
+      error.status === 503,
+  );
+});
 
 test("Node requests borrow one process pool without closing it", async () => {
   const db = new Database(env.DATABASE_URL, { maxConnections: 8 });
@@ -25,7 +37,7 @@ test("Node requests borrow one process pool without closing it", async () => {
 });
 
 test("Cloudflare invocation still closes its own database", async () => {
-  const runtime = createRuntime(env);
+  const runtime = createCloudflareRuntime({ ...env, HYPERDRIVE });
   const original = runtime.db.close.bind(runtime.db);
   let closes = 0;
   runtime.db.close = async () => {
@@ -47,6 +59,7 @@ test("Cloudflare queue adapter preserves receiver, identity and delay; Node reli
   };
   const cloudflare = createCloudflareRuntime({
     ...env,
+    HYPERDRIVE,
     MAINTENANCE_QUEUE: queue,
   });
   const node = createRuntime(env);

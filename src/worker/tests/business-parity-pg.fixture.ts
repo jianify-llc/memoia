@@ -412,7 +412,7 @@ try {
       retries = 0;
     const queueEnv = {
       ...runtime.env,
-      DATABASE_URL: process.env.MEMOIA_TEST_DATABASE_URL!,
+      HYPERDRIVE: { connectionString: process.env.MEMOIA_TEST_DATABASE_URL! },
     };
     const wakeup = {
       kind: "flush" as const,

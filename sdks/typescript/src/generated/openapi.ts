@@ -2684,6 +2684,21 @@ export interface operations {
                     "application/json": components["schemas"]["Health"];
                 };
             };
+            /** @description Service temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: {
+                            code: string;
+                            message: string;
+                            retryable: boolean;
+                        };
+                    };
+                };
+            };
         };
     };
     listUsers: {

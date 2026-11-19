@@ -1,4 +1,5 @@
 import { APIError } from "openai";
+import pg from "pg";
 import { SourceError } from "./errors.js";
 
 function upstreamModelError(error: APIError): Record<string, string | number> {
@@ -41,7 +42,14 @@ export async function inSpan<T>(
       } catch {}
       result = (async () => {
         try {
-          return await work();
+          const value = await work();
+          if (name === "memoia.http" && value instanceof Response) {
+            try {
+              span.setAttribute("http.response.status_code", value.status);
+              if (value.status >= 500) span.setStatus({ code: "error" });
+            } catch {}
+          }
+          return value;
         } catch (error) {
           try {
             span.setStatus({ code: "error" });
@@ -51,6 +59,12 @@ export async function inSpan<T>(
             );
             if (name === "memoia.model" && error instanceof APIError)
               span.setAttributes(upstreamModelError(error));
+            if (name === "memoia.db.acquire" || name === "memoia.db.query") {
+              // PostgreSQL error text can contain values from the statement.
+              const code = error instanceof pg.DatabaseError && error.code;
+              if (code && /^[0-9A-Z]{5}$/.test(code))
+                span.setAttribute("db.response.status_code", code);
+            }
           } catch {}
           throw error;
         }

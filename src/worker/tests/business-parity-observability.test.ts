@@ -176,3 +176,34 @@ test("usage logs correlate the operation without changing project aggregates", a
   assert.ok(statements.some(({ sql }) => sql.includes("usage_counters")));
   assert.ok(statements.every(({ values }) => !values.includes("operation-1")));
 });
+
+test("HTTP spans classify returned 5xx even when the handler resolves normally", async () => {
+  for (const code of [200, 503]) {
+    const attrs: Record<string, unknown> = {};
+    const tracing = {
+      enterSpan(_name: string, callback: (span: unknown) => Promise<unknown>) {
+        return callback({
+          setAttributes(values: object) {
+            Object.assign(attrs, values);
+          },
+          setAttribute(key: string, value: unknown) {
+            attrs[key] = value;
+          },
+          setStatus(value: unknown) {
+            attrs.status = value;
+          },
+        });
+      },
+    } as unknown as Tracing;
+    const response = new Response(null, { status: code });
+    assert.equal(
+      await inSpan(tracing, "memoia.http", {}, async () => response),
+      response,
+    );
+    assert.equal(attrs["http.response.status_code"], code);
+    assert.deepEqual(
+      attrs.status,
+      code === 503 ? { code: "error" } : undefined,
+    );
+  }
+});
