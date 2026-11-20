@@ -53,10 +53,11 @@ export interface Sql {
   ): Promise<QueryResult<T>>;
 }
 export type UserScope = { userId: string; projectId: string };
+type DatabaseOperation = "healthcheck" | "purge_expired_inputs";
 export type TransactionOptions = {
   isolation?: "read committed" | "repeatable read" | "serializable";
   readOnly?: boolean;
-  operation?: "healthcheck" | "purge_expired_inputs";
+  operation?: DatabaseOperation;
 };
 
 /** Owns a bounded pool; its invocation or Node process owner closes it after work drains. */
@@ -112,9 +113,18 @@ export class Database {
   async query<T extends QueryResultRow = QueryResultRow>(
     sql: string,
     values?: unknown[],
-    operation?: TransactionOptions["operation"],
+    operation?: DatabaseOperation,
   ): Promise<QueryResult<T>> {
     return this.transaction((tx) => tx.query<T>(sql, values), { operation });
+  }
+
+  // Standalone statements must qualify application objects and use no session state.
+  async statement<T extends QueryResultRow = QueryResultRow>(
+    sql: string,
+    values?: unknown[],
+    operation?: DatabaseOperation,
+  ): Promise<QueryResult<T>> {
+    return this.withClient((client) => client.query<T>(sql, values), operation);
   }
 
   async transaction<T>(
@@ -140,13 +150,21 @@ export class Database {
     ]
       .filter(Boolean)
       .join(" ");
+    return this.withClient(fn, options.operation, begin);
+  }
+
+  private async withClient<T>(
+    fn: (tx: Sql) => Promise<T>,
+    operation: DatabaseOperation | undefined,
+    begin?: string,
+  ): Promise<T> {
     let client: import("pg").PoolClient;
     try {
       client = await inSpan(
         this.tracing,
         "memoia.db.acquire",
         {
-          "db.operation.name": options.operation,
+          "db.operation.name": operation,
           "db.pool.idle": this.pool.idleCount,
           "db.pool.waiting": this.pool.waitingCount,
         },
@@ -183,14 +201,13 @@ export class Database {
         return await inSpan(
           this.tracing,
           "memoia.db.query",
-          { "db.operation.name": options.operation, "memoia.db.phase": phase },
+          { "db.operation.name": operation, "memoia.db.phase": phase },
           () => client.query<R>(sql, values),
         );
       } catch (error) {
-        // A rejected BEGIN has not run any business SQL. Discard the client
-        // without attempting another source connection for ROLLBACK.
+        // A connection limit at BEGIN or a standalone probe needs no ROLLBACK.
         if (
-          (phase === "begin" && isConnectionLimit(error)) ||
+          ((!begin || phase === "begin") && isConnectionLimit(error)) ||
           broken ||
           isDatabaseTransportError(error)
         ) {
@@ -208,8 +225,8 @@ export class Database {
           this.tracing,
           "memoia.db.deadline",
           {
-            "db.operation.name": options.operation,
-            "memoia.db.phase": "transaction",
+            "db.operation.name": operation,
+            "memoia.db.phase": begin ? "transaction" : "query",
           },
           async () => {},
         );
@@ -219,6 +236,7 @@ export class Database {
       }, this.transactionTimeoutMs);
     });
     const work = async () => {
+      if (!begin) return fn(tx);
       try {
         await query(begin, undefined, "begin");
         await this.configureSearchPath(tx);
@@ -379,6 +397,14 @@ export async function releaseUserLease(
   });
 }
 
+export const USAGE_HISTORY_DAYS = 30;
+
+export async function purgeExpiredUsage(db: Database): Promise<void> {
+  await db.statement(
+    "DELETE FROM memoia.usage_counters WHERE expires_at<=clock_timestamp()",
+  );
+}
+
 /** Approximate counters: updates and their daily/monthly expiry are atomic. */
 export async function addUsage(
   tx: Sql,
@@ -390,9 +416,9 @@ export async function addUsage(
       throw new RangeError("Invalid usage");
     await tx.query(
       `INSERT INTO memoia.usage_counters(project_id,name,period_type,period_start,value,expires_at)
-      SELECT $1,$2,p.kind,p.start_date,$3,clock_timestamp()+p.ttl
-      FROM (VALUES ('day', current_date, interval '14 days'),
-                   ('month', date_trunc('month', current_date)::date, interval '420 days')) p(kind,start_date,ttl)
+      SELECT $1,$2,p.kind,p.start_date,$3,p.start_date+p.ttl
+      FROM (VALUES ('day', current_date, interval '${USAGE_HISTORY_DAYS} days'),
+                   ('month', date_trunc('month', current_date)::date, interval '1 month')) p(kind,start_date,ttl)
       ON CONFLICT (project_id,name,period_type,period_start) DO UPDATE
       SET value=memoia.usage_counters.value+EXCLUDED.value, expires_at=EXCLUDED.expires_at`,
       [projectId, name, value],

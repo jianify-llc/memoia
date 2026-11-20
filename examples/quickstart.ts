@@ -10,9 +10,11 @@ const receipt = await client.importBlob(MEMOIA_USER_ID, {
   idempotency_key: MEMOIA_OPERATION_KEY,
   messages: [{ message_id: "preference-1", role: "user", content: "I enjoy cycling and reading.", occurred_at: MEMOIA_MESSAGE_TIME }],
 });
-console.log({ operation_id: receipt.operation_id, status: receipt.status });
-if (receipt.status === "completed") {
-  // The automatic flush updates Profile/Event separately. Read all three memory layers.
-  const memories = await client.search(MEMOIA_USER_ID, "What does the user enjoy?", 10, { max_token_size: 8192 });
-  console.log({ fact_count: memories.facts.length, event_count: memories.events.length, profile_count: memories.profiles.length });
-}
+const operation = receipt.blob_id && (receipt.status === "staged" || receipt.status === "processing")
+  ? await client.flushBlob(MEMOIA_USER_ID, MEMOIA_SOURCE_ID, {
+      idempotency_key: `extract:${MEMOIA_OPERATION_KEY}`, append_operation_ids: [receipt.operation_id],
+    })
+  : receipt;
+console.log({ operation_id: operation.operation_id, status: operation.status });
+if (operation.status === "processing")
+  console.log("Query the original Operation to confirm the completed Blob results.");

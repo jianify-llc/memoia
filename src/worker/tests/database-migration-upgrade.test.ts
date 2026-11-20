@@ -39,7 +39,17 @@ test(
         // Reconstruct the actual prefix after migration 0002.
         await db.query(`BEGIN; ALTER TABLE memoia.queue_tasks DROP CONSTRAINT queue_task_terminal;
         ALTER TABLE memoia.queue_tasks ADD CONSTRAINT queue_task_terminal CHECK ((status IN ('succeeded','failed'))=(finished_at IS NOT NULL));
-        DELETE FROM memoia.__drizzle_migrations WHERE id=(SELECT max(id) FROM memoia.__drizzle_migrations); COMMIT`);
+        ALTER TABLE memoia.memory_blobs DROP COLUMN external_id;
+        ALTER TABLE memoia.memory_operations DROP CONSTRAINT ck_memory_flush_lease;
+        ALTER TABLE memoia.memory_operations DROP COLUMN fact_flush_id;
+        ALTER TABLE memoia.memory_operations ADD CONSTRAINT ck_memory_flush_lease CHECK (
+          (lease_owner IS NULL)=(lease_until IS NULL) AND attempts BETWEEN 0 AND 4
+          AND (kind='flush' OR (lease_owner IS NULL AND attempts=0 AND available_at IS NULL)));
+        ALTER TABLE memoia.memory_operations DROP CONSTRAINT memory_operations_kind_check, DROP CONSTRAINT memory_operations_status_check;
+        ALTER TABLE memoia.memory_operations
+          ADD CONSTRAINT memory_operations_kind_check CHECK (kind IN ('import','retract','correct','legacy_import','flush')),
+          ADD CONSTRAINT memory_operations_status_check CHECK (status IN ('processing','completed','failed'));
+        DELETE FROM memoia.__drizzle_migrations WHERE id IN (SELECT id FROM memoia.__drizzle_migrations ORDER BY id OFFSET 3); COMMIT`);
         const before = (
           await db.query(
             "SELECT id,hash,created_at FROM memoia.__drizzle_migrations ORDER BY id",
@@ -92,7 +102,7 @@ test(
             "SELECT hash,created_at FROM memoia.__drizzle_migrations ORDER BY id",
           )
         ).rows;
-        assert.equal(after.length, 4);
+        assert.equal(after.length, 7);
         assert.match(
           (
             await db.query(

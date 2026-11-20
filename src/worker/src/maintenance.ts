@@ -13,6 +13,7 @@ import {
   type UserScope,
 } from "./db.js";
 import { SourceError } from "./errors.js";
+import { reasoningEffort, type ReasoningEffort } from "./config.js";
 import { inSpan } from "./observability.js";
 import {
   assertRunning,
@@ -30,6 +31,7 @@ import {
 import { z } from "zod";
 import {
   maintenanceTasks,
+  factFlushRetryPolicy,
   maintenanceRetryPolicy,
   projectOperation,
   projectOperations,
@@ -232,7 +234,7 @@ export function progress(row: QueryResultRow) {
           : running
             ? "running"
             : "pending",
-    blob_ids: row.request?.blob_ids ?? [],
+    blob_ids: row.request?.public_blob_ids ?? row.request?.blob_ids ?? [],
     attempts: Number(row.attempts),
     available_at: row.available_at,
     error: row.error,
@@ -257,10 +259,17 @@ export async function recordChanges(
   blobId: string,
   version: number,
   changes: Change[],
+  sessionAppend = false,
 ): Promise<void> {
   const changed = await tx.query(
-    `UPDATE memoia.memory_blobs SET fact_completed_at=clock_timestamp(),fact_changes=$4::jsonb
-    WHERE user_id=$1 AND project_id=$2 AND id=$3 AND fact_completed_at IS NULL AND flush_operation_id IS NULL`,
+    `UPDATE memoia.memory_blobs
+       SET fact_completed_at=CASE WHEN $5::boolean AND flush_operation_id IS NULL
+             THEN COALESCE(fact_completed_at,clock_timestamp()) ELSE clock_timestamp() END,
+           fact_changes=CASE WHEN $5::boolean AND flush_operation_id IS NULL
+             THEN fact_changes || $4::jsonb ELSE $4::jsonb END,
+           flush_operation_id=NULL
+     WHERE user_id=$1 AND project_id=$2 AND id=$3
+       AND (CASE WHEN $5 THEN external_id IS NOT NULL ELSE fact_completed_at IS NULL AND flush_operation_id IS NULL END)`,
     [
       ...scoped(scope),
       blobId,
@@ -270,6 +279,7 @@ export async function recordChanges(
           version,
         })),
       ),
+      sessionAppend,
     ],
   );
   if (changed.rowCount !== 1)
@@ -353,7 +363,21 @@ async function seal(
     }
     const rows = (
       await tx.query(
-        `SELECT * FROM memoia.memory_blobs WHERE user_id=$1 AND project_id=$2 AND fact_completed_at IS NOT NULL AND flush_operation_id IS NULL ORDER BY fact_completed_at,id LIMIT 100 FOR UPDATE`,
+        `SELECT b.id,b.external_id,o.maintenance_effort,
+          CASE WHEN b.external_id IS NULL THEN b.fact_changes ELSE (
+            SELECT COALESCE(jsonb_agg(page.change ORDER BY page.position),'[]'::jsonb)
+              FROM (SELECT change,position FROM jsonb_array_elements(b.fact_changes)
+                    WITH ORDINALITY list(change,position) LIMIT 100) page
+          ) END AS fact_changes
+        FROM memoia.memory_blobs b LEFT JOIN LATERAL (
+          SELECT o.request->>'maintenance_reasoning_effort' AS maintenance_effort
+          FROM memoia.memory_operations o LEFT JOIN memoia.queue_tasks t ON t.id=o.id
+          WHERE o.blob_id=b.id AND o.user_id=b.user_id AND o.project_id=b.project_id
+            AND ((o.kind='import' AND b.external_id IS NULL) OR (o.kind='fact_flush' AND t.status='succeeded'))
+          ORDER BY t.finished_at DESC NULLS LAST,o.created_at DESC,o.id DESC LIMIT 1
+        ) o ON true
+        WHERE b.user_id=$1 AND b.project_id=$2 AND b.fact_completed_at IS NOT NULL AND b.flush_operation_id IS NULL
+        ORDER BY b.fact_completed_at,b.id LIMIT 100 FOR UPDATE OF b`,
         scoped(scope),
       )
     ).rows;
@@ -375,16 +399,35 @@ async function seal(
         ).rows
       : [];
     const chosen: QueryResultRow[] = [];
+    const factsById = new Map(current.map((fact) => [fact.id, fact]));
     let size = 0;
+    let effort: ReasoningEffort | undefined;
     for (const row of rows) {
-      const ids = new Set(row.fact_changes.map((c: Change) => c.fact_id));
-      const cost = bytes({
-        changes: row.fact_changes,
-        facts: current.filter((f) => ids.has(f.id)),
+      let changes: Change[] = row.fact_changes ?? [];
+      const cost = (items: Change[]) => bytes({
+        changes: items,
+        facts: items.flatMap((change) => {
+          const fact = factsById.get(change.fact_id);
+          return fact ? [fact] : [];
+        }),
       });
-      if (chosen.length && size + cost > 262144) break;
-      chosen.push(row);
-      size += cost;
+      if (row.external_id !== null) {
+        // Consume a prefix of the session's derived work. The public Blob is still one row.
+        let count = 0;
+        let estimated = size;
+        for (const change of changes) {
+          estimated += cost([change]);
+          if (estimated > 262144) break;
+          count++;
+        }
+        if (!count && chosen.length) break;
+        changes = changes.slice(0, Math.max(1, count));
+      } else if (chosen.length && size + cost(changes) > 262144) break;
+      chosen.push({ ...row, fact_changes: changes });
+      if (changes.some((change) => change.kind !== "noop")) {
+        effort = reasoningEffort.safeParse(row.maintenance_effort).data ?? effort;
+      }
+      size += cost(changes);
       if (size > 262144) break;
     }
     const id = crypto.randomUUID();
@@ -412,7 +455,12 @@ async function seal(
           id,
           key,
           hash,
-          JSON.stringify({ blob_ids: blobIds }),
+          JSON.stringify({
+            blob_ids: blobIds,
+            public_blob_ids: chosen.map((b) => b.external_id ?? b.id),
+            // A session Blob can receive a later Fact flush while this task is still pending.
+            legacy_changes: chosen.filter((b) => b.external_id !== null).flatMap((b) => b.fact_changes),
+          }),
           "processing",
           empty
             ? JSON.stringify({ blob_ids: [], profile_ids: [], event_ids: [] })
@@ -428,7 +476,7 @@ async function seal(
       requestKey: id,
       businessKey: id,
       type: "maintenance_flush",
-      bizParams: {},
+      bizParams: effort === undefined ? {} : { reasoning_effort: effort },
     });
     if (!task) throw new Error("Could not create flush task");
     if (empty) {
@@ -450,8 +498,16 @@ async function seal(
     if (!task) throw new Error("Could not initialize flush task");
     if (blobIds.length)
       await tx.query(
-        "UPDATE memoia.memory_blobs SET flush_operation_id=$3 WHERE user_id=$1 AND project_id=$2 AND id=ANY($4::uuid[])",
-        [...scoped(scope), id, blobIds],
+        `UPDATE memoia.memory_blobs b
+           SET fact_changes=CASE WHEN b.external_id IS NULL THEN b.fact_changes ELSE
+                 COALESCE((SELECT jsonb_agg(change ORDER BY position)
+                   FROM jsonb_array_elements(b.fact_changes) WITH ORDINALITY list(change,position)
+                   WHERE position>picked.used),'[]'::jsonb) END,
+               flush_operation_id=CASE WHEN b.external_id IS NOT NULL AND jsonb_array_length(b.fact_changes)>picked.used
+                 THEN NULL ELSE $3::uuid END
+          FROM unnest($4::uuid[],$5::int[]) AS picked(id,used)
+         WHERE b.user_id=$1 AND b.project_id=$2 AND b.id=picked.id`,
+        [...scoped(scope), id, blobIds, chosen.map((b) => b.fact_changes.length)],
       );
     return projectFlush(row, task);
   });
@@ -510,11 +566,12 @@ export async function retryFlush(
   if (row.status === "processing") await dispatch(runtime, row);
   return receipt(row);
 }
-async function dispatch(runtime: Runtime, row: QueryResultRow) {
+export async function dispatch(runtime: Runtime, row: QueryResultRow) {
   if (runtime.env.MAINTENANCE_ENABLED !== "true" || !runtime.maintenanceWakeup)
     return;
-  const reserved = await runtime.db.transaction((tx) =>
-    maintenanceTasks.reserveDispatchInTx(tx, row.id, 4),
+  const sql: Sql = { query: runtime.db.statement.bind(runtime.db) };
+  const reserved = await maintenanceTasks.reserveDispatchInTx(
+    sql, row.id, row.kind === "fact_flush" ? undefined : maintenanceRetryPolicy.limit,
   );
   if (!reserved) return;
   const delay = Math.max(
@@ -528,7 +585,7 @@ async function dispatch(runtime: Runtime, row: QueryResultRow) {
     await sendWakeup(
       runtime,
       {
-        kind: "flush",
+        kind: row.kind === "fact_flush" ? "fact_flush" : "flush",
         operation_id: row.id,
         user_id: row.user_id,
         project_id: row.project_id,
@@ -536,12 +593,10 @@ async function dispatch(runtime: Runtime, row: QueryResultRow) {
       delay,
     );
     if (reserved.lastDispatchAttemptAt)
-      await runtime.db.transaction((tx) =>
-        maintenanceTasks.acknowledgeDispatchInTx(
-          tx,
-          row.id,
-          reserved.lastDispatchAttemptAt!,
-        ),
+      await maintenanceTasks.acknowledgeDispatchInTx(
+        sql,
+        row.id,
+        reserved.lastDispatchAttemptAt,
       );
   } catch {
     console.warn(
@@ -584,7 +639,7 @@ async function claim(
     });
     if (!task?.leaseId) return null;
     const batches = await tx.query(
-      "SELECT fact_changes FROM memoia.memory_blobs WHERE user_id=$1 AND project_id=$2 AND flush_operation_id=$3 ORDER BY fact_completed_at,id",
+      "SELECT fact_changes FROM memoia.memory_blobs WHERE user_id=$1 AND project_id=$2 AND flush_operation_id=$3 AND external_id IS NULL ORDER BY fact_completed_at,id",
       [...scoped(scope), row.id],
     );
     return {
@@ -656,43 +711,58 @@ function maintenanceEnabled(runtime: Runtime): boolean {
   );
 }
 async function prepareMaintenance(runtime: Runtime) {
-  const expired = await runtime.db
-    .query(`SELECT o.id,o.user_id,o.project_id FROM memoia.memory_operations o JOIN memoia.queue_tasks t ON t.id=o.id
-    WHERE o.kind='flush' AND t.status='running' AND (t.lease_expires_at<=clock_timestamp() OR t.started_at+${HARD_SLICE_MS}*interval '1 millisecond'<=clock_timestamp()) LIMIT 100`);
-  for (const row of expired.rows)
+  const candidates = await runtime.db.statement<{
+    id: string | null;
+    user_id: string;
+    project_id: string;
+    kind: string | null;
+  }>(`WITH expired AS (
+      SELECT o.id,o.user_id,o.project_id,o.kind
+      FROM memoia.memory_operations o JOIN memoia.queue_tasks t ON t.id=o.id
+      WHERE o.kind IN ('flush','fact_flush') AND t.status='running'
+        AND (t.lease_expires_at<=clock_timestamp() OR t.started_at+${HARD_SLICE_MS}*interval '1 millisecond'<=clock_timestamp())
+      LIMIT 100
+    ), due AS (
+      SELECT user_id,project_id
+      FROM memoia.memory_blobs
+      WHERE fact_completed_at IS NOT NULL AND flush_operation_id IS NULL
+      GROUP BY user_id,project_id
+      HAVING least(max(fact_completed_at)+interval '30 seconds',min(fact_completed_at)+interval '120 seconds')<=clock_timestamp()
+      LIMIT 100
+    )
+    SELECT id,user_id,project_id,kind FROM expired
+    UNION ALL
+    SELECT NULL,user_id,project_id,NULL FROM due
+    ORDER BY id NULLS LAST`);
+  for (const row of candidates.rows) {
+    const scope = { userId: row.user_id, projectId: row.project_id };
+    if (row.id === null) {
+      await seal(runtime, scope, `auto-flush:${crypto.randomUUID()}`);
+      continue;
+    }
+    const id = row.id;
     await runtime.db.transaction(async (tx) => {
-      await lockUser(tx, { userId: row.user_id, projectId: row.project_id });
+      await lockUser(tx, scope);
       await maintenanceTasks.revokeInTx(
         tx,
-        row.id,
+        id,
         { code: "maintenance_lease_expired", retryable: true },
-        maintenanceRetryPolicy,
+        row.kind === "fact_flush" ? factFlushRetryPolicy : maintenanceRetryPolicy,
       );
     });
-  const due = await runtime.db
-    .query(`SELECT user_id,project_id FROM memoia.memory_blobs WHERE fact_completed_at IS NOT NULL AND flush_operation_id IS NULL
-    GROUP BY user_id,project_id HAVING least(max(fact_completed_at)+interval '30 seconds',min(fact_completed_at)+interval '120 seconds')<=clock_timestamp() LIMIT 100`);
-  for (const s of due.rows)
-    await seal(
-      runtime,
-      { userId: s.user_id, projectId: s.project_id },
-      `auto-flush:${crypto.randomUUID()}`,
-    );
-  await runtime.db.query(
-    "DELETE FROM memoia.usage_counters WHERE expires_at<=clock_timestamp()",
-  );
+  }
 }
 async function pendingMaintenance(
   runtime: Runtime,
   limit: number,
   notifications: boolean,
 ) {
-  const pending = await runtime.db.query(
+  const pending = await runtime.db.statement(
     `SELECT * FROM (
-    SELECT DISTINCT ON (o.project_id,o.user_id) o.*,t.next_run_at FROM memoia.memory_operations o JOIN memoia.queue_tasks t ON t.id=o.id WHERE o.kind='flush' AND t.status IN ('pending','queued','retry_wait')
+    SELECT DISTINCT ON (o.project_id,o.user_id,o.kind) o.id,o.user_id,o.project_id,o.kind,t.next_run_at FROM memoia.memory_operations o JOIN memoia.queue_tasks t ON t.id=o.id WHERE o.kind IN ('flush','fact_flush') AND t.status IN ('pending','queued','retry_wait')
     AND t.next_run_at<=clock_timestamp() AND (NOT $1::boolean OR t.next_dispatch_at IS NULL OR t.next_dispatch_at<=clock_timestamp())
-    AND NOT EXISTS(SELECT 1 FROM memoia.memory_operations held JOIN memoia.queue_tasks ht ON ht.id=held.id WHERE held.project_id=o.project_id AND held.user_id=o.user_id AND held.kind='flush' AND ht.status='running')
-    ORDER BY o.project_id,o.user_id,t.next_run_at,o.id) candidates ORDER BY next_run_at,id LIMIT $2`,
+    AND NOT EXISTS(SELECT 1 FROM memoia.memory_operations held JOIN memoia.queue_tasks ht ON ht.id=held.id WHERE held.project_id=o.project_id AND held.user_id=o.user_id AND held.kind=o.kind AND ht.status='running')
+    ORDER BY o.project_id,o.user_id,o.kind,t.next_run_at,o.id) candidates ORDER BY next_run_at,id LIMIT $2`,
     [notifications, limit],
   );
   return pending.rows;
@@ -708,14 +778,14 @@ export async function reconcile(runtime: Runtime) {
 export async function pollMaintenance(
   runtime: Runtime,
   limit = 4,
-): Promise<Extract<Wakeup, { kind: "flush" }>[]> {
+): Promise<Extract<Wakeup, { kind: "flush" | "fact_flush" }>[]> {
   if (!Number.isInteger(limit) || limit < 0 || limit > 100)
     throw new RangeError("Invalid maintenance poll limit");
   if (!maintenanceEnabled(runtime)) return [];
   await prepareMaintenance(runtime);
   if (limit === 0) return [];
   return (await pendingMaintenance(runtime, limit, false)).map((row) => ({
-    kind: "flush",
+    kind: row.kind === "fact_flush" ? "fact_flush" : "flush",
     operation_id: row.id,
     user_id: row.user_id,
     project_id: row.project_id,
@@ -727,6 +797,10 @@ export async function consume(runtime: Runtime, message: Wakeup) {
     runtime.env.MAINTENANCE_ENABLED !== "true"
   )
     return;
+  if (message.kind === "fact_flush") {
+    await (await import("./fact-flush.js")).consumeFactFlush(runtime, message);
+    return;
+  }
   if (message.kind === "user") {
     const result = await runtime.db.query(
       `SELECT least(max(fact_completed_at)+interval '30 seconds',min(fact_completed_at)+interval '120 seconds') AS due
@@ -808,6 +882,9 @@ export async function consume(runtime: Runtime, message: Wakeup) {
             version: MAINTENANCE_CHECKPOINT_VERSION,
             prompt: await maintenancePromptHash(),
             config: context.config,
+            ...(context.effortOverride === undefined
+              ? {}
+              : { reasoning_effort: context.effortOverride }),
             provider: {
               modelBaseUrl: runtime.env.OPENAI_BASE_URL ?? null,
               embeddingBaseUrl: runtime.env.EMBEDDING_BASE_URL ?? null,
@@ -1009,6 +1086,14 @@ export class MaintenanceContext {
   readonly seen = new Set<number>();
   readonly unresolved = new Map<string, string | null>();
   config!: Awaited<ReturnType<typeof getConfig>>;
+  get effortOverride() {
+    const params = this.claim.task?.bizParams;
+    return reasoningEffort.safeParse(
+      params && typeof params === "object" && !Array.isArray(params)
+        ? params.reasoning_effort
+        : undefined,
+    ).data;
+  }
   constructor(
     readonly runtime: Runtime,
     readonly claim: Claim,

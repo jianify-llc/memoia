@@ -94,6 +94,7 @@ export function sourceObservations(
 }
 
 export interface SourceMessage {
+  visual_description?: string;
   message_id: string;
   role: "user" | "assistant" | "system" | "tool";
   content: string;
@@ -256,6 +257,8 @@ export function validateFacts(raw: unknown, messages: SourceMessage[]): Fact[] {
 export function normalizeExtraction(
   raw: any,
   messages: SourceMessage[],
+  requireFullCoverage = true,
+  evidence = messages,
 ): Fact[] {
   const userIds = messages
     .filter((m) => m.role === "user")
@@ -263,9 +266,9 @@ export function normalizeExtraction(
   if (
     !hasKeys(raw, ["messages"]) ||
     !Array.isArray(raw.messages) ||
-    raw.messages.length !== userIds.length ||
+    (requireFullCoverage && raw.messages.length !== userIds.length) ||
     new Set(raw.messages.map((b: any) => b.message_id)).size !==
-      userIds.length ||
+      raw.messages.length ||
     raw.messages.some(
       (b: any) =>
         !hasKeys(b, ["message_id", "facts"]) ||
@@ -278,7 +281,7 @@ export function normalizeExtraction(
   const facts: Fact[] = [];
   for (const id of userIds)
     for (const fact of raw.messages.find((b: any) => b.message_id === id)
-      .facts) {
+      ?.facts ?? []) {
       if (
         !hasKeys(fact, [
           "content",
@@ -298,5 +301,5 @@ export function normalizeExtraction(
       const { any_of, ...rest } = fact;
       facts.push({ ...rest, support_groups: any_of.map((g: any) => g.all_of) });
     }
-  return validateFacts({ facts }, messages);
+  return validateFacts({ facts }, evidence);
 }

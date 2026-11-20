@@ -1,3 +1,4 @@
+import { type SliceBudget, TaskLeaseLost, TaskYield } from "@jianify/legato";
 import {
   pythonHash,
   pythonJson,
@@ -19,7 +20,8 @@ import {
 } from "./db";
 import { embeddings, getConfig } from "./models";
 import { recordChanges, notifyUser, progress } from "./maintenance";
-import { projectOperation, projectOperations } from "./maintenance-task";
+import { projectOperation, projectOperations, maintenanceRetryPolicy, maintenanceTasks } from "./maintenance-task";
+import { runFactAgent } from "./fact-agent";
 import {
   extractSource,
   validateFactTime,
@@ -28,6 +30,7 @@ import {
 import { isIP } from "node:net";
 import {
   evidenceTime,
+  validateFacts,
   retainedGroups,
   supportedFactTime,
   renderSearchFact,
@@ -35,7 +38,7 @@ import {
 } from "./temporal";
 import { SourceError } from "./errors";
 import { sourceObservations } from "./temporal";
-import { readServiceConfig } from "./config";
+import { readServiceConfig, reasoningEffort, type ReasoningEffort } from "./config";
 
 function inputRetention(runtime: Runtime) {
   return readServiceConfig(runtime.env.MEMOIA_CONFIG)
@@ -48,7 +51,7 @@ function publicOperation(row: any) {
     kind: row.kind,
     status: row.status,
     source_id: row.source_id,
-    blob_id: row.blob_id,
+    blob_id: row.external_id ?? row.blob_id,
     result: row.result,
     error: row.error,
     flush: row.kind === "flush" ? progress(row) : null,
@@ -60,8 +63,8 @@ export async function getOperation(
   selector: { operationId?: string; key?: string },
 ) {
   const { rows } = await runtime.db.query(
-    "SELECT * FROM memoia.memory_operations WHERE user_id=$1 AND project_id=$2 AND " +
-      (selector.operationId ? "id=$3" : "idempotency_key=$3"),
+    "SELECT o.*,b.external_id FROM memoia.memory_operations o LEFT JOIN memoia.memory_blobs b ON b.id=o.blob_id WHERE o.user_id=$1 AND o.project_id=$2 AND " +
+      (selector.operationId ? "o.id=$3" : "o.idempotency_key=$3"),
     [scope.userId, scope.projectId, selector.operationId ?? selector.key],
   );
   if (!rows.length)
@@ -105,7 +108,7 @@ async function publicBlobs(runtime: Runtime, scope: UserScope, rows: any[]) {
       ? row.operation_status
       : row.status;
     return {
-      blob_id: row.id,
+      blob_id: row.external_id ?? row.id,
       source_id: row.source_id,
       status,
       message_ids: row.message_ids,
@@ -131,7 +134,7 @@ export async function getBlob(
   scope: UserScope,
   blobId: string,
 ) {
-  const { rows } = await runtime.db.query(blobQuery + " AND b.id=$3", [
+  const { rows } = await runtime.db.query(blobQuery + " AND (b.external_id=$3 OR (b.external_id IS NULL AND b.id::text=lower($3)))", [
     scope.userId,
     scope.projectId,
     blobId,
@@ -182,7 +185,7 @@ export async function getSource(
       [...params, limit + 1, blobOffset],
     ),
     runtime.db.query(
-      "SELECT f.* FROM memoia.memory_facts f JOIN memoia.memory_blobs b ON b.id=f.blob_id WHERE f.user_id=$1 AND f.project_id=$2 AND b.source_id=$3 ORDER BY f.occurred_at,f.id LIMIT $4 OFFSET $5",
+      "SELECT f.*,b.external_id FROM memoia.memory_facts f JOIN memoia.memory_blobs b ON b.id=f.blob_id WHERE f.user_id=$1 AND f.project_id=$2 AND b.source_id=$3 ORDER BY f.occurred_at,f.id LIMIT $4 OFFSET $5",
       [...params, limit + 1, evidenceOffset],
     ),
   ]);
@@ -208,7 +211,7 @@ export async function getSource(
     blobs: await publicBlobs(runtime, scope, blobs.rows.slice(0, limit)),
     evidence: selected.map((f) => ({
       fact_id: f.id,
-      blob_id: f.blob_id,
+      blob_id: f.external_id ?? f.blob_id,
       content: f.content,
       topic: f.topic,
       sub_topic: f.sub_topic,
@@ -316,19 +319,19 @@ export async function listOperations(
   offset = 0,
 ) {
   const { rows } = await runtime.db.query(
-    "SELECT * FROM memoia.memory_operations WHERE user_id=$1 AND project_id=$2 ORDER BY created_at DESC,id LIMIT $3 OFFSET $4",
+    "SELECT o.*,b.external_id FROM memoia.memory_operations o LEFT JOIN memoia.memory_blobs b ON b.id=o.blob_id WHERE o.user_id=$1 AND o.project_id=$2 ORDER BY o.created_at DESC,o.id LIMIT $3 OFFSET $4",
     [scope.userId, scope.projectId, limit, offset],
   );
   return (await projectOperations(runtime.db, rows)).map(publicOperation);
 }
-type ImportInput = {
+export type ImportInput = {
   idempotency_key: string;
   source_id: string;
   messages: SourceMessage[];
   metadata?: Record<string, unknown>;
+  maintenance_reasoning_effort?: ReasoningEffort;
 };
 type DeleteInput = { idempotency_key: string; message_ids: string[] };
-type LegacyBuffers = { buffer_ids: string[]; blob_ids: string[] };
 const canonical = (v: any): any =>
   Array.isArray(v)
     ? v.map(canonical)
@@ -407,10 +410,12 @@ async function register(
   kind: "import" | "retract",
   sourceId: string,
   payload: any,
-  legacyBuffers?: LegacyBuffers,
   retryReceipt?: { id: string; hash: string },
+  staged = false,
+  effort?: ReasoningEffort,
 ) {
-  const digest = retryReceipt?.hash ?? (await hash({ kind, request: payload }));
+  const operationKind = staged ? "append" : kind;
+  const digest = retryReceipt?.hash ?? (await hash({ kind: operationKind, request: payload }));
   const uid = scope.userId,
     pid = scope.projectId;
   return runtime.db.transaction(async (tx) => {
@@ -446,20 +451,23 @@ async function register(
         409,
         true,
       );
-    if (existing && existing.request_hash !== digest)
+    if (existing && (existing.kind !== operationKind || existing.request_hash !== digest))
       throw new SourceError(
         "idempotency_conflict",
         "Idempotency key was used for a different request",
         409,
       );
+    if (existing && staged) return { ...existing, external_id: sourceId };
     await tx.query(
-      "INSERT INTO memoia.memory_sources (user_id,project_id,source_id,legacy) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
-      [uid, pid, sourceId, sourceId.startsWith("v1-flush:")],
+      "INSERT INTO memoia.memory_sources (user_id,project_id,source_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+      [uid, pid, sourceId],
     );
+    const novel = new Set<string>();
+    let hasLiveInput = false;
     if (kind === "import" && (!existing || existing.status !== "completed")) {
       const messages = payload.messages as SourceMessage[];
       const rows = await tx.query(
-        "SELECT message_id,content_hash,time_zone FROM memoia.memory_messages WHERE user_id=$1 AND project_id=$2 AND source_id=$3 AND message_id=ANY($4::text[])",
+        "SELECT message_id,content_hash,time_zone,deleted,processed FROM memoia.memory_messages WHERE user_id=$1 AND project_id=$2 AND source_id=$3 AND message_id=ANY($4::text[])",
         [uid, pid, sourceId, messages.map((m) => m.message_id)],
       );
       const known = new Map(rows.rows.map((row) => [row.message_id, row]));
@@ -477,6 +485,10 @@ async function register(
             "Message identity has different content, image, role or recording time",
             409,
           );
+        if (!row?.deleted) {
+          hasLiveInput = true;
+          if (!row?.processed) novel.add(m.message_id);
+        }
         if (!row) inserts.push({ message: m, digest });
         else if (!row.time_zone && m.time_zone) enrichments.push(m);
       }
@@ -508,20 +520,6 @@ async function register(
     }
     if (existing) {
       if (
-        legacyBuffers &&
-        existing.status !== "completed" &&
-        !existing.request?.legacy_buffers
-      ) {
-        existing.request = {
-          ...existing.request,
-          legacy_buffers: legacyBuffers,
-        };
-        await tx.query(
-          "UPDATE memoia.memory_operations SET request=jsonb_set(request,'{legacy_buffers}',$2::jsonb,true) WHERE id=$1",
-          [existing.id, JSON.stringify(legacyBuffers)],
-        );
-      }
-      if (
         kind === "import" &&
         !canProcess(existing) &&
         canProcess(existing, true) &&
@@ -532,64 +530,62 @@ async function register(
           "UPDATE memoia.memory_operations SET request=$2::jsonb,input_expires_at=clock_timestamp()+$3::double precision*interval '1 second' WHERE id=$1",
           [
             existing.id,
-            pythonJson({
-              ...storedImport(payload),
-              ...(existing.request?.legacy_buffers
-                ? { legacy_buffers: existing.request.legacy_buffers }
-                : {}),
-            }),
+            pythonJson(storedImport(payload)),
             inputRetention(runtime),
           ],
         );
       return existing;
     }
-    const blobId = crypto.randomUUID(),
-      opId = crypto.randomUUID();
+    const opId = crypto.randomUUID();
     const mids =
       kind === "import"
         ? payload.messages.map((m: SourceMessage) => m.message_id)
         : payload.message_ids;
-    await tx.query(
-      "INSERT INTO memoia.memory_blobs (id,user_id,project_id,source_id,kind,message_ids,status) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)",
-      [
-        blobId,
-        uid,
-        pid,
-        sourceId,
-        kind,
-        JSON.stringify(mids),
-        kind === "import" ? "active" : "retracted",
-      ],
+    const blob = await tx.query(
+      `INSERT INTO memoia.memory_blobs AS b
+         (id,user_id,project_id,source_id,kind,message_ids,status,external_id)
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)
+       ON CONFLICT (user_id,project_id,external_id) WHERE external_id IS NOT NULL
+       DO UPDATE SET status=CASE WHEN EXCLUDED.status='active' THEN 'active' ELSE b.status END,message_ids=(
+         SELECT jsonb_agg(value ORDER BY position) FROM (
+           SELECT value,min(ordinality) AS position
+           FROM jsonb_array_elements(b.message_ids || EXCLUDED.message_ids) WITH ORDINALITY
+           GROUP BY value
+         ) ids
+       )
+       RETURNING id`,
+      [crypto.randomUUID(), uid, pid, sourceId, kind, JSON.stringify(mids),
+        kind === "import" && (!staged || hasLiveInput) ? "active" : "retracted", staged ? sourceId : null],
     );
+    const blobId = blob.rows[0].id;
     if (kind === "retract")
       for (const id of mids)
         await tx.query(
           "INSERT INTO memoia.memory_messages (user_id,project_id,source_id,message_id,deleted) VALUES ($1,$2,$3,$4,true) ON CONFLICT DO NOTHING",
           [uid, pid, sourceId, id],
         );
-    const saved =
-      kind === "import"
-        ? {
-            ...storedImport(payload),
-            ...(legacyBuffers ? { legacy_buffers: legacyBuffers } : {}),
-          }
-        : payload;
+    const saved = kind === "import" ? storedImport({
+      ...payload,
+      messages: staged ? payload.messages.filter((m: SourceMessage) => novel.has(m.message_id)) : payload.messages,
+      ...(effort === undefined ? {} : { maintenance_reasoning_effort: effort }),
+    }) : payload;
     const result = await tx.query(
-      "INSERT INTO memoia.memory_operations (id,user_id,project_id,idempotency_key,kind,request_hash,request,source_id,blob_id,status,input_expires_at) VALUES ($1,$2,$3,$4,$5::varchar,$6,$7::jsonb,$8,$9,'processing',CASE WHEN $5::varchar='import' THEN clock_timestamp()+$10::double precision*interval '1 second' ELSE NULL END) RETURNING *",
+      "INSERT INTO memoia.memory_operations (id,user_id,project_id,idempotency_key,kind,request_hash,request,source_id,blob_id,status,input_expires_at) VALUES ($1,$2,$3,$4,$5::varchar,$6,$7::jsonb,$8,$9,$11,CASE WHEN $5::varchar IN ('import','append') THEN clock_timestamp()+$10::double precision*interval '1 second' ELSE NULL END) RETURNING *",
       [
         opId,
         uid,
         pid,
         payload.idempotency_key,
-        kind,
+        operationKind,
         digest,
         pythonJson(saved),
         sourceId,
         blobId,
         inputRetention(runtime),
+        staged ? "staged" : "processing",
       ],
     );
-    return result.rows[0];
+    return { ...result.rows[0], external_id: staged ? sourceId : null };
   });
 }
 async function runLeased<T>(
@@ -644,21 +640,29 @@ async function markFailure(
     ],
   );
 }
+export async function stageImport(runtime: Runtime, scope: UserScope, input: ImportInput) {
+  validateImport(input);
+  if (input.messages.some((message) => message.images?.length))
+    throw new SourceError("invalid_input", "Fact import accepts text only", 422);
+  const payload = importPayload(input);
+  return publicOperation(await register(
+    runtime, scope, "import", payload.source_id, payload, undefined, true, input.maintenance_reasoning_effort,
+  ));
+}
+
 export async function importSource(
   runtime: Runtime,
   scope: UserScope,
   input: ImportInput,
   explicitRetry = false,
-  legacyBuffers?: LegacyBuffers,
 ) {
-  return processImport(runtime, scope, input, explicitRetry, legacyBuffers);
+  return processImport(runtime, scope, input, explicitRetry);
 }
 async function processImport(
   runtime: Runtime,
   scope: UserScope,
   input: ImportInput,
   explicitRetry: boolean,
-  legacyBuffers?: LegacyBuffers,
   retryReceipt?: { id: string; hash: string },
 ) {
   validateImport(input);
@@ -669,7 +673,6 @@ async function processImport(
     "import",
     payload.source_id,
     payload,
-    legacyBuffers,
     retryReceipt,
   );
   if (
@@ -733,47 +736,8 @@ async function processImport(
               fingerprint
               ? current.request.fact_review_candidate
               : null;
-          let cleanup: LegacyBuffers | undefined =
-            current.request?.legacy_buffers;
-          if (
-            !cleanup &&
-            payload.source_id.startsWith("legacy:") &&
-            payload.idempotency_key.startsWith("v1-flush:")
-          ) {
-            const source = (
-              await tx.query(
-                "SELECT legacy FROM memoia.memory_sources WHERE user_id=$1 AND project_id=$2 AND source_id=$3",
-                [scope.userId, scope.projectId, payload.source_id],
-              )
-            ).rows[0];
-            if (source?.legacy) {
-              const ids = payload.messages
-                .map((m) => m.message_id.split(":", 1)[0])
-                .filter((id) =>
-                  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-                    id,
-                  ),
-                );
-              if (ids.length) {
-                const buffers = (
-                  await tx.query(
-                    "SELECT id,blob_id FROM memoia.buffer_zones WHERE user_id=$1 AND project_id=$2 AND blob_type='chat' AND blob_id=ANY($3::uuid[])",
-                    [scope.userId, scope.projectId, ids],
-                  )
-                ).rows;
-                if (buffers.length)
-                  cleanup = {
-                    buffer_ids: buffers.map((b) => b.id),
-                    blob_ids: [
-                      ...new Set(buffers.map((b) => b.blob_id)),
-                    ].sort(),
-                  };
-              }
-            }
-          }
           const request = {
             ...storedImport(payload),
-            ...(cleanup ? { legacy_buffers: cleanup } : {}),
             ...(saved ? { fact_review_candidate: saved } : {}),
           };
           await tx.query(
@@ -790,11 +754,10 @@ async function processImport(
             newIds,
             fingerprint,
             candidate: saved?.extraction,
-            cleanup,
           };
         });
         if ("done" in state) return state.done!;
-        const { active, newIds, fingerprint, candidate, cleanup } = state;
+        const { active, newIds, fingerprint, candidate } = state;
         let extracted = newIds.size
           ? await extractSource(
               { ...runtime, operationId: op.id },
@@ -862,69 +825,7 @@ async function processImport(
           );
         const result = await runtime.db.transaction(async (tx) => {
           await assertUserLease(tx, lease);
-          const version = Number(lease.version) + 1;
-          const changes = [];
-          for (const [i, f] of extracted.entries()) {
-            await tx.query(
-              "INSERT INTO memoia.memory_facts (id,user_id,project_id,blob_id,content,subject,reporter,certainty,support_groups,occurred_at,fact_time,search_text,embedding,created_version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11::jsonb,$12,$13::vector,$14)",
-              [
-                f.id,
-                scope.userId,
-                scope.projectId,
-                op.blob_id,
-                f.content,
-                f.subject,
-                f.reporter,
-                f.certainty,
-                JSON.stringify(f.support_groups),
-                f.occurred_at,
-                JSON.stringify(f.fact_time),
-                renderSearchFact(f.content, f.fact_time),
-                vectors[i] ? `[${vectors[i]!.join(",")}]` : null,
-                version,
-              ],
-            );
-            changes.push({ fact_id: f.id, kind: "added" });
-          }
-          await tx.query(
-            "UPDATE memoia.memory_messages SET processed=true WHERE user_id=$1 AND project_id=$2 AND source_id=$3 AND message_id=ANY($4::text[])",
-            [scope.userId, scope.projectId, payload.source_id, [...newIds]],
-          );
-          await tx.query(
-            "UPDATE memoia.memory_blobs SET status=$2 WHERE id=$1",
-            [op.blob_id, active.length ? "active" : "retracted"],
-          );
-          const output = {
-            event_ids: [],
-            profile_ids: [],
-            fact_ids: extracted.map((f) => f.id),
-            memory_version: version,
-          };
-          await recordChanges(tx, scope, op.blob_id, version, changes);
-          await tx.query(
-            "UPDATE memoia.memory_operations SET status='completed',result=$2::jsonb,error=NULL,request=$3::jsonb,input_expires_at=NULL WHERE id=$1",
-            [
-              op.id,
-              JSON.stringify(output),
-              JSON.stringify({
-                source_id: payload.source_id,
-                idempotency_key: payload.idempotency_key,
-              }),
-            ],
-          );
-          if (cleanup) {
-            await tx.query(
-              "UPDATE memoia.buffer_zones SET status='done' WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])",
-              [scope.userId, scope.projectId, cleanup.buffer_ids],
-            );
-            await tx.query(
-              "DELETE FROM memoia.general_blobs WHERE user_id=$1 AND project_id=$2 AND blob_type='chat' AND id=ANY($3::uuid[])",
-              [scope.userId, scope.projectId, cleanup.blob_ids],
-            );
-          }
-          assertRunning(runtime);
-          await finishUserLease(tx, lease);
-          return output;
+          return commitImportedFacts(runtime, tx, scope, { id: op.id, blob_id: op.blob_id, idempotency_key: op.idempotency_key }, payload.source_id, lease, active, newIds, extracted, vectors);
         });
         await notifyUser(runtime, scope);
         return {
@@ -944,6 +845,288 @@ async function processImport(
     throw error;
   }
 }
+async function insertFacts(
+  tx: Sql,
+  scope: UserScope,
+  blobId: string,
+  version: number,
+  facts: Awaited<ReturnType<typeof extractSource>>,
+  vectors: (number[] | null)[],
+) {
+  if (facts.length) await tx.query(
+    `INSERT INTO memoia.memory_facts
+       (id,user_id,project_id,blob_id,content,subject,reporter,certainty,support_groups,occurred_at,fact_time,search_text,embedding,created_version)
+     SELECT f.id,$1,$2,$3,f.content,f.subject,f.reporter,f.certainty,f.support_groups,
+            f.occurred_at,nullif(f.fact_time,'null'::jsonb),f.search_text,f.embedding::vector,$4
+       FROM jsonb_to_recordset($5::jsonb) AS f(id uuid,content text,subject text,reporter text,
+         certainty text,support_groups jsonb,occurred_at timestamptz,fact_time jsonb,search_text text,embedding text)`,
+    [scope.userId, scope.projectId, blobId, version, JSON.stringify(facts.map((fact, i) => ({
+      ...fact,
+      search_text: renderSearchFact(fact.content, fact.fact_time),
+      embedding: vectors[i] ? `[${vectors[i]!.join(",")}]` : null,
+    })))],
+  );
+  return facts.map((f) => ({ fact_id: f.id, kind: "added" as const }));
+}
+async function commitImportedFacts(
+  runtime: Runtime,
+  tx: Sql,
+  scope: UserScope,
+  op: { id: string; blob_id: string; idempotency_key: string; maintenance_reasoning_effort?: ReasoningEffort },
+  sourceId: string,
+  lease: UserLease,
+  active: SourceMessage[],
+  newIds: Set<string>,
+  extracted: Awaited<ReturnType<typeof extractSource>>,
+  vectors: (number[] | null)[],
+) {
+  const version = Number(lease.version) + 1;
+  const changes = await insertFacts(tx, scope, op.blob_id, version, extracted, vectors);
+  await tx.query(
+    "UPDATE memoia.memory_messages SET processed=true WHERE user_id=$1 AND project_id=$2 AND source_id=$3 AND message_id=ANY($4::text[])",
+    [scope.userId, scope.projectId, sourceId, [...newIds]],
+  );
+  await tx.query(
+    "UPDATE memoia.memory_blobs SET status=$2 WHERE id=$1",
+    [op.blob_id, active.length ? "active" : "retracted"],
+  );
+  const output = {
+    event_ids: [],
+    profile_ids: [],
+    fact_ids: extracted.map((f) => f.id),
+    memory_version: version,
+  };
+  await recordChanges(tx, scope, op.blob_id, version, changes);
+  const completed = await tx.query(
+    `UPDATE memoia.memory_operations SET status='completed', result=$2::jsonb, error=NULL,
+       request=$3::jsonb, input_expires_at=NULL, available_at=NULL
+     WHERE id=$1 AND status='processing'`,
+    [
+      op.id,
+      JSON.stringify(output),
+      JSON.stringify({
+        source_id: sourceId,
+        idempotency_key: op.idempotency_key,
+        ...(op.maintenance_reasoning_effort === undefined ? {} : { maintenance_reasoning_effort: op.maintenance_reasoning_effort }),
+      }),
+    ],
+  );
+  if (!completed.rowCount) throw new TaskYield();
+  assertRunning(runtime);
+  await finishUserLease(tx, lease);
+  return output;
+}
+type PreparedAppend = {
+  input_revision: string;
+  facts: Awaited<ReturnType<typeof extractSource>>;
+  vectors: (number[] | null)[];
+};
+
+type MessageSearch = { ids: string[] | null; query: string | null; offset: number };
+
+// Overlap across upload receipts is harmless. The first occurrence within the
+// sealed set owns the model decision. A later flush filters committed message IDs.
+const pendingInputs = `WITH inputs AS (
+  SELECT DISTINCT ON (m.message_id) a.id AS append_id,a.created_at,a.user_id,a.project_id,a.source_id,
+    m.message_id,input.message,input.position
+  FROM memoia.memory_operations a
+  CROSS JOIN LATERAL jsonb_array_elements(a.request->'messages') WITH ORDINALITY AS input(message, position)
+  JOIN memoia.memory_messages m ON m.user_id=a.user_id AND m.project_id=a.project_id
+    AND m.source_id=a.source_id AND m.message_id=input.message->>'message_id'
+  WHERE a.fact_flush_id=$1 AND a.status='processing' AND a.input_expires_at>clock_timestamp()
+    AND NOT m.deleted AND NOT m.processed
+  ORDER BY m.message_id,a.created_at,a.id,input.position
+)`;
+
+export async function prepareFactAppend(
+  runtime: Runtime,
+  scope: UserScope,
+  flushId: string,
+  owner: string,
+  appendId: string,
+  budget: SliceBudget,
+): Promise<void> {
+  const { rows: [op] } = await runtime.db.statement(
+    `SELECT o.*,coalesce(f.request->>'input_revision','0') AS input_revision
+       FROM memoia.memory_operations o JOIN memoia.memory_operations f ON f.id=o.fact_flush_id
+      WHERE o.id=$1 AND o.user_id=$2 AND o.project_id=$3 AND o.fact_flush_id=$4
+        AND o.status='processing' AND o.input_expires_at>clock_timestamp()`,
+    [appendId, scope.userId, scope.projectId, flushId],
+  );
+  if (!op || op.request.fact_prepared?.input_revision === op.input_revision) return;
+  const messagesFor = async (filter: MessageSearch) => {
+    const { rows } = await runtime.db.statement<{ message: SourceMessage }>(
+      `${pendingInputs} SELECT message FROM inputs
+       WHERE ($2::text[] IS NULL OR message_id=ANY($2))
+         AND ($3::text IS NULL OR strpos(lower(message->>'content'),lower($3))>0
+              OR strpos(lower(message->>'visual_description'),lower($3))>0)
+       ORDER BY created_at,append_id,position LIMIT 11 OFFSET $4`,
+      [flushId, filter.ids, filter.query, filter.offset],
+    );
+    return { messages: rows.slice(0, 10).map((r) => r.message),
+      next_offset: rows.length === 11 ? filter.offset + 10 : null };
+  };
+  const { rows: primary } = await runtime.db.statement<{ message: SourceMessage }>(
+    `${pendingInputs} SELECT message FROM inputs WHERE append_id=$2 ORDER BY position`,
+    [flushId, appendId],
+  );
+  const messages = primary.map((r) => r.message);
+  const evidenceById = async (ids: string[]) => {
+    if (!ids.length) return [];
+    return (await runtime.db.statement<{ message: SourceMessage }>(
+      `${pendingInputs} SELECT message FROM inputs WHERE message_id=ANY($2::text[])`,
+      [flushId, ids],
+    )).rows.map((r) => r.message);
+  };
+  const assertFactInput = async () => {
+    budget.assertActive();
+    const current = await runtime.db.statement(
+      `SELECT 1 FROM memoia.memory_operations o
+         JOIN memoia.memory_operations f ON f.id=o.fact_flush_id JOIN memoia.queue_tasks t ON t.id=o.fact_flush_id
+        WHERE o.id=$1 AND t.id=$2 AND t.status='running' AND t.lease_id=$3
+          AND t.lease_expires_at>clock_timestamp() AND coalesce(f.request->>'input_revision','0')=$4
+          AND o.status='processing' AND o.input_expires_at>clock_timestamp()`,
+      [appendId, flushId, owner, op.input_revision],
+    );
+    if (!current.rowCount) throw new TaskYield();
+  };
+  const save = async (key: string, value: object) => {
+    await runtime.db.transaction(async (tx) => {
+      budget.assertActive();
+      await lockIdentity(tx, scope);
+      await maintenanceTasks.assertOwnedInTx(tx, flushId, owner, true);
+      const changed = await tx.query(
+        `UPDATE memoia.memory_operations o
+            SET request=jsonb_set(o.request,ARRAY[$2::text],$3::jsonb),error=NULL,available_at=NULL
+           FROM memoia.memory_operations f
+          WHERE o.id=$1 AND o.fact_flush_id=f.id AND coalesce(f.request->>'input_revision','0')=$4 AND o.status='processing'
+            AND o.input_expires_at>clock_timestamp()`,
+        [appendId, key, JSON.stringify({ ...value, input_revision: op.input_revision }), op.input_revision],
+      );
+      if (!changed.rowCount) throw new TaskYield();
+    });
+  };
+  try {
+    const operationRuntime = { ...runtime, operationId: appendId };
+    const stored = op.request.fact_review_candidate;
+    const staged = op.request.fact_draft;
+    const usableDraft = staged?.input_revision === op.input_revision ? staged : null;
+    let extracted: Awaited<ReturnType<typeof extractSource>>;
+    if (stored?.input_revision === op.input_revision) extracted = stored.facts;
+    else {
+      const facts = await runFactAgent(operationRuntime, scope.projectId, messages, budget, usableDraft?.draft ?? null,
+        (draft, evidenceIds) => save("fact_draft", { draft, evidenceIds }), assertFactInput,
+        { search: messagesFor, previousEvidence: await evidenceById(usableDraft?.evidenceIds ?? []) },
+      );
+      const evidence = await evidenceById([...new Set(facts.flatMap((fact) => fact.support_groups.flat()))]);
+      await assertFactInput();
+      extracted = validateFacts({ facts }, evidence).map((fact) => ({
+        ...fact, id: crypto.randomUUID(), occurred_at: evidenceTime(fact.support_groups, evidence),
+      }));
+      await save("fact_review_candidate", { facts: extracted });
+    }
+    if (budget.shouldYield(30_000)) throw new TaskYield();
+    const config = extracted.length ? await getConfig(runtime, scope.projectId) : null;
+    let vectors: (number[] | null)[] = extracted.map(() => null);
+    if (config?.enable_event_embedding) {
+      await assertFactInput();
+      vectors = await embeddings({ ...operationRuntime, deadline: budget.softDeadlineAt - 15_000 },
+        scope.projectId, extracted.map((f) => renderSearchFact(f.content, f.fact_time)));
+    }
+    if (vectors.length !== extracted.length)
+      throw new SourceError("embedding_unavailable", "Embedding count mismatch", 503, true);
+    await save("fact_prepared", { facts: extracted, vectors });
+  } catch (error) {
+    if (!(error instanceof SourceError) ||
+        !["input_too_long", "invalid_model_output", "fact_model_input_rejected",
+          "fact_model_unavailable", "fact_no_progress", "embedding_input_too_long",
+          "embedding_unavailable"].includes(error.code)) throw error;
+    const attempts = Number(op.attempts) + 1;
+    const retry = error.retryable && attempts < maintenanceRetryPolicy.limit;
+    await runtime.db.transaction(async (tx) => {
+      await lockIdentity(tx, scope);
+      await maintenanceTasks.assertOwnedInTx(tx, flushId, owner, true);
+      await tx.query(
+        `UPDATE memoia.memory_operations o SET attempts=$2,
+           status=CASE WHEN $3::boolean THEN 'processing' ELSE 'failed' END,
+           available_at=CASE WHEN $3 THEN clock_timestamp()+$4*interval '1 minute' END,
+           error=$5::jsonb,
+           request=CASE WHEN $7 THEN o.request ELSE jsonb_build_object(
+             'source_id',o.source_id,'idempotency_key',o.idempotency_key) END,
+           input_expires_at=CASE WHEN $7 THEN o.input_expires_at END
+         FROM memoia.memory_operations f WHERE o.id=$1 AND f.id=o.fact_flush_id
+             AND coalesce(f.request->>'input_revision','0')=$6
+           AND o.status='processing' AND o.input_expires_at>clock_timestamp()`,
+        [appendId, attempts, retry, retry ? maintenanceRetryPolicy.delays[attempts - 1] : null,
+          JSON.stringify({ code: error.code, retryable: error.retryable }), op.input_revision, error.retryable],
+      );
+    });
+  }
+}
+
+export async function commitFactFlush(
+  runtime: Runtime, scope: UserScope, flushId: string, owner: string, budget: SliceBudget,
+) {
+  const output = await runLeased(runtime, scope, (lease) => runtime.db.transaction(async (tx) => {
+    await assertUserLease(tx, lease);
+    await maintenanceTasks.assertOwnedInTx(tx, flushId, owner, true);
+    const { rows } = await tx.query<{ blob_id: string; prepared: PreparedAppend | null }>(
+      `SELECT a.blob_id, CASE WHEN a.status='processing' AND a.input_expires_at>clock_timestamp()
+                AND a.request->'fact_prepared'->>'input_revision'=coalesce(f.request->>'input_revision','0')
+                THEN a.request->'fact_prepared' END AS prepared
+         FROM memoia.memory_operations a JOIN memoia.memory_operations f ON f.id=a.fact_flush_id
+        WHERE a.fact_flush_id=$1 AND a.user_id=$2 AND a.project_id=$3
+        ORDER BY a.created_at,a.id`,
+      [flushId, scope.userId, scope.projectId],
+    );
+    const first = rows[0];
+    if (!first || rows.some((row) => !row.prepared)) throw new TaskYield();
+    const version = Number(lease.version) + 1;
+    const facts: PreparedAppend["facts"] = [];
+    const vectors: PreparedAppend["vectors"] = [];
+    const seen = new Set<string>();
+    for (const { prepared } of rows) {
+      budget.assertActive();
+      for (const [index, fact] of prepared!.facts.entries()) {
+        const { id: _id, support_groups, ...attributes } = fact;
+        const key = pythonJson({
+          ...attributes,
+          support_groups: support_groups.map((group) => [...group].sort()).map(pythonJson).sort(),
+        });
+        if (seen.has(key)) continue;
+        seen.add(key);
+        facts.push(fact);
+        vectors.push(prepared!.vectors[index] ?? null);
+      }
+    }
+    const changes = await insertFacts(tx, scope, first.blob_id, version, facts, vectors);
+    await tx.query(
+      `${pendingInputs}
+       UPDATE memoia.memory_messages target SET processed=true FROM inputs
+        WHERE target.user_id=inputs.user_id AND target.project_id=inputs.project_id
+          AND target.source_id=inputs.source_id AND target.message_id=inputs.message_id`,
+      [flushId],
+    );
+    const output = { event_ids: [], profile_ids: [], fact_ids: changes.map((c) => c.fact_id), memory_version: version };
+    const updated = await tx.query(
+      `UPDATE memoia.memory_operations SET status='completed',result=$2::jsonb,error=NULL,
+          request=jsonb_build_object('source_id',source_id,'idempotency_key',idempotency_key),
+          input_expires_at=NULL,available_at=NULL
+        WHERE fact_flush_id=$1 AND status='processing' AND input_expires_at>clock_timestamp()`,
+      [flushId, JSON.stringify(output)],
+    );
+    if (updated.rowCount !== rows.length) throw new TaskYield();
+    if (changes.length) await recordChanges(tx, scope, first.blob_id, version, changes, true);
+    budget.assertActive();
+    if (!await maintenanceTasks.completeInTx(tx, flushId, owner, {
+      resultCode: "COMPLETED", result: output, executionState: null,
+    })) throw new TaskLeaseLost();
+    await finishUserLease(tx, lease);
+    return output;
+  }));
+  if (output.fact_ids.length) await notifyUser(runtime, scope);
+}
+
 async function scrubHistory(tx: Sql, scope: UserScope, changed: Set<string>) {
   if (!changed.size) return;
   const { rows } = await tx.query(
@@ -1075,6 +1258,37 @@ export async function deleteMessages(
         });
         const result = await runtime.db.transaction(async (tx) => {
           await assertUserLease(tx, lease);
+          const retracted = await tx.query(
+            `UPDATE memoia.memory_operations o
+                SET request=jsonb_set(o.request-'fact_draft'-'fact_review_candidate'-'fact_prepared','{messages}',
+                  COALESCE((SELECT jsonb_agg(m.value ORDER BY m.ordinality)
+                    FROM jsonb_array_elements(o.request->'messages') WITH ORDINALITY m(value,ordinality)
+                    WHERE NOT (m.value->>'message_id'=ANY($4::text[]))), '[]'::jsonb))
+              WHERE o.user_id=$1 AND o.project_id=$2 AND o.source_id=$3 AND o.kind IN ('import','append')
+                AND (o.status IN ('staged','processing') OR (o.status='failed' AND o.fact_flush_id IS NOT NULL))
+                AND o.request->'messages' IS NOT NULL
+                AND EXISTS (SELECT 1 FROM jsonb_array_elements(o.request->'messages') m
+                  WHERE m->>'message_id'=ANY($4::text[]))
+              RETURNING o.blob_id, o.fact_flush_id`,
+            [scope.userId, scope.projectId, sourceId, input.message_ids],
+          );
+          // Extraction can read any evidence in its fixed range. A later unsealed append
+          // cannot invalidate that range, even when it uses the same session Blob.
+          const flushes = [...new Set(retracted.rows.map((r) => r.fact_flush_id).filter(Boolean))];
+          if (flushes.length) {
+            await tx.query(
+              `UPDATE memoia.memory_operations
+                SET request=jsonb_set(request,'{input_revision}',
+                  to_jsonb(coalesce((request->>'input_revision')::bigint,0)+1))
+                WHERE id=ANY($1::uuid[])`,
+              [flushes],
+            );
+            await tx.query(
+              `UPDATE memoia.memory_operations SET request=request-'fact_draft'-'fact_review_candidate'-'fact_prepared'
+                WHERE fact_flush_id=ANY($1::uuid[]) AND status IN ('processing','failed')`,
+              [flushes],
+            );
+          }
           const version = Number(lease.version) + 1;
           for (const id of input.message_ids)
             await tx.query(
@@ -1099,16 +1313,17 @@ export async function deleteMessages(
               ],
             );
           await scrubHistory(tx, scope, new Set(rows.map((f) => f.id)));
-          for (const b of blobs)
-            await tx.query(
-              "UPDATE memoia.memory_blobs SET status=$2 WHERE id=$1",
-              [
-                b.id,
-                b.message_ids.every((id: string) => withdrawn.has(id))
-                  ? "retracted"
-                  : "active",
-              ],
-            );
+          // Appends can commit while deletion computes embeddings. Derive status from
+          // the live membership under the final identity lock, after writing tombstones.
+          await tx.query(
+            `UPDATE memoia.memory_blobs b SET status=CASE WHEN EXISTS (
+                SELECT 1 FROM memoia.memory_messages m
+                WHERE m.user_id=b.user_id AND m.project_id=b.project_id AND m.source_id=b.source_id
+                  AND b.message_ids ? m.message_id AND NOT m.deleted
+              ) THEN 'active' ELSE 'retracted' END
+              WHERE b.user_id=$1 AND b.project_id=$2 AND b.source_id=$3 AND b.message_ids ?| $4::text[]`,
+            [scope.userId, scope.projectId, sourceId, input.message_ids],
+          );
           const changes = [
             ...removed.map((f) => ({ fact_id: f.id, kind: "deleted" })),
             ...surviving.map((f) => ({ fact_id: f.id, kind: "evidence" })),
@@ -1572,20 +1787,20 @@ async function correctFact(
   }
 }
 export async function purgeExpiredInputs(runtime: Runtime) {
-  await runtime.db.transaction(
-    async (tx) => {
-      await tx.query(
-        "UPDATE memoia.memory_operations SET request=jsonb_build_object('source_id',source_id,'idempotency_key',idempotency_key),input_expires_at=NULL WHERE kind='import' AND input_expires_at<=clock_timestamp()",
-      );
-      await tx.query(
-        "UPDATE memoia.memory_operations SET request=request-'content'-'subject'-'reporter'-'certainty'-'support_groups'-'fact_time',input_expires_at=NULL,error=CASE WHEN status='processing' THEN jsonb_build_object('code','input_required','retryable',false) ELSE error END,status=CASE WHEN status='processing' THEN 'failed' ELSE status END WHERE kind='correct' AND status<>'completed' AND (input_expires_at<=clock_timestamp() OR (input_expires_at IS NULL AND status='processing'))",
-      );
-      await tx.query(
-        "DELETE FROM memoia.general_blobs WHERE blob_type='chat' AND created_at<clock_timestamp()-$1::double precision*interval '1 second'",
-        [inputRetention(runtime)],
-      );
-    },
-    { operation: "purge_expired_inputs" },
+  await runtime.db.statement(
+    `UPDATE memoia.memory_operations
+        SET request=CASE WHEN kind IN ('import','append')
+              THEN jsonb_build_object('source_id',source_id,'idempotency_key',idempotency_key)
+              ELSE request-'content'-'subject'-'reporter'-'certainty'-'support_groups'-'fact_time' END,
+            input_expires_at=NULL,available_at=NULL,
+            error=CASE WHEN (kind='correct' AND status='processing') OR (kind IN ('import','append') AND status IN ('staged','processing'))
+              THEN jsonb_build_object('code','input_required','retryable',false) ELSE error END,
+            status=CASE WHEN (kind='correct' AND status='processing') OR (kind IN ('import','append') AND status IN ('staged','processing')) THEN 'failed' ELSE status END
+      WHERE (kind IN ('import','append') AND input_expires_at<=clock_timestamp())
+         OR (kind='correct' AND status<>'completed'
+             AND (input_expires_at<=clock_timestamp() OR (input_expires_at IS NULL AND status='processing')))`,
+    undefined,
+    "purge_expired_inputs",
   );
 }
 export async function retryOperation(
@@ -1601,6 +1816,12 @@ export async function retryOperation(
   ).rows[0];
   if (!op)
     throw new SourceError("operation_not_found", "Operation not found", 404);
+  if (op.kind === "fact_flush") {
+    const { retryFactFlush } = await import("./fact-flush");
+    return retryFactFlush(runtime, scope, operationId);
+  }
+  if (op.kind === "append" || op.fact_flush_id || op.status === "staged")
+    return getOperation(runtime, scope, { operationId });
   if (op.kind === "flush") {
     const { retryFlush } = await import("./maintenance");
     return retryFlush(runtime, scope, operationId);
@@ -1626,9 +1847,13 @@ export async function retryOperation(
         "Image input is not stored; query the receipt and resupply the original batch and key",
         409,
       );
-    const { legacy_buffers, fact_review_candidate, ...body } = op.request;
-    body.metadata = parseImportMetadata(op.request_text);
-    return processImport(runtime, scope, body, true, legacy_buffers, {
+    const body: ImportInput = {
+      source_id: op.request.source_id,
+      idempotency_key: op.request.idempotency_key,
+      messages: op.request.messages,
+      metadata: parseImportMetadata(op.request_text),
+    };
+    return processImport(runtime, scope, body, true, {
       id: op.id,
       hash: op.request_hash,
     });
@@ -1805,6 +2030,7 @@ function validateImage(
 function validateImport(input: ImportInput) {
   if (
     !input ||
+    !reasoningEffort.optional().safeParse(input.maintenance_reasoning_effort).success ||
     !validKey(input.idempotency_key) ||
     !validKey(input.source_id) ||
     !Array.isArray(input.messages) ||
@@ -1847,7 +2073,11 @@ function validateImport(input: ImportInput) {
     )
       invalidInput("Invalid image attachments");
     for (const image of message.images ?? []) validateImage(image);
-    if (!message.content && !message.images?.length)
+    if (message.visual_description !== undefined &&
+        (typeof message.visual_description !== "string" || !message.visual_description.trim() || message.visual_description.length > 4096 ||
+          /https?:\/\/|data:image\//i.test(message.visual_description)))
+      invalidInput("Invalid visual description");
+    if (!message.content && !message.images?.length && !message.visual_description)
       invalidInput("Message requires text or an image");
   }
 }

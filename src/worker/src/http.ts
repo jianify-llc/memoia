@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Runtime, RuntimeEnv } from "./runtime";
 import { closeRuntime } from "./runtime";
-import { SourceError } from "./errors";
+import { ExpiredAppendInputs, SourceError } from "./errors";
 import { InactiveUserError, LeaseLostError } from "./db";
 import { authenticate, allows, requiredScope, type Principal } from "./auth";
 import * as management from "./management";
@@ -136,7 +136,7 @@ function page(c: C, defaults: Record<string, number>): Record<string, number> {
   return out;
 }
 function receipt(c: C, result: any) {
-  return c.json(result, result.status === "processing" ? 202 : 200);
+  return c.json(result, ["processing", "staged"].includes(result.status) ? 202 : 200);
 }
 
 export function createApp(
@@ -151,6 +151,7 @@ export function createApp(
             code: error.code,
             message: error.message,
             retryable: error.retryable,
+            ...(error instanceof ExpiredAppendInputs && { append_operation_ids: error.appendOperationIds }),
           },
         },
         error.status as any,
@@ -266,7 +267,7 @@ export function createApp(
     if (env.MEMOIA_HEALTHCHECK_DB_TRACE === "true" && tracing) {
       const {
         rows: [backend],
-      } = await db.query<{
+      } = await db.statement<{
         pid: number;
         started_at_ms: number;
       }>(
@@ -288,7 +289,7 @@ export function createApp(
         } catch {}
       }
     } else {
-      await db.query("SELECT 1", undefined, "healthcheck");
+      await db.statement("SELECT 1", undefined, "healthcheck");
     }
     return c.json({ status: "ok" });
   });
@@ -409,8 +410,13 @@ export function createApp(
       c,
       await (
         await factApi()
-      ).importSource(runtime(c), scope(c), await body(c, "Import")),
+      ).stageImport(runtime(c), scope(c), await body(c, "Import")),
     ),
+  );
+  app.post("/api/users/:user_id/blobs/:blob_id/flush", async (c) =>
+    receipt(c, await (await import("./fact-flush.js")).flushBlob(
+      runtime(c), scope(c), c.req.param("blob_id"), await body(c, "FactFlushInput"),
+    )),
   );
   app.get("/api/users/:user_id/operations", async (c) => {
     const p = page(c, { limit: 50, offset: 0 });
@@ -502,7 +508,7 @@ export function createApp(
     c.json(
       await (
         await factApi()
-      ).getBlob(runtime(c), scope(c), pathUuid(c, "blob_id")),
+      ).getBlob(runtime(c), scope(c), c.req.param("blob_id")),
     ),
   );
   app.put("/api/users/:user_id/facts/:fact_id", async (c) =>

@@ -91,10 +91,13 @@ test(
         21,
       );
       const counters = await db.query(
-        "SELECT period_type, value::text AS value FROM memoia.usage_counters WHERE project_id=$1 ORDER BY period_type, name",
+        `SELECT expires_at = period_start + CASE period_type
+          WHEN 'day' THEN interval '30 days' ELSE interval '1 month' END AS expected_expiry
+        FROM memoia.usage_counters WHERE project_id=$1`,
         [projectId],
       );
       assert.equal(counters.rowCount, 4);
+      assert.ok(counters.rows.every((row) => row.expected_expiry));
     } finally {
       await db.query("DELETE FROM memoia.projects WHERE project_id=$1", [
         projectId,

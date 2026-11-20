@@ -1,5 +1,5 @@
 import type { Runtime } from "./runtime";
-import type { Sql, UserScope } from "./db";
+import { USAGE_HISTORY_DAYS, type Sql, type UserScope } from "./db";
 import { SourceError } from "./errors";
 import { sourceObservations } from "./temporal";
 import { embeddings, countTokens, getConfig as getModelConfig } from "./models";
@@ -98,7 +98,7 @@ async function factRows(tx: Sql, scope: UserScope, ids: string[]) {
   if (!ids.length) return [];
   return (
     await tx.query(
-      `SELECT f.*,b.source_id FROM memoia.memory_facts f JOIN memoia.memory_blobs b
+      `SELECT f.*,b.source_id,b.external_id FROM memoia.memory_facts f JOIN memoia.memory_blobs b
     ON b.id=f.blob_id AND b.user_id=f.user_id AND b.project_id=f.project_id
     WHERE f.user_id=$1 AND f.project_id=$2 AND f.id=ANY($3::uuid[])`,
       [...params(scope), ids],
@@ -127,7 +127,7 @@ async function evidence(tx: Sql, scope: UserScope, rows: any[]) {
       row.id,
       {
         fact_id: row.id,
-        blob_id: row.blob_id,
+        blob_id: row.external_id ?? row.blob_id,
         content: row.content,
         topic: row.topic,
         sub_topic: row.sub_topic,
@@ -327,7 +327,7 @@ function factEntry(row: any, proof: any, score: number) {
     id: row.id,
     content: row.content,
     source_id: row.source_id,
-    blob_id: row.blob_id,
+    blob_id: row.external_id ?? row.blob_id,
     score,
     occurred_at: row.occurred_at,
     created_at: row.created_at,
@@ -1146,7 +1146,7 @@ export async function getUsage(
     FROM generate_series(0,$2::int-1) n LEFT JOIN memoia.usage_counters c ON c.project_id=$1
       AND c.period_type='day' AND c.period_start=current_date-n AND c.expires_at>now()
     GROUP BY n ORDER BY n`,
-    [projectId, days],
+    [projectId, Math.min(days, USAGE_HISTORY_DAYS)],
   );
   return {
     usages: r.rows.map((row) => ({

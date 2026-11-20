@@ -20,7 +20,7 @@
         "producers": [{ "binding": "MAINTENANCE_QUEUE", "queue": "luvel-memoia-maintenance-test" }],
         "consumers": [{ "queue": "luvel-memoia-maintenance-test", "max_batch_size": 1, "max_concurrency": 4, "max_retries": 3 }]
       },
-      "triggers": { "crons": ["* * * * *"] }
+      "triggers": { "crons": ["* * * * *", "*/5 * * * *", "0 0 * * *"] }
     }
   }
 }

@@ -8,7 +8,7 @@ import {
 import { consume, reconcile } from "./maintenance.js";
 import { purgeExpiredInputs } from "./facts.js";
 import { inSpan } from "./observability.js";
-import { InactiveUserError } from "./db.js";
+import { InactiveUserError, purgeExpiredUsage } from "./db.js";
 
 const app = createApp(createCloudflareRuntime);
 export default {
@@ -37,7 +37,7 @@ export default {
       );
       try {
         const kind =
-          message.body.kind === "user" || message.body.kind === "flush"
+          ["user", "flush", "fact_flush"].includes(message.body.kind)
             ? message.body.kind
             : "unknown";
         await inSpan(runtime.tracing, "memoia.queue", { kind }, () =>
@@ -77,7 +77,7 @@ export default {
     }
   },
   async scheduled(
-    _event: ScheduledController,
+    event: ScheduledController,
     env: CloudflareRuntimeEnv,
     ctx?: ExecutionContext,
   ) {
@@ -86,10 +86,25 @@ export default {
       Object.assign(Object.create(env), { tracing: ctx?.tracing }),
     );
     try {
-      await inSpan(runtime.tracing, "memoia.cron", {}, async () => {
-        await purgeExpiredInputs(runtime);
-        await reconcile(runtime);
-      });
+      if (event.cron === "0 0 * * *") {
+        await inSpan(
+          runtime.tracing,
+          "memoia.cron",
+          { job: "usage_cleanup" },
+          () => purgeExpiredUsage(runtime.db),
+        );
+      } else if (event.cron === "*/5 * * * *") {
+        await inSpan(
+          runtime.tracing,
+          "memoia.cron",
+          { job: "input_cleanup" },
+          () => purgeExpiredInputs(runtime),
+        );
+      } else {
+        await inSpan(runtime.tracing, "memoia.cron", { job: "reconcile" }, () =>
+          reconcile(runtime),
+        );
+      }
     } finally {
       await closeRuntime(runtime);
     }

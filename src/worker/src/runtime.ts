@@ -10,6 +10,12 @@ export type Wakeup =
       operation_id: string;
       user_id: string;
       project_id: string;
+    }
+  | {
+      kind: "fact_flush";
+      operation_id: string;
+      user_id: string;
+      project_id: string;
     };
 export interface MaintenanceWakeup {
   send(message: Wakeup, delaySeconds: number): Promise<void>;

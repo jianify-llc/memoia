@@ -223,12 +223,6 @@ test("configured input retention preserves live retries and purges expired input
       "UPDATE memoia.memory_operations SET input_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
       [first.id],
     );
-    const oldBlob = randomUUID(),
-      recentBlob = randomUUID();
-    await db.query(
-      "INSERT INTO memoia.general_blobs(id,user_id,project_id,blob_type,blob_data,created_at) VALUES ($1,$3,$4,'chat','{}'::jsonb,clock_timestamp()-interval '60 seconds'),($2,$3,$4,'chat','{}'::jsonb,clock_timestamp())",
-      [oldBlob, recentBlob, scope.userId, projectId],
-    );
     await purgeExpiredInputs(runtime);
     const purged = await read();
     assert.equal(purged.input_expires_at, null);
@@ -236,15 +230,6 @@ test("configured input retention preserves live retries and purges expired input
       source_id: request.source_id,
       idempotency_key: request.idempotency_key,
     });
-    assert.deepEqual(
-      (
-        await db.query(
-          "SELECT id FROM memoia.general_blobs WHERE id=ANY($1::uuid[])",
-          [[oldBlob, recentBlob]],
-        )
-      ).rows.map((row) => row.id),
-      [recentBlob],
-    );
     await assert.rejects(importSource(runtime, scope, request));
     const restored = await read();
     assert.equal(restored.id, first.id);
@@ -450,44 +435,6 @@ test("fixed imports, evidence retraction, corrections and forgetting commit atom
     assert.equal(
       (await importSource(runtime, scope, request)).operation_id,
       imported.operation_id,
-    );
-    const legacyBlob = randomUUID(),
-      legacyBuffer = randomUUID();
-    await db.query(
-      "INSERT INTO memoia.general_blobs(id,user_id,project_id,blob_type,blob_data) VALUES ($1,$2,$3,'chat','{}'::jsonb)",
-      [legacyBlob, userId, projectId],
-    );
-    await db.query(
-      "INSERT INTO memoia.buffer_zones(id,user_id,project_id,blob_id,blob_type,token_size,status) VALUES ($1,$2,$3,$4,'chat',1,'processing')",
-      [legacyBuffer, userId, projectId, legacyBlob],
-    );
-    assert.equal(
-      (
-        await importSource(
-          runtime,
-          scope,
-          { ...request, idempotency_key: "legacy-cleanup" },
-          false,
-          { buffer_ids: [legacyBuffer], blob_ids: [legacyBlob] },
-        )
-      ).status,
-      "completed",
-    );
-    assert.equal(
-      (
-        await db.query("SELECT id FROM memoia.general_blobs WHERE id=$1", [
-          legacyBlob,
-        ])
-      ).rowCount,
-      0,
-    );
-    assert.equal(
-      (
-        await db.query("SELECT id FROM memoia.buffer_zones WHERE id=$1", [
-          legacyBuffer,
-        ])
-      ).rowCount,
-      0,
     );
     await assert.rejects(
       importSource(runtime, scope, {

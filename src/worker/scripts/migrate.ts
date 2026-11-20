@@ -217,8 +217,6 @@ async function main() {
       "project_billings",
       "project_api_keys",
       "users",
-      "general_blobs",
-      "buffer_zones",
       "user_profiles",
       "user_events",
       "user_statuses",
@@ -251,8 +249,10 @@ async function main() {
         table === "memory_user_states"
           ? ["writer_lease_until"]
           : table === "memory_operations"
-            ? ["dispatch_reserved_until"]
-            : [];
+            ? ["dispatch_reserved_until", "fact_flush_id"]
+            : table === "memory_blobs"
+              ? ["external_id", "input_revision"]
+              : [];
       if (
         !sourceCols.rowCount ||
         sourceCols.rows.some(

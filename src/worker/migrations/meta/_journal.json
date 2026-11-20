@@ -29,6 +29,27 @@
       "when": 1793765878927,
       "tag": "0003_task_unknown_legacy_time",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795068496288,
+      "tag": "0004_usage_history_retention",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1795077318794,
+      "tag": "0005_fact_flush",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1795095611656,
+      "tag": "0006_session_blob",
+      "breakpoints": true
     }
   ]
 }

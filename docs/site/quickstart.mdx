@@ -10,8 +10,15 @@ const receipt = await client.importBlob(userId, {
   idempotency_key: fixedBatchKey,
   messages: [{ message_id: messageId, role: "user", content: "I enjoy cycling.", occurred_at: messageTimestamp }]
 });
+if (receipt.status === "staged" && receipt.blob_id) {
+  const flush = await client.flushBlob(userId, dialogId, {
+    idempotency_key: fixedFlushKey, append_operation_ids: [receipt.operation_id],
+  });
+  // Check the original receipt later and inspect each Blob result.
+  const progress = await client.getOperation(userId, flush.operation_id);
+}
 ```
 
-The source groups related batches. Keep the key, message IDs, content and original timestamps unchanged across a business retry. `completed` confirms Facts and the durable receipt; automatic flush maintains Profiles and Events asynchronously. After an unknown acknowledgement, query the original Operation before retrying.
+The source groups related batches. Keep the key, message IDs, content and original timestamps unchanged across a business retry. `staged` confirms receipt of temporary input, and each completed Blob in the Fact flush receipt confirms Fact storage; automatic flush maintains Profiles and Events asynchronously. After an unknown acknowledgement, query the original Operation before retrying.
 
 `search` returns separate `facts`, `events` and `profiles`, within a complete-entry token budget (8192 by default). Independent query methods can filter each collection. Delete source messages to remove their memory contribution; correct an existing Fact using its revision when human review finds an error. Deleting an Event affects only that Event. Deleting a user permanently forgets the identity.

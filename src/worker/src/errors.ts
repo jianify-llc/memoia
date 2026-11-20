@@ -10,3 +10,10 @@ export class SourceError extends Error {
     this.name = "SourceError";
   }
 }
+
+/** The requested range was rejected before any append was assigned to a flush. */
+export class ExpiredAppendInputs extends SourceError {
+  constructor(readonly appendOperationIds: string[]) {
+    super("expired_append_inputs", "Some append inputs expired before the Fact flush was accepted", 409);
+  }
+}

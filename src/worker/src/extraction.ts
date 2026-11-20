@@ -89,7 +89,7 @@ export async function extractSource(
   }));
 }
 
-function localDate(value: string, zone: string): string {
+export function localDate(value: string, zone: string): string {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: zone,
     year: "numeric",

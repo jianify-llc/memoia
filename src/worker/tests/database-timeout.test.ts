@@ -229,14 +229,14 @@ test("traces distinguish checkout, PostgreSQL rejection at BEGIN, and local dead
   await slow.db.close();
 });
 
-test("healthcheck returns a safe 503 when PostgreSQL rejects checkout or BEGIN", async () => {
+test("healthcheck returns a safe 503 when PostgreSQL rejects checkout or the standalone query", async () => {
   const rejected = Object.assign(
     new pg.DatabaseError("private-role-canary", 0, "error"),
     {
       code: "53300",
     },
   );
-  for (const phase of ["checkout", "begin"]) {
+  for (const phase of ["checkout", "query"]) {
     const queries: string[] = [];
     const { db, releases } = fixture(
       async (sql) => {
@@ -261,7 +261,7 @@ test("healthcheck returns a safe 503 when PostgreSQL rejects checkout or BEGIN",
         retryable: true,
       },
     });
-    assert.deepEqual(queries, phase === "checkout" ? [] : ["BEGIN"]);
+    assert.deepEqual(queries, phase === "checkout" ? [] : ["SELECT 1"]);
     assert.deepEqual(releases, phase === "checkout" ? [] : [true]);
   }
 });
@@ -326,8 +326,12 @@ test("healthcheck records the origin session only when enabled", async () => {
     const response = await app.request("/api/healthcheck");
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { status: "ok" });
-    assert.equal(queries.length, 4);
-    assert.equal(queries[2]?.includes("pg_backend_pid()"), enabled);
+    assert.equal(queries.length, 1);
+    if (enabled) {
+      assert.match(queries[0]!, /pg_backend_pid\(\)/);
+    } else {
+      assert.deepEqual(queries, ["SELECT 1"]);
+    }
     assert.deepEqual(
       attributes,
       enabled

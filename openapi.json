@@ -421,7 +421,7 @@
         "tags": [
           "sources"
         ],
-        "summary": "Import Source",
+        "summary": "Stage an import Blob",
         "operationId": "importBlob",
         "parameters": [
           {
@@ -447,6 +447,16 @@
         },
         "responses": {
           "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "202": {
             "description": "Successful Response",
             "content": {
               "application/json": {
@@ -879,7 +889,6 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid",
               "title": "Blob Id"
             }
           }
@@ -2146,6 +2155,124 @@
           }
         }
       }
+    },
+    "/api/users/{user_id}/blobs/{blob_id}/flush": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Flush a fixed range of a session Blob",
+        "operationId": "flushBlob",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          },
+          {
+            "name": "blob_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FactFlushInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The range was rejected. If an append expired, its Operation ID is identified.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ExpiredAppendInputsError"
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "detail"
+                      ],
+                      "properties": {
+                        "detail": {
+                          "type": "object",
+                          "required": [
+                            "code",
+                            "message",
+                            "retryable"
+                          ],
+                          "properties": {
+                            "code": {
+                              "type": "string",
+                              "not": {
+                                "const": "expired_append_inputs"
+                              }
+                            },
+                            "message": {
+                              "type": "string"
+                            },
+                            "retryable": {
+                              "type": "boolean"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "description": "Freeze the supplied append receipts and enqueue Fact extraction for one Blob."
+      }
     }
   },
   "components": {
@@ -2154,7 +2281,6 @@
         "properties": {
           "blob_id": {
             "type": "string",
-            "format": "uuid",
             "title": "Blob Id"
           },
           "source_id": {
@@ -2723,7 +2849,6 @@
           },
           "blob_id": {
             "type": "string",
-            "format": "uuid",
             "title": "Blob Id"
           },
           "content": {
@@ -3056,8 +3181,7 @@
           },
           "blob_ids": {
             "items": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             },
             "type": "array",
             "title": "Blob Ids"
@@ -3110,8 +3234,7 @@
         "properties": {
           "blob_ids": {
             "items": {
-              "type": "string",
-              "format": "uuid"
+              "type": "string"
             },
             "type": "array",
             "title": "Blob Ids"
@@ -3444,6 +3567,18 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Metadata"
+          },
+          "maintenance_reasoning_effort": {
+            "type": "string",
+            "enum": [
+              "none",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ],
+            "description": "Optional maintenance-only effort. The first accepted import fixes its value. When no selected Blob supplies an override, the project setting applies."
           }
         },
         "additionalProperties": false,
@@ -3725,7 +3860,9 @@
               "retract",
               "correct",
               "legacy_import",
-              "flush"
+              "flush",
+              "fact_flush",
+              "append"
             ],
             "title": "Kind",
             "default": "import"
@@ -3735,7 +3872,8 @@
             "enum": [
               "processing",
               "completed",
-              "failed"
+              "failed",
+              "staged"
             ],
             "title": "Status"
           },
@@ -3753,8 +3891,7 @@
           "blob_id": {
             "anyOf": [
               {
-                "type": "string",
-                "format": "uuid"
+                "type": "string"
               },
               {
                 "type": "null"
@@ -4466,8 +4603,7 @@
           "blob_id": {
             "anyOf": [
               {
-                "type": "string",
-                "format": "uuid"
+                "type": "string"
               },
               {
                 "type": "null"
@@ -4596,7 +4732,6 @@
           },
           "blob_id": {
             "type": "string",
-            "format": "uuid",
             "title": "Blob Id"
           },
           "score": {
@@ -4925,26 +5060,6 @@
         "title": "Source"
       },
       "SourceMessage": {
-        "if": {
-          "properties": {
-            "content": {
-              "const": ""
-            }
-          },
-          "required": [
-            "content"
-          ]
-        },
-        "then": {
-          "properties": {
-            "images": {
-              "minItems": 1
-            }
-          },
-          "required": [
-            "images"
-          ]
-        },
         "properties": {
           "message_id": {
             "type": "string",
@@ -4967,14 +5082,6 @@
             "maxLength": 262144,
             "title": "Content"
           },
-          "images": {
-            "items": {
-              "$ref": "#/components/schemas/ImageAttachment"
-            },
-            "type": "array",
-            "maxItems": 1,
-            "title": "Images"
-          },
           "occurred_at": {
             "type": "string",
             "format": "date-time",
@@ -4991,6 +5098,10 @@
               }
             ],
             "title": "Time Zone"
+          },
+          "visual_description": {
+            "type": "string",
+            "maxLength": 4096
           }
         },
         "additionalProperties": false,
@@ -5365,6 +5476,69 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "ExpiredAppendInputsError": {
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "object",
+            "required": [
+              "code",
+              "message",
+              "retryable",
+              "append_operation_ids"
+            ],
+            "properties": {
+              "code": {
+                "const": "expired_append_inputs"
+              },
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "const": false
+              },
+              "append_operation_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            }
+          }
+        }
+      },
+      "FactFlushInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "append_operation_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "append_operation_ids"
+        ]
       }
     },
     "securitySchemes": {

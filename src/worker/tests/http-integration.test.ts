@@ -365,6 +365,13 @@ test(
       assert.equal(usage.status, 200);
       assert.ok(validators.validateUsage(usage.data));
       assert.equal(usage.data.usages.length, 7);
+      const extendedUsage = await api(
+        "GET",
+        "/api/project/usage?last_days=365",
+        reader,
+      );
+      assert.equal(extendedUsage.status, 200);
+      assert.equal(extendedUsage.data.usages.length, 30);
       assert.equal(
         (
           await api("PATCH", "/api/project/config", reader, {
