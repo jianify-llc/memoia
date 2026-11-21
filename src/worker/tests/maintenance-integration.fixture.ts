@@ -215,7 +215,7 @@ test("maintenance repairs required legacy support atomically, preserves history,
         action: "upsert",
         id: event,
         content: "Retained valid legacy story",
-        fact_ids: [facts[1]],
+        fact_ids: [facts[2]],
       },
     ]);
     const replacement = (await ctx.read("events", [event])).items[0];
@@ -224,7 +224,7 @@ test("maintenance repairs required legacy support atomically, preserves history,
     assert.equal(replacement.title, undefined);
     assert.equal(replacement.interpretation, undefined);
     assert.equal(replacement.support_unknown, false);
-    assert.deepEqual(replacement.fact_ids, [facts[1]]);
+    assert.deepEqual(replacement.fact_ids, [facts[2]]);
     assert.equal(
       (await ctx.read("events", null, null, "Old title")).items.length,
       0,
@@ -253,6 +253,11 @@ test("maintenance repairs required legacy support atomically, preserves history,
     assert.equal(data._impact_fact_ids, null);
     assert.equal(data.source_id, "dialog");
     assert.equal(data.blob_id, blob);
+    assert.deepEqual(
+      (await db.query("SELECT fact_id FROM memoia.memory_event_facts WHERE event_id=$1", [event]))
+        .rows.map((row) => row.fact_id),
+      [facts[2]],
+    );
     const readBack = await getEvents(runtime, scope, 100, 7);
     assert.ok(validators.validateEvents(JSON.parse(JSON.stringify(readBack))));
     assert.equal(
@@ -263,7 +268,7 @@ test("maintenance repairs required legacy support atomically, preserves history,
       readBack.events.find((r: any) => r.id === event)?.event_data.blob_id,
       blob,
     );
-    const eventSupport = [facts[1]];
+    const eventSupport = [facts[2]];
     for (const sourceId of ["dialog", "other"]) {
       if (sourceId === "other")
         await db.query(

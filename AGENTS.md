@@ -6,4 +6,4 @@
 
 公司统一分支与发布规范见 [Jianify-LLC 的 branch-release.md](https://github.com/jianify-llc/Jianify-LLC/blob/main/docs/engineering/branch-release.md)。Memoia 的 Test 与 Online 使用独立工作流；普通开发／Test push 不运行 Actions，Test 由负责人明确手动启动验收批次，Online 由 `release` 的 `v*` 标签触发并等待 `online` Environment 审批。
 
-SQL defaults to standalone statements. Open explicit transactions only when an invariant requires them. See [database statements and transactions](docs/development.md#database-statements-and-transactions).
+SQL defaults to standalone statements. Queue tasks must release database transactions and checked-out connections before model calls, external I/O, or retry waits. See [database statements and transactions](docs/development.md#database-statements-and-transactions).

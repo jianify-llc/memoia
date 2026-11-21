@@ -1382,7 +1382,125 @@ try {
       );
     }
   });
-  await test("lost successful COMMIT response reads original task without replaying writes or model", async () => {
+  await test("publication resumes after lost Event and Profile responses without repeating writes or model calls", async (t) => {
+    const scope = await user();
+    const blob = await batch(scope, "added");
+    const op = await flush(runtime, scope, "partial-publication");
+    const factId = (
+      await db.query("SELECT id FROM memoia.memory_facts WHERE blob_id=$1", [
+        blob,
+      ])
+    ).rows[0].id;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      if (calls === 1)
+        return toolResponse("stage_event", {
+          changes: [
+            {
+              action: "upsert",
+              content: "Visited the library",
+              fact_ids: ["f1"],
+            },
+          ],
+        });
+      if (calls === 2)
+        return toolResponse("stage_profile", {
+          changes: [
+            {
+              action: "upsert",
+              content: "Enjoys reading",
+              topic: "interests_preferences",
+              sub_topic: "reading",
+              fact_ids: ["f1"],
+            },
+          ],
+        });
+      assert.equal(
+        calls,
+        3,
+        "resume the completed checkpoint without another model call",
+      );
+      return response();
+    };
+    const query = db.query.bind(db);
+    let eventWrites = 0,
+      profileWrites = 0;
+    t.mock.method(
+      db,
+      "query",
+      async (statement: string, values?: unknown[]) => {
+        const result = await query(statement, values);
+        if (
+          statement.includes("INSERT INTO memoia.user_events") &&
+          ++eventWrites === 1
+        )
+          throw new DatabaseUnavailableError();
+        if (
+          statement.includes("INSERT INTO memoia.user_profiles") &&
+          ++profileWrites === 1
+        )
+          throw new DatabaseUnavailableError();
+        return result;
+      },
+    );
+    const readback = async () => {
+      const events = (
+        await db.query(
+          "SELECT e.id,e.revision,e.event_data,ef.fact_id FROM memoia.user_events e JOIN memoia.memory_event_facts ef ON ef.event_id=e.id AND ef.user_id=e.user_id AND ef.project_id=e.project_id WHERE e.user_id=$1 AND e.project_id=$2",
+          [scope.userId, scope.projectId],
+        )
+      ).rows;
+      const profiles = (
+        await db.query(
+          "SELECT id,revision,content FROM memoia.user_profiles WHERE user_id=$1 AND project_id=$2",
+          [scope.userId, scope.projectId],
+        )
+      ).rows;
+      return { events, profiles };
+    };
+    const makeDue = () =>
+      db.query(
+        "UPDATE memoia.queue_tasks SET next_run_at=clock_timestamp()-interval '1 second' WHERE id=$1",
+        [op.operation_id],
+      );
+    await consume(runtime, wake(scope, op.operation_id));
+    const partial = await readback();
+    assert.equal(partial.events.length, 1);
+    assert.equal(partial.events[0].fact_id, factId);
+    assert.deepEqual(partial.events[0].event_data.fact_ids, [factId]);
+    assert.equal(partial.events[0].event_data.content, "Visited the library");
+    assert.equal(partial.profiles.length, 0);
+    assert.equal((await operationState(op.operation_id)).status, "processing");
+    await makeDue();
+    await consume(runtime, wake(scope, op.operation_id));
+    const applied = await readback();
+    assert.deepEqual(applied.events, partial.events);
+    assert.equal(applied.profiles.length, 1);
+    assert.equal(applied.profiles[0].content, "Enjoys reading");
+    assert.equal((await operationState(op.operation_id)).status, "processing");
+    await makeDue();
+    await consume(runtime, wake(scope, op.operation_id));
+    const done = await operationState(op.operation_id);
+    assert.equal(done.status, "completed");
+    assert.deepEqual(done.result.profile_ids, [applied.profiles[0].id]);
+    assert.deepEqual(done.result.event_ids, [applied.events[0].id]);
+    assert.deepEqual(await readback(), applied);
+    assert.equal(calls, 3);
+    assert.equal(eventWrites, 1);
+    assert.equal(profileWrites, 1);
+    assert.equal(
+      (
+        await db.query(
+          "SELECT count(*)::int AS count FROM memoia.memory_profile_revisions WHERE operation_id=$1",
+          [op.operation_id],
+        )
+      ).rows[0].count,
+      1,
+    );
+  });
+
+  await test("lost successful final CAS response keeps the original task succeeded", async () => {
     const scope = await user();
     const blob = await batch(scope, "added");
     const op = await flush(runtime, scope, "lost-commit-response");
@@ -1391,19 +1509,13 @@ try {
       calls++;
       return response();
     };
-    const originalTransaction = db.transaction.bind(db);
     const originalComplete =
       maintenanceTasks.completeInTx.bind(maintenanceTasks);
-    let completedInTransaction = false;
+    let lost = false;
     maintenanceTasks.completeInTx = async (...args) => {
       const result = await originalComplete(...args);
-      completedInTransaction = Boolean(result);
-      return result;
-    };
-    db.transaction = async (fn, options) => {
-      const result = await originalTransaction(fn, options);
-      if (completedInTransaction) {
-        completedInTransaction = false;
+      if (result && !lost) {
+        lost = true;
         throw new DatabaseUnavailableError();
       }
       return result;
@@ -1411,9 +1523,9 @@ try {
     try {
       await consume(runtime, wake(scope, op.operation_id));
     } finally {
-      db.transaction = originalTransaction;
       maintenanceTasks.completeInTx = originalComplete;
     }
+    assert.ok(lost);
     const task = await db.transaction((tx) =>
       maintenanceTasks.readInTx(tx, op.operation_id),
     );
@@ -1508,6 +1620,16 @@ try {
           timer.unref();
         }),
       ]);
+      const openTransactions = await db.query(
+        `SELECT pid FROM pg_stat_activity
+         WHERE datname=current_database() AND pid<>pg_backend_pid()
+           AND backend_type='client backend' AND xact_start IS NOT NULL`,
+      );
+      assert.equal(
+        openTransactions.rowCount,
+        0,
+        "provider waits release every transaction",
+      );
       await consume(runtime, wake(a, opA.operation_id));
       assert.equal(calls, 2);
       const newBlob = await batch(a, "noop");
@@ -1607,7 +1729,12 @@ try {
   });
   await test("a superseded flush owner cannot commit its old plan", async () => {
     const scope = await user();
-    await batch(scope, "noop");
+    const blob = await batch(scope, "added");
+    const factId = (
+      await db.query("SELECT id FROM memoia.memory_facts WHERE blob_id=$1", [
+        blob,
+      ])
+    ).rows[0].id;
     const op = await flush(runtime, scope, "stale");
     const task = await db.transaction((tx) =>
       maintenanceTasks.claimInTx(tx, op.operation_id),
@@ -1625,16 +1752,35 @@ try {
       owner,
 
       blobIds: row.request.blob_ids,
-      changes: [],
+      changes: [{ kind: "added", fact_id: factId, version: 1 }],
     };
     const ctx = new MaintenanceContext(runtime, claim, async () => {});
     await ctx.prepare();
+    await ctx.readChanges();
+    const staged = await ctx.stage("events", [
+      { action: "upsert", content: "A new story", fact_ids: [factId] },
+    ]);
+    assert.equal(staged.staged, true);
     const successor = crypto.randomUUID();
     await db.query(
       "UPDATE memoia.queue_tasks SET lease_id=$2,run_attempts=run_attempts+1 WHERE id=$1",
       [op.operation_id, successor],
     );
-    await assert.rejects(ctx.commit(), /no longer owns/i);
+    await assert.rejects(
+      ctx.commit(),
+      (error: unknown) =>
+        error instanceof SourceError &&
+        error.code === "maintenance_read_conflict",
+    );
+    assert.equal(
+      (
+        await db.query(
+          "SELECT 1 FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=$3",
+          [scope.userId, scope.projectId, staged.ids[0]],
+        )
+      ).rowCount,
+      0,
+    );
     const after = (
       await db.query(
         "SELECT status,lease_id AS lease_owner,run_attempts AS generation,result FROM memoia.queue_tasks WHERE id=$1",

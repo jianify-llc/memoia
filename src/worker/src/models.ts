@@ -39,8 +39,16 @@ export async function getConfig(
   projectId: string,
   sql: Sql = runtime.db,
 ): Promise<ModelConfig> {
+  return (await getConfigSnapshot(runtime, projectId, sql)).config;
+}
+
+export async function getConfigSnapshot(
+  runtime: Runtime,
+  projectId: string,
+  sql: Sql = runtime.db,
+): Promise<{ config: ModelConfig; stored: string | null }> {
   const base = readServiceConfig(runtime.env.MEMOIA_CONFIG);
-  const row = await sql.query(
+  const row = await sql.query<{ profile_config: string | null }>(
     "SELECT profile_config FROM memoia.projects WHERE project_id=$1",
     [projectId],
   );
@@ -55,7 +63,7 @@ export async function getConfig(
       : null) ??
     base.language ??
     "en";
-  return {
+  const effective: ModelConfig = {
     llm_model: config.llm_model ?? base.best_llm_model ?? "gpt-6-luna",
     reasoning_effort:
       config.reasoning_effort ?? base.llm_reasoning_effort ?? "high",
@@ -76,6 +84,7 @@ export async function getConfig(
     source_context_window_tokens: base.source_context_window_tokens ?? 131072,
     source_output_reserve_tokens: base.source_output_reserve_tokens ?? 32768,
   };
+  return { config: effective, stored };
 }
 function resolveTopics(
   base: Record<string, any>,
@@ -259,11 +268,9 @@ export async function recordUsage(
     if (!complete) {
       await addUsage(runtime.db, projectId, { llm_usage_unknown: 1 });
     } else {
-      await runtime.db.transaction(async (tx) => {
-        await addUsage(tx, projectId, {
-          llm_input_tokens: Number(input),
-          llm_output_tokens: Number(output),
-        });
+      await addUsage(runtime.db, projectId, {
+        llm_input_tokens: Number(input),
+        llm_output_tokens: Number(output),
       });
       if (!runtime.env.ADMIN_URL) {
         try {
@@ -553,12 +560,15 @@ export async function embeddings(
   projectId: string,
   texts: string[],
   phase: EmbeddingPhase = "document",
+  config?: ModelConfig,
 ): Promise<number[][]> {
   return inSpan(
     runtime.tracing,
     "memoia.model",
     { kind: "embedding", phase, operation_id: runtime.operationId },
-    () => embed(runtime, projectId, texts, phase),
+    async () => texts.length
+      ? embed(runtime, projectId, texts, phase, config ?? await getConfig(runtime, projectId))
+      : [],
   );
 }
 
@@ -567,9 +577,8 @@ async function embed(
   projectId: string,
   texts: string[],
   phase: EmbeddingPhase,
+  config: ModelConfig,
 ): Promise<number[][]> {
-  if (!texts.length) return [];
-  const config = await getConfig(runtime, projectId);
   if (
     !["openai", "jina", "ollama"].includes(config.embedding_provider) ||
     !Number.isSafeInteger(config.embedding_batch_size) ||

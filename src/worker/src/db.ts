@@ -367,14 +367,21 @@ export async function renewUserLease(
 ): Promise<void> {
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0)
     throw new RangeError("Invalid lease duration");
-  await db.transaction(async (tx) => {
-    await assertUserLease(tx, lease);
-    await tx.query(
-      `UPDATE memoia.memory_user_states SET writer_lease_until=clock_timestamp()+($5 * interval '1 millisecond')
-      WHERE user_id=$1 AND project_id=$2 AND generation=$3 AND version=$4`,
-      [lease.userId, lease.projectId, lease.generation, lease.version, ttlMs],
-    );
-  });
+  // Check the expiry after any row-lock wait so a late renewal cannot revive a lease.
+  const result = await db.query(
+    `WITH locked AS MATERIALIZED (
+       SELECT user_id,project_id,writer_lease_until FROM memoia.memory_user_states
+       WHERE user_id=$1 AND project_id=$2 AND generation=$3 AND version=$4
+       FOR UPDATE
+     )
+     UPDATE memoia.memory_user_states s
+     SET writer_lease_until=clock_timestamp()+($5 * interval '1 millisecond')
+     FROM locked
+     WHERE s.user_id=locked.user_id AND s.project_id=locked.project_id
+       AND locked.writer_lease_until>clock_timestamp()`,
+    [lease.userId, lease.projectId, lease.generation, lease.version, ttlMs],
+  );
+  if (!result.rowCount) throw new LeaseLostError();
 }
 
 export async function releaseUserLease(
@@ -405,19 +412,20 @@ export async function addUsage(
   projectId: string,
   values: Record<string, number>,
 ): Promise<void> {
-  for (const [name, value] of Object.entries(values)) {
-    if (!Number.isSafeInteger(value) || value < 0)
-      throw new RangeError("Invalid usage");
-    await tx.query(
-      `INSERT INTO memoia.usage_counters(project_id,name,period_type,period_start,value,expires_at)
-      SELECT $1,$2,p.kind,p.start_date,$3,p.start_date+p.ttl
-      FROM (VALUES ('day', current_date, interval '${USAGE_HISTORY_DAYS} days'),
-                   ('month', date_trunc('month', current_date)::date, interval '1 month')) p(kind,start_date,ttl)
-      ON CONFLICT (project_id,name,period_type,period_start) DO UPDATE
-      SET value=memoia.usage_counters.value+EXCLUDED.value, expires_at=EXCLUDED.expires_at`,
-      [projectId, name, value],
-    );
-  }
+  const counters = Object.values(values);
+  if (!counters.length) return;
+  if (counters.some((value) => !Number.isSafeInteger(value) || value < 0))
+    throw new RangeError("Invalid usage");
+  await tx.query(
+    `INSERT INTO memoia.usage_counters(project_id,name,period_type,period_start,value,expires_at)
+     SELECT $1,c.name,p.kind,p.start_date,c.value,p.start_date+p.ttl
+     FROM unnest($2::text[],$3::bigint[]) c(name,value)
+     CROSS JOIN (VALUES ('day', current_date, interval '${USAGE_HISTORY_DAYS} days'),
+                        ('month', date_trunc('month', current_date)::date, interval '1 month')) p(kind,start_date,ttl)
+     ON CONFLICT (project_id,name,period_type,period_start) DO UPDATE
+     SET value=memoia.usage_counters.value+EXCLUDED.value, expires_at=EXCLUDED.expires_at`,
+    [projectId, Object.keys(values), counters],
+  );
 }
 
 export async function monthlyTokenUsage(

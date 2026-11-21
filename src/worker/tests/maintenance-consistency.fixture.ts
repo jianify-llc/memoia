@@ -4,14 +4,17 @@ import { Database } from "../src/db";
 import { maintenanceTasks } from "../src/maintenance-task";
 import { MaintenanceContext, flush, type Claim } from "../src/maintenance";
 
-test("maintenance rejects related changes atomically but accepts unrelated additions", async () => {
+test("maintenance rejects related changes before writing and accepts unrelated additions", async () => {
   const db = new Database(process.env.MEMOIA_TEST_DATABASE_URL!);
   try {
     for (const conflict of [
       "fact",
       "model",
+      "model-during-publication",
       "topics",
       "event-delete",
+      "derived-read-deleted",
+      "foreign-publication",
       "deadline",
       "unrelated",
     ] as const) {
@@ -28,6 +31,7 @@ test("maintenance rejects related changes atomically but accepts unrelated addit
         },
         deadline: Date.now() + 60000,
       };
+      const originalQuery = db.query;
       try {
         await db.transaction(async (tx) => {
           await tx.query(
@@ -98,6 +102,31 @@ test("maintenance rejects related changes atomically but accepts unrelated addit
             fact_ids: [factId],
           },
         ]);
+        if (conflict === "derived-read-deleted") {
+          const oldEvent = crypto.randomUUID();
+          await db.query(
+            "INSERT INTO memoia.user_events(id,user_id,project_id,event_data) VALUES($3,$1,$2,$4::jsonb)",
+            [
+              userId,
+              projectId,
+              oldEvent,
+              JSON.stringify({
+                event_tip: "Previously read background",
+                fact_ids: [factId],
+                _impact_fact_ids: [crypto.randomUUID()],
+              }),
+            ],
+          );
+          await ctx.read("events", [oldEvent]);
+          assert.equal(
+            (await ctx.stage("events", [{ action: "remove", id: oldEvent }]))
+              .staged,
+            true,
+          );
+          await db.query("DELETE FROM memoia.user_events WHERE id=$1", [
+            oldEvent,
+          ]);
+        }
         if (conflict === "fact")
           await db.query(
             "UPDATE memoia.memory_facts SET revision=revision+1,content='Corrected reading statement' WHERE id=$1",
@@ -121,12 +150,34 @@ test("maintenance rejects related changes atomically but accepts unrelated addit
             "INSERT INTO memoia.memory_deleted_events(id,user_id,project_id) VALUES($3,$1,$2)",
             [userId, projectId, event.ids[0]],
           );
+        if (conflict === "foreign-publication")
+          await db.query(
+            "INSERT INTO memoia.user_events(id,user_id,project_id,event_data) VALUES($3,$1,$2,$4::jsonb)",
+            [userId, projectId, event.ids[0], JSON.stringify({
+              content: "A reading experience",
+              memoia_v2: true,
+              fact_ids: [factId],
+              _impact_fact_ids: [],
+            })],
+          );
         if (conflict === "unrelated")
           await db.query(
             "INSERT INTO memoia.memory_facts(id,user_id,project_id,blob_id,content,subject,reporter,certainty,support_groups,occurred_at,search_text) VALUES($3,$1,$2,$4,'Unrelated background','user','user','asserted','[[\"m\"]]',now(),'Unrelated background')",
             [userId, projectId, crypto.randomUUID(), blobId],
           );
         if (conflict === "deadline") runtime.deadline = Date.now() - 1;
+        const query = db.query.bind(db);
+        if (conflict === "model-during-publication") {
+          db.query = async (sql, values) => {
+            if (sql.includes("INSERT INTO memoia.user_events")) {
+              await query(
+                "UPDATE memoia.projects SET profile_config='llm_model: changed-before-first-write' WHERE project_id=$1",
+                [projectId],
+              );
+            }
+            return query(sql, values);
+          };
+        }
         if (conflict === "unrelated") {
           await ctx.commit();
           assert.equal(
@@ -140,7 +191,7 @@ test("maintenance rejects related changes atomically but accepts unrelated addit
           );
         } else {
           await assert.rejects(
-            ctx.commit(),
+            ctx.commit(conflict === "foreign-publication" || conflict === "derived-read-deleted"),
             (error: any) =>
               error.code ===
                 (conflict === "deadline"
@@ -172,7 +223,7 @@ test("maintenance rejects related changes atomically but accepts unrelated addit
                 [event.ids[0]],
               )
             ).rows[0].n,
-            0,
+            conflict === "foreign-publication" ? 1 : 0,
           );
           assert.equal(
             (
@@ -185,6 +236,7 @@ test("maintenance rejects related changes atomically but accepts unrelated addit
           );
         }
       } finally {
+        db.query = originalQuery;
         await db.query("DELETE FROM memoia.projects WHERE project_id=$1", [
           projectId,
         ]);

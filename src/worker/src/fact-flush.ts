@@ -6,7 +6,6 @@ import {
 } from "@jianify/legato";
 import { pythonHash } from "./canonical.js";
 import {
-  lockIdentity,
   lockUser,
   LeaseLostError,
   type UserScope,
@@ -241,17 +240,13 @@ export async function consumeFactFlush(
       signal: runtime.signal,
       renew: () => maintenanceTasks.renewInTx(db, id, owner),
       onTimeout: async () => {
-        await runtime.db.transaction(async (tx) => {
-          await lockIdentity(tx, scope);
-          const error = { code: "fact_flush_timeout", retryable: true };
-          await maintenanceTasks.revokeInTx(
-            tx,
-            id,
-            error,
-            factFlushRetryPolicy,
-            owner,
-          );
-        });
+        await maintenanceTasks.revokeInTx(
+          db,
+          id,
+          { code: "fact_flush_timeout", retryable: true },
+          factFlushRetryPolicy,
+          owner,
+        );
       },
       execute: async (budget) => {
         const slice = {
@@ -276,57 +271,63 @@ export async function consumeFactFlush(
           if (budget.shouldYield(30_000)) throw new TaskYield();
           await prepareFactAppend(slice, scope, id, owner, appendId, budget);
         }
-        const pending = await runtime.db.transaction(async (tx) => {
-          await maintenanceTasks.assertOwnedInTx(tx, id, owner, true);
-          const { rows } = await tx.query(
-            `SELECT a.id,a.status,a.error, (a.input_expires_at IS NULL OR a.input_expires_at<=clock_timestamp()) AS expired,
-                    (a.request->'fact_prepared'->>'input_revision'=coalesce(o.request->>'input_revision','0')) AS ready,
-                    least(coalesce(a.available_at,clock_timestamp()),a.input_expires_at) AS next_run_at
-               FROM memoia.memory_operations a JOIN memoia.memory_operations o ON o.id=a.fact_flush_id
-              WHERE a.fact_flush_id=$1 ORDER BY a.id`,
-            [id],
+        // The normal path checks ownership and inputs in the publication transaction.
+        const { rows } = await db.query(
+          `SELECT a.id,a.status,a.error, (a.input_expires_at IS NULL OR a.input_expires_at<=clock_timestamp()) AS expired,
+                  (a.request->'fact_prepared'->>'input_revision'=coalesce(o.request->>'input_revision','0')) AS ready,
+                  least(coalesce(a.available_at,clock_timestamp()),a.input_expires_at) AS next_run_at
+             FROM memoia.memory_operations a JOIN memoia.memory_operations o ON o.id=a.fact_flush_id
+            WHERE a.fact_flush_id=$1 ORDER BY a.id`,
+          [id],
+        );
+        if (
+          rows.length !== appendIds.length ||
+          rows.some((row, i) => row.id !== appendIds[i])
+        )
+          throw new SourceError(
+            "fact_flush_manifest_mismatch",
+            "The sealed append list changed",
+            409,
           );
-          if (
-            rows.length !== appendIds.length ||
-            rows.some((row, i) => row.id !== appendIds[i])
-          )
-            throw new SourceError(
-              "fact_flush_manifest_mismatch",
-              "The sealed append list changed",
-              409,
-            );
-          const failures = rows.filter((row) => row.status === "failed" || row.expired);
-          // Missing input or an explicit rejection takes precedence over a recoverable
-          // exhausted attempt. Keep sibling checkpoints until their normal expiry.
-          const failed = failures.find((row) => row.expired || row.error?.retryable !== true) ?? failures[0];
-          if (failed) {
-            // Permanent rejection clears the payload as well as its expiry.
-            const expired = failed.expired &&
-              !(failed.status === "failed" && failed.error?.retryable === false);
-            if (
-              !(await maintenanceTasks.failInTx(
-                tx,
-                id,
-                owner,
-                {
-                  code: expired ? "input_required" : (failed.error?.code ?? "fact_flush_failed"),
-                  retryable: !expired && failed.error?.retryable === true,
-                  manual: true,
-                },
-                factFlushRetryPolicy,
-              ))
-            )
-              throw new TaskLeaseLost();
-            return true;
-          }
-          const waiting = rows.filter((row) => !row.ready);
-          if (!waiting.length) return false;
+        const failures = rows.filter(
+          (row) => row.status === "failed" || row.expired,
+        );
+        const waiting = rows.filter((row) => !row.ready);
+        if (!failures.length && !waiting.length) {
+          await commitFactFlush(slice, scope, id, owner, budget);
+          return;
+        }
+        // Missing input or explicit rejection takes precedence over recoverable failure.
+        const failed =
+          failures.find(
+            (row) => row.expired || row.error?.retryable !== true,
+          ) ?? failures[0];
+        if (failed) {
+          // Permanent rejection clears the payload as well as its expiry.
+          const expired =
+            failed.expired &&
+            !(failed.status === "failed" && failed.error?.retryable === false);
+          const task = await maintenanceTasks.failInTx(
+            db,
+            id,
+            owner,
+            {
+              code: expired
+                ? "input_required"
+                : (failed.error?.code ?? "fact_flush_failed"),
+              retryable: !expired && failed.error?.retryable === true,
+              manual: true,
+            },
+            factFlushRetryPolicy,
+          );
+          if (!task) throw new TaskLeaseLost();
+        } else {
           const next = Math.min(
             ...waiting.map((row) => new Date(row.next_run_at).getTime()),
           );
           if (
             !(await maintenanceTasks.yieldInTx(
-              tx,
+              db,
               id,
               owner,
               null,
@@ -334,9 +335,7 @@ export async function consumeFactFlush(
             ))
           )
             throw new TaskLeaseLost();
-          return true;
-        });
-        if (!pending) await commitFactFlush(slice, scope, id, owner, budget);
+        }
       },
     });
   } catch (error) {
@@ -346,22 +345,18 @@ export async function consumeFactFlush(
       !(error instanceof TaskLeaseLost) &&
       !(error instanceof TaskTimeout)
     ) {
-      await runtime.db.transaction(async (tx) => {
-        await lockIdentity(tx, scope);
-        await maintenanceTasks.failInTx(
-          tx,
-          id,
-          owner,
-          {
-            code:
-              error instanceof SourceError ? error.code : "fact_flush_failed",
-            retryable:
-              !(error instanceof SourceError) ||
-              error.code !== "fact_flush_manifest_mismatch",
-          },
-          factFlushRetryPolicy,
-        );
-      });
+      await maintenanceTasks.failInTx(
+        db,
+        id,
+        owner,
+        {
+          code: error instanceof SourceError ? error.code : "fact_flush_failed",
+          retryable:
+            !(error instanceof SourceError) ||
+            error.code !== "fact_flush_manifest_mismatch",
+        },
+        factFlushRetryPolicy,
+      );
     }
   }
 }

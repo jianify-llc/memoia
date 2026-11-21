@@ -68,6 +68,7 @@ test(
         "UPDATE memoia.memory_user_states SET writer_lease_until=clock_timestamp()-interval '1 second' WHERE user_id=$1 AND project_id=$2",
         [userId, projectId],
       );
+      await assert.rejects(renewUserLease(db, expired, 10_000), LeaseLostError);
       const next = await acquireUserLease(db, scope, 10_000);
       assert.notEqual(next.generation, expired.generation);
       await db.transaction(async (tx) => {

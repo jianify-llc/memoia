@@ -55,7 +55,12 @@ const failingFetch: typeof fetch = async () =>
 function counters(calls: Array<{ sql: string; values: unknown[] }>) {
   return calls
     .filter((c) => c.sql.includes("INSERT INTO memoia.usage_counters"))
-    .map((c) => [c.values[1], c.values[2]]);
+    .flatMap((c) =>
+      (c.values[1] as string[]).map((name, index) => [
+        name,
+        (c.values[2] as number[])[index],
+      ]),
+    );
 }
 
 test("real SDK 503 preserves top-level numeric usage for Fact completion and billing", async () => {

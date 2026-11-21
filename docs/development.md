@@ -31,7 +31,8 @@ Dependency versions and security overrides live in package manifests/locks. The 
 ## Database statements and transactions
 
 - Use `db.query` for one schema-qualified SQL statement. It runs directly for a probe, independent read or self-contained write. PostgreSQL provides statement-level atomicity.
-- Open an explicit transaction only for a required invariant such as multi-statement atomicity, a consistent snapshot, or a lock held across dependent statements. Document the invariant at the call site when it is not evident. Keep it short and keep model and Queue calls outside it.
+- A Queue task must never wrap its execution in a database transaction. Release the transaction and checked-out connection before model calls (including Flex), embedding, Queue sends, other external I/O, or retry waits. Use the Legato watchdog for in-process checks and standalone conditional updates for transitions that only change the task row.
+- Open an explicit transaction only for a bounded SQL unit with a documented reason, such as a consistent snapshot or dependent writes that must succeed together. Keep scope and lock time to that unit.
 - Set `vector: true` on transactions that use pgvector types or operators. Only these transactions set a local search path that includes the installed extension's schema.
 - Cron scans, notification reservation and acknowledgement, and retention cleanup use standalone SQL. The minute Cron only reconciles maintenance. The five-minute Cron clears expired operation input. The daily Cron removes expired usage counters. Daily history includes today and the previous 29 days, while the current calendar month counter supports quota checks. Expiry checks still apply at retry time. Blob sealing and expired lease revocation keep their concurrency protections.
 

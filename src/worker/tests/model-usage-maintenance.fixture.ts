@@ -79,9 +79,9 @@ test("maintenance counts top-level numeric usage from actual SDK error responses
     assert.deepEqual(
       counters,
       Array.from({ length: requests }, () => [
-        ["llm_input_tokens", 17],
-        ["llm_output_tokens", 3],
-      ]).flat(),
+        ["llm_input_tokens", "llm_output_tokens"],
+        [17, 3],
+      ]),
     );
     assert.equal(
       calls.filter((c) => c.sql.includes("UPDATE memoia.billings")).length,
