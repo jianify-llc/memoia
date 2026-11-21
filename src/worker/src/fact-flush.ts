@@ -239,9 +239,7 @@ export async function consumeFactFlush(
       startedAt,
       leaseExpiresAt,
       signal: runtime.signal,
-      renew: async () =>
-        (await maintenanceTasks.renewInTx(sql, id, owner))?.leaseExpiresAt ??
-        null,
+      renew: () => maintenanceTasks.renewInTx(sql, id, owner),
       onTimeout: async () => {
         await runtime.db.transaction(async (tx) => {
           await lockIdentity(tx, scope);

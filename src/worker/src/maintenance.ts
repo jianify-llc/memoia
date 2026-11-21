@@ -838,12 +838,10 @@ export async function consume(runtime: Runtime, message: Wakeup) {
         startedAt,
         leaseExpiresAt,
         signal: runtime.signal,
-        renew: async () =>
-          (
-            await runtime.db.transaction((tx) =>
-              maintenanceTasks.renewInTx(tx, c.id, c.owner),
-            )
-          )?.leaseExpiresAt ?? null,
+        renew: () =>
+          runtime.db.transaction((tx) =>
+            maintenanceTasks.renewInTx(tx, c.id, c.owner),
+          ),
         onTimeout: async () => {
           const isolated = createRuntime(runtime.env);
           try {
