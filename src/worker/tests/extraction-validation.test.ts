@@ -7,15 +7,6 @@ const messages = [
     role: "user" as const,
     content: "I moved in May 2024.",
     occurred_at: "2024-05-10T00:00:00Z",
-    images: [
-      {
-        url: "https://example.com/private-image.png?secret=x",
-        mimeType: "image/png",
-        width: 1,
-        height: 1,
-        byteSize: 1,
-      },
-    ],
   },
   {
     message_id: "b",
@@ -56,7 +47,7 @@ test("normalizes any_of/all_of and keeps only supplied user buckets", () => {
     ),
   );
 });
-test("rejects time anchors outside evidence, invented quotes, and echoed temporary image URLs", () => {
+test("rejects time anchors outside evidence and invented quotes", () => {
   const invalid = [
     { ...fact(), any_of: [{ all_of: ["b"] }] },
     {
@@ -66,7 +57,6 @@ test("rejects time anchors outside evidence, invented quotes, and echoed tempora
         evidence: [{ message_id: "a", expression: "April" }],
       },
     },
-    { ...fact(), content: "https://example.com/private-image.png" },
   ];
   for (const f of invalid)
     assert.throws(() =>

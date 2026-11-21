@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Database, acquireUserLease, releaseUserLease } from "../src/db";
+import { Database, DatabaseUnavailableError } from "../src/db";
 import {
   MaintenanceContext,
   consume,
@@ -204,7 +204,8 @@ try {
     const scope = await user();
     const blob = await batch(scope, "added");
     const op = await flush(runtime, scope, "resume");
-    const lease = await acquireUserLease(db, scope, 60_000);
+    const complete = maintenanceTasks.completeInTx.bind(maintenanceTasks);
+    maintenanceTasks.completeInTx = async () => { throw new DatabaseUnavailableError(); };
     let calls = 0;
     globalThis.fetch = async () => {
       calls++;
@@ -222,7 +223,7 @@ try {
       assert.equal(saved?.failureCount, 1);
       assert.equal(calls, 1);
     } finally {
-      await releaseUserLease(db, lease);
+      maintenanceTasks.completeInTx = complete;
     }
     await db.query(
       "UPDATE memoia.queue_tasks SET next_run_at=clock_timestamp()-interval '1 second' WHERE id=$1",
@@ -297,27 +298,19 @@ try {
       await worker.stop(5000);
     }
   });
-  await test("input cleanup failure does not starve ready tasks", async () => {
+  await test("input cleanup failure does not starve ready tasks", async (t) => {
     const scope = await user();
     await batch(scope);
     const op = await flush(runtime, scope, "cleanup-contention");
-    const transaction = db.transaction.bind(db);
-    db.transaction = (fn, options) =>
-      transaction(
-        (tx) =>
-          fn({
-            query: async (sql, values) => {
-              if (
-                sql.startsWith(
-                  "UPDATE memoia.memory_operations SET request=jsonb_build_object",
-                )
-              )
-          throw new Error("local cleanup failure");
-              return tx.query(sql, values);
-            },
-          }),
-        options,
-      );
+    const statement = db.query.bind(db);
+    let cleanupAttempts = 0;
+    t.mock.method(db, "query", async (...args: Parameters<Database["query"]>) => {
+      if (args[2] === "purge_expired_inputs") {
+        cleanupAttempts++;
+        throw new Error("local cleanup failure");
+      }
+      return statement(...args);
+    });
     const worker = startMaintenanceWorker(runtime.env, db, {
       pollIntervalMs: 20,
     });
@@ -329,9 +322,9 @@ try {
       )
         await new Promise((resolve) => setTimeout(resolve, 20));
       assert.equal((await task(op.operation_id))?.status, "succeeded");
+      assert.equal(cleanupAttempts, 1);
     } finally {
       assert.equal(await worker.stop(5000), true);
-      db.transaction = transaction;
     }
   });
   await test("paused Node polling never touches the database", async () => {

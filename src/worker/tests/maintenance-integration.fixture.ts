@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Database, acquireUserLease, releaseUserLease } from "../src/db";
+import { Database } from "../src/db";
 import {
   MaintenanceContext,
   consume,
@@ -384,110 +384,6 @@ test("maintenance repairs required legacy support atomically, preserves history,
   } finally {
     await db.query("DELETE FROM memoia.projects WHERE project_id=$1", [
       projectId,
-    ]);
-    await db.close();
-  }
-});
-
-test("writer lease contention backs off the original flush without rerunning the model", async () => {
-  const db = new Database(process.env.MEMOIA_TEST_DATABASE_URL!);
-  const scope = {
-    projectId: `busy_${crypto.randomUUID()}`,
-    userId: crypto.randomUUID(),
-  };
-  const runtime = {
-    db,
-    env: {
-      OPENAI_API_KEY: "local-mock",
-      MAINTENANCE_ENABLED: "true",
-      MEMOIA_CONFIG: JSON.stringify({ enable_event_embedding: false }),
-    },
-    deadline: Date.now() + 120000,
-  };
-  const originalFetch = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls++;
-    return Response.json({
-      id: "resp_busy",
-      object: "response",
-      created_at: 1,
-      status: "completed",
-      error: null,
-      incomplete_details: null,
-      model: "gpt-6-luna",
-      output: [
-        {
-          type: "message",
-          id: "msg_busy",
-          role: "assistant",
-          content: [{ type: "output_text", text: "Done", annotations: [] }],
-          status: "completed",
-        },
-      ],
-      usage: {
-        input_tokens: 10,
-        output_tokens: 2,
-        total_tokens: 12,
-        input_tokens_details: { cached_tokens: 0 },
-        output_tokens_details: { reasoning_tokens: 0 },
-      },
-    });
-  };
-  try {
-    await db.query(
-      "INSERT INTO memoia.projects(id,project_id,project_secret,status) VALUES($1,$2,'local','active')",
-      [crypto.randomUUID(), scope.projectId],
-    );
-    await createUser(db, scope.projectId, { id: scope.userId });
-    await db.query(
-      "INSERT INTO memoia.memory_sources(user_id,project_id,source_id) VALUES($1,$2,'s')",
-      [scope.userId, scope.projectId],
-    );
-    await db.query(
-      "INSERT INTO memoia.memory_messages(user_id,project_id,source_id,message_id,content_hash,role,occurred_at) VALUES($1,$2,'s','m',repeat('a',64),'user',now())",
-      [scope.userId, scope.projectId],
-    );
-    await db.query(
-      `INSERT INTO memoia.memory_blobs(id,user_id,project_id,source_id,message_ids,status,fact_completed_at,fact_changes)
-      VALUES($3,$1,$2,'s','["m"]','active',now(),'[{"kind":"noop","version":1}]')`,
-      [scope.userId, scope.projectId, crypto.randomUUID()],
-    );
-    const operation = await flush(runtime, scope, "busy-writer");
-    const writer = await acquireUserLease(db, scope, 60000);
-    const message = {
-      kind: "flush" as const,
-      user_id: scope.userId,
-      project_id: scope.projectId,
-      operation_id: operation.operation_id,
-    };
-    await consume(runtime, message);
-    const row = await projectOperation(
-      db,
-      (
-        await db.query("SELECT * FROM memoia.memory_operations WHERE id=$1", [
-          operation.operation_id,
-        ])
-      ).rows[0],
-    );
-    assert.equal(row.id, operation.operation_id);
-    assert.equal(row.status, "processing");
-    assert.deepEqual(row.error, {
-      code: "maintenance_writer_busy",
-      retryable: true,
-    });
-    assert.equal(Number(row.attempts), 1);
-    assert.equal(row.lease_owner, null);
-    assert.equal(row.lease_until, null);
-    assert.ok(new Date(row.available_at).getTime() > Date.now());
-    assert.equal(calls, 0);
-    await consume(runtime, message);
-    assert.equal(calls, 0, "a wakeup during backoff must not call the model");
-    await releaseUserLease(db, writer);
-  } finally {
-    globalThis.fetch = originalFetch;
-    await db.query("DELETE FROM memoia.projects WHERE project_id=$1", [
-      scope.projectId,
     ]);
     await db.close();
   }

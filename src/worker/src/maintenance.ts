@@ -2,14 +2,10 @@
 import type { QueryResultRow } from "pg";
 import { isDeepStrictEqual } from "node:util";
 import {
-  acquireUserLease,
+  assertActive,
   isDatabaseTransportError,
   LeaseLostError,
-  finishUserLease,
-  lockUser,
-  releaseUserLease,
   type Sql,
-  type UserLease,
   type UserScope,
 } from "./db.js";
 import { SourceError } from "./errors.js";
@@ -36,10 +32,12 @@ import {
 import { z } from "zod";
 import {
   maintenanceTasks,
+  claimTask,
   factFlushRetryPolicy,
   maintenanceRetryPolicy,
+  operationReceiptQuery,
   projectOperation,
-  projectOperations,
+  projectReceipt,
   projectFlush,
 } from "./maintenance-task.js";
 import {
@@ -88,11 +86,12 @@ function alreadyPublished(
 ): boolean {
   if (change?.action === "remove") return !row;
   if (change?.action !== "upsert" || !row?.data?.memoia_v2) return false;
-  if (BigInt(row.revision) !== BigInt(expected ?? 0) + 1n) return false;
+  if (BigInt(row.version) !== BigInt(expected ?? 0) + 1n) return false;
   const {
     memoia_v2,
     source_ids,
     _impact_fact_ids,
+    _fact_revisions,
     event_tip,
     blob_ids,
     source_id,
@@ -102,24 +101,20 @@ function alreadyPublished(
   return isDeepStrictEqual(fields, memoryFields(change));
 }
 
-// Each statement shares the existing writer fence and checks the task without a separate round trip.
+// Each write checks the current task lease and Fact revisions in the same statement.
 const publicationFence = `
-  current_project AS MATERIALIZED (
-    SELECT project_id FROM memoia.projects
-    WHERE project_id=$2 AND profile_config IS NOT DISTINCT FROM $7::text FOR SHARE
-  ), live_user AS MATERIALIZED (
-    SELECT u.id FROM memoia.users u JOIN current_project p ON p.project_id=u.project_id
-    WHERE u.id=$1 FOR KEY SHARE OF u
-  ), locked AS MATERIALIZED (
-    SELECT s.writer_lease_until,t.lease_expires_at,t.started_at FROM live_user u
-    JOIN memoia.memory_user_states s ON s.user_id=u.id AND s.project_id=$2
-    JOIN memoia.queue_tasks t ON t.id=$5
-    WHERE s.generation=$3 AND s.version=$4 AND t.status='running' AND t.lease_id=$6
-    FOR SHARE OF s,t
-  ), allowed AS MATERIALIZED (
-    SELECT 1 FROM locked WHERE writer_lease_until>clock_timestamp()
-      AND lease_expires_at>clock_timestamp()
-      AND started_at+${HARD_SLICE_MS}*interval '1 millisecond'>clock_timestamp()
+  allowed AS MATERIALIZED (
+    SELECT 1 FROM memoia.queue_tasks t JOIN memoia.projects p
+      ON p.project_id=$2 AND p.profile_config IS NOT DISTINCT FROM $7::text
+    WHERE t.id=$5 AND t.status='running' AND t.lease_id=$6
+      AND t.lease_expires_at>clock_timestamp()
+      AND t.started_at+${HARD_SLICE_MS}*interval '1 millisecond'>clock_timestamp()
+      AND NOT EXISTS (
+        SELECT 1 FROM unnest($3::uuid[],$4::bigint[]) AS seen(id,revision)
+        LEFT JOIN memoia.memory_facts f
+          ON f.id=seen.id AND f.user_id=$1 AND f.project_id=$2
+        WHERE f.revision IS DISTINCT FROM seen.revision
+      )
   )`;
 const checkpointMutation = z
   .object({
@@ -340,9 +335,8 @@ export async function recordChanges(
     .map((c) => c.fact_id);
   if (ids.length)
     for (const kind of ["profiles", "events"] as const) {
-      const data = kind === "profiles" ? "attributes" : "event_data";
       await tx.query(
-        `UPDATE memoia.${TABLES[kind]} SET revision=revision+1 WHERE user_id=$1 AND project_id=$2 AND ${linked(kind, "$3")}`,
+        `UPDATE memoia.${TABLES[kind]} SET version=version+1 WHERE user_id=$1 AND project_id=$2 AND ${linked(kind, "$3")}`,
         [...scoped(scope), ids],
       );
     }
@@ -384,37 +378,39 @@ export async function notifyUser(
 ): Promise<void> {
   if (runtime.env.MAINTENANCE_ENABLED !== "true" || !runtime.maintenanceWakeup)
     return;
-  try {
-    await sendWakeup(
-      runtime,
-      { kind: "user", user_id: scope.userId, project_id: scope.projectId },
-      30,
-    );
-  } catch {
+  // The committed Blob is the recovery source. This hint needs no open DB connection.
+  const notification = sendWakeup(
+    runtime,
+    { kind: "user", user_id: scope.userId, project_id: scope.projectId },
+    30,
+  ).catch(() => {
     console.warn(
       JSON.stringify({ event: "maintenance_wakeup_unconfirmed", ...scope }),
     );
-  }
+  });
+  if (runtime.waitUntil) runtime.waitUntil(notification);
+  else await notification;
 }
 async function seal(
   runtime: Runtime,
   scope: UserScope,
-  key: string,
-): Promise<QueryResultRow> {
+  key?: string,
+): Promise<QueryResultRow | null> {
   return runtime.db.transaction(async (tx) => {
-    await lockUser(tx, scope);
-    const old = await tx.query(
-      "SELECT * FROM memoia.memory_operations WHERE user_id=$1 AND project_id=$2 AND idempotency_key=$3",
-      [...scoped(scope), key],
-    );
-    if (old.rows.length) {
-      if (old.rows[0].kind !== "flush")
-        fail("idempotency_conflict", "Key identifies another operation");
-      return projectOperation(tx, old.rows[0]);
+    if (key !== undefined) {
+      const old = await tx.query(
+        "SELECT * FROM memoia.memory_operations WHERE user_id=$1 AND project_id=$2 AND idempotency_key=$3",
+        [...scoped(scope), key],
+      );
+      if (old.rows.length) {
+        if (old.rows[0].kind !== "flush")
+          fail("idempotency_conflict", "Key identifies another operation");
+        return projectOperation(tx, old.rows[0]);
+      }
     }
     const rows = (
       await tx.query(
-        `SELECT b.id,b.external_id,o.maintenance_effort,
+        `SELECT b.id,b.external_id,b.xmin::text AS row_version,o.maintenance_effort,
           CASE WHEN b.external_id IS NULL THEN b.fact_changes ELSE (
             SELECT COALESCE(jsonb_agg(page.change ORDER BY page.position),'[]'::jsonb)
               FROM (SELECT change,position FROM jsonb_array_elements(b.fact_changes)
@@ -428,10 +424,13 @@ async function seal(
           ORDER BY t.finished_at DESC NULLS LAST,o.created_at DESC,o.id DESC LIMIT 1
         ) o ON true
         WHERE b.user_id=$1 AND b.project_id=$2 AND b.fact_completed_at IS NOT NULL AND b.flush_operation_id IS NULL
-        ORDER BY b.fact_completed_at,b.id LIMIT 100 FOR UPDATE OF b`,
+        ORDER BY b.fact_completed_at,b.id LIMIT 100`,
         scoped(scope),
       )
     ).rows;
+    // Cron and user hints can race. Only explicit flushes need an empty receipt.
+    if (key === undefined && !rows.length) return null;
+    const requestKey = key ?? `auto-flush:${crypto.randomUUID()}`;
     const factIds = [
       ...new Set(
         rows.flatMap((row) =>
@@ -490,7 +489,7 @@ async function seal(
         await crypto.subtle.digest(
           "SHA-256",
           new TextEncoder().encode(
-            JSON.stringify({ idempotency_key: key, kind: "flush" }),
+            JSON.stringify({ idempotency_key: requestKey, kind: "flush" }),
           ),
         ),
       ),
@@ -504,7 +503,7 @@ async function seal(
         [
           ...scoped(scope),
           id,
-          key,
+          requestKey,
           hash,
           JSON.stringify({
             blob_ids: blobIds,
@@ -527,7 +526,8 @@ async function seal(
       requestKey: id,
       businessKey: id,
       type: "maintenance_flush",
-      bizParams: effort === undefined ? {} : { reasoning_effort: effort },
+      userId: scope.userId,
+      bizParams: { project_id: scope.projectId, ...(effort === undefined ? {} : { reasoning_effort: effort }) },
     });
     if (!task) throw new Error("Could not create flush task");
     if (empty) {
@@ -547,8 +547,8 @@ async function seal(
       );
     }
     if (!task) throw new Error("Could not initialize flush task");
-    if (blobIds.length)
-      await tx.query(
+    if (blobIds.length) {
+      const assigned = await tx.query(
         `UPDATE memoia.memory_blobs b
            SET fact_changes=CASE WHEN b.external_id IS NULL THEN b.fact_changes ELSE
                  COALESCE((SELECT jsonb_agg(change ORDER BY position)
@@ -556,15 +556,31 @@ async function seal(
                    WHERE position>picked.used),'[]'::jsonb) END,
                flush_operation_id=CASE WHEN b.external_id IS NOT NULL AND jsonb_array_length(b.fact_changes)>picked.used
                  THEN NULL ELSE $3::uuid END
-          FROM unnest($4::uuid[],$5::int[]) AS picked(id,used)
-         WHERE b.user_id=$1 AND b.project_id=$2 AND b.id=picked.id`,
-        [...scoped(scope), id, blobIds, chosen.map((b) => b.fact_changes.length)],
+          FROM unnest($4::uuid[],$5::int[],$6::text[]) AS picked(id,used,version)
+         WHERE b.user_id=$1 AND b.project_id=$2 AND b.id=picked.id
+           AND b.flush_operation_id IS NULL AND b.xmin::text=picked.version`,
+        [...scoped(scope), id, blobIds, chosen.map((b) => b.fact_changes.length),
+          chosen.map((b) => b.row_version)],
       );
+      if (assigned.rowCount !== blobIds.length) throw new TaskYield();
+    }
     return projectFlush(row, task);
+  }).catch(async (error) => {
+    const duplicate = (error as { constraint?: string }).constraint === "memory_operations_user_id_project_id_idempotency_key_key";
+    if (!(error instanceof TaskYield) && !duplicate) throw error;
+    if (key === undefined) return null;
+    const { rows: [existing] } = await runtime.db.query(
+      "SELECT * FROM memoia.memory_operations WHERE user_id=$1 AND project_id=$2 AND idempotency_key=$3",
+      [...scoped(scope), key],
+    );
+    if (existing?.kind === "flush") return projectOperation(runtime.db, existing);
+    if (existing) fail("idempotency_conflict", "Key identifies another operation");
+    return fail("flush_conflict", "Pending Blob changes changed before sealing", true);
   });
 }
 export async function flush(runtime: Runtime, scope: UserScope, key: string) {
   const row = await seal(runtime, scope, key);
+  if (!row) throw new Error("Explicit flush has no receipt");
   if (row.status === "processing") await dispatch(runtime, row);
   return receipt(row);
 }
@@ -575,13 +591,13 @@ export async function getStatus(runtime: Runtime, scope: UserScope) {
       scoped(scope),
     ),
     runtime.db.query(
-      "SELECT * FROM memoia.memory_operations WHERE user_id=$1 AND project_id=$2 AND kind='flush' ORDER BY created_at DESC,id LIMIT 100",
+      operationReceiptQuery + " WHERE o.user_id=$1 AND o.project_id=$2 AND o.kind='flush' ORDER BY o.created_at DESC,o.id LIMIT 100",
       scoped(scope),
     ),
   ]);
   return {
     pending_blob_count: blobs.rows[0].n,
-    flushes: (await projectOperations(runtime.db, ops.rows)).map(progress),
+    flushes: ops.rows.map((row) => progress(projectReceipt(row))),
   };
 }
 export async function retryFlush(
@@ -589,31 +605,25 @@ export async function retryFlush(
   scope: UserScope,
   id: string,
 ) {
-  const row = await runtime.db.transaction(async (tx) => {
-    await lockUser(tx, scope);
-    const op = (
-      await tx.query(
-        "SELECT * FROM memoia.memory_operations WHERE user_id=$1 AND project_id=$2 AND id=$3 AND kind='flush' FOR UPDATE",
-        [...scoped(scope), id],
-      )
-    ).rows[0];
-    if (!op) fail("operation_not_found", "Operation not found");
-    let task = await maintenanceTasks.readInTx(tx, id, true);
-    if (!task) throw new Error("Flush execution task is missing");
-    if (task.status === "running") {
-      const expired = await maintenanceTasks.revokeInTx(
-        tx,
-        id,
-        { code: "maintenance_lease_expired", retryable: true, manual: true },
-        maintenanceRetryPolicy,
-      );
-      if (expired) task = expired;
-    }
-    if (task.status === "failed" || task.status === "manual") {
-      task = (await maintenanceTasks.recoverInTx(tx, id)) ?? task;
-    }
-    return projectFlush(op, task);
-  });
+  const { db } = runtime;
+  const { rows: [op] } = await db.query(
+    "SELECT * FROM memoia.memory_operations WHERE user_id=$1 AND project_id=$2 AND id=$3 AND kind='flush'",
+    [...scoped(scope), id],
+  );
+  if (!op) fail("operation_not_found", "Operation not found");
+  let task = await maintenanceTasks.readInTx(db, id);
+  if (!task) throw new Error("Flush execution task is missing");
+  if (task.status === "running") {
+    const expired = await maintenanceTasks.revokeInTx(
+      db, id, { code: "maintenance_lease_expired", retryable: true, manual: true },
+      maintenanceRetryPolicy, task.leaseId ?? undefined,
+    );
+    if (expired) task = expired;
+  }
+  if (task.status === "failed" || task.status === "manual")
+    task = (await maintenanceTasks.recoverInTx(db, id)) ??
+      (await maintenanceTasks.readInTx(db, id)) ?? task;
+  const row = projectFlush(op, task);
   if (row.status === "processing") await dispatch(runtime, row);
   return receipt(row);
 }
@@ -621,18 +631,15 @@ export async function dispatch(runtime: Runtime, row: QueryResultRow) {
   if (runtime.env.MAINTENANCE_ENABLED !== "true" || !runtime.maintenanceWakeup)
     return;
   const { db } = runtime;
-  const reserved = await maintenanceTasks.reserveDispatchInTx(
-    db, row.id, row.kind === "fact_flush" ? undefined : maintenanceRetryPolicy.limit,
-  );
-  if (!reserved) return;
-  const delay = Math.max(
-    0,
-    Math.min(
-      86400,
-      Math.ceil((reserved.nextRunAt.getTime() - Date.now()) / 1000),
-    ),
-  );
   try {
+    const reserved = await maintenanceTasks.reserveDispatchInTx(
+      db, row.id, row.kind === "fact_flush" ? undefined : maintenanceRetryPolicy.limit,
+    );
+    if (!reserved) return;
+    const delay = Math.max(
+      0,
+      Math.min(86400, Math.ceil((reserved.nextRunAt.getTime() - Date.now()) / 1000)),
+    );
     await sendWakeup(
       runtime,
       {
@@ -670,42 +677,23 @@ async function claim(
   message: Extract<Wakeup, { kind: "flush" }>,
 ): Promise<Claim | null> {
   const scope = { userId: message.user_id, projectId: message.project_id };
-  return runtime.db.transaction(async (tx) => {
-    await lockUser(tx, scope);
-    const held = await tx.query(
-      "SELECT 1 FROM memoia.memory_operations o JOIN memoia.queue_tasks t ON t.id=o.id WHERE o.user_id=$1 AND o.project_id=$2 AND o.kind='flush' AND t.status='running'",
-      scoped(scope),
-    );
-    if (held.rowCount) return null;
-    const row = (
-      await tx.query(
-        "SELECT * FROM memoia.memory_operations WHERE user_id=$1 AND project_id=$2 AND id=$3 AND kind='flush' FOR UPDATE",
-        [...scoped(scope), message.operation_id],
-      )
-    ).rows[0];
-    if (!row) return null;
-    const task = await maintenanceTasks.claimInTx(tx, row.id, {
-      type: "maintenance_flush",
-      limit: 4,
-    });
-    if (!task?.leaseId) return null;
-    const batches = await tx.query(
-      "SELECT fact_changes FROM memoia.memory_blobs WHERE user_id=$1 AND project_id=$2 AND flush_operation_id=$3 AND external_id IS NULL ORDER BY fact_completed_at,id",
-      [...scoped(scope), row.id],
-    );
-    return {
-      ...scope,
-      id: row.id,
-      owner: task.leaseId,
-      task,
-      blobIds: row.request.blob_ids,
-      changes: [
-        ...batches.rows.flatMap((b) => b.fact_changes),
-        ...(row.request.legacy_changes ?? []),
-      ],
-    };
-  });
+  const { rows: [row] } = await runtime.db.query(
+    "SELECT id,request FROM memoia.memory_operations WHERE user_id=$1 AND project_id=$2 AND id=$3 AND kind='flush'",
+    [...scoped(scope), message.operation_id],
+  );
+  if (!row) {
+    await assertActive(runtime.db, scope);
+    return null;
+  }
+  const task = await claimTask(runtime.db, row.id, "maintenance_flush");
+  if (!task?.leaseId) return null;
+  return {
+    ...scope, id: row.id, owner: task.leaseId, task,
+    blobIds: row.request.blob_ids,
+    changes: row.request.legacy_changes ?? [],
+  };
 }
+
 async function failClaim(runtime: Runtime, c: Claim, error: unknown) {
   const retryable =
     error instanceof LeaseLostError || isDatabaseTransportError(error)
@@ -774,7 +762,7 @@ async function prepareMaintenance(runtime: Runtime) {
   for (const row of candidates.rows) {
     const scope = { userId: row.user_id, projectId: row.project_id };
     if (row.id === null) {
-      await seal(runtime, scope, `auto-flush:${crypto.randomUUID()}`);
+      await seal(runtime, scope);
       continue;
     }
     await maintenanceTasks.revokeInTx(
@@ -850,12 +838,8 @@ export async function consume(runtime: Runtime, message: Wakeup) {
       );
       return;
     }
-    const row = await seal(
-      runtime,
-      { userId: message.user_id, projectId: message.project_id },
-      `auto-flush:${crypto.randomUUID()}`,
-    );
-    await dispatch(runtime, row);
+    const row = await seal(runtime, { userId: message.user_id, projectId: message.project_id });
+    if (row?.status === "processing") await dispatch(runtime, row);
     return;
   }
   const c = await claim(runtime, message);
@@ -893,6 +877,12 @@ export async function consume(runtime: Runtime, message: Wakeup) {
             signal: budget.signal,
             deadline: budget.hardDeadlineAt + 30_000,
           };
+          const batches = await sliceRuntime.db.query(
+            "SELECT fact_changes FROM memoia.memory_blobs WHERE user_id=$1 AND project_id=$2 AND flush_operation_id=$3 AND external_id IS NULL ORDER BY fact_completed_at,id",
+            [...scoped(c), c.id],
+          );
+          budget.assertActive();
+          c.changes = [...batches.rows.flatMap((batch) => batch.fact_changes), ...c.changes];
           const makeContext = async () => {
             const result = new MaintenanceContext(sliceRuntime, c, () =>
               budget.assertActive(),
@@ -901,9 +891,10 @@ export async function consume(runtime: Runtime, message: Wakeup) {
             return result;
           };
           let context = await makeContext();
-          const identity = await digest({
+          const prompt = await maintenancePromptHash();
+          const contextIdentity = () => digest({
             version: MAINTENANCE_CHECKPOINT_VERSION,
-            prompt: await maintenancePromptHash(),
+            prompt,
             config: context.config,
             ...(context.effortOverride === undefined
               ? {}
@@ -916,6 +907,7 @@ export async function consume(runtime: Runtime, message: Wakeup) {
             blobIds: c.blobIds,
             changes: c.changes,
           });
+          let identity = await contextIdentity();
           const parsed = checkpointSchema.safeParse(saved);
           const timezone = context.config.use_timezone ?? "UTC";
           const referenceTime = parsed.success
@@ -947,6 +939,7 @@ export async function consume(runtime: Runtime, message: Wakeup) {
             parsed.data.phase !== "new" &&
             !!parsed.data.state &&
             !!parsed.data.refs;
+          const attemptedRestore = restored;
           if (restored && parsed.success) {
             const required = {
               profiles: new Set(context.required.profiles),
@@ -998,7 +991,10 @@ export async function consume(runtime: Runtime, message: Wakeup) {
             }
           }
           if (!restored) {
-            context = await makeContext();
+            if (attemptedRestore) {
+              context = await makeContext();
+              identity = await contextIdentity();
+            }
             await persist({
               version: MAINTENANCE_CHECKPOINT_VERSION,
               identity,
@@ -1045,6 +1041,7 @@ export async function consume(runtime: Runtime, message: Wakeup) {
               )
                 throw error;
               context = await makeContext();
+              identity = await contextIdentity();
               await persist({
                 version: MAINTENANCE_CHECKPOINT_VERSION,
                 identity,
@@ -1206,18 +1203,18 @@ export class MaintenanceContext {
             : "";
       const rows = (
         await this.runtime.db.query(
-          `SELECT id,revision${data} FROM memoia.${TABLES[kind]} WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])`,
+          `SELECT id,${kind === "facts" ? "revision AS version" : "version"}${data} FROM memoia.${TABLES[kind]} WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])`,
           [...scoped(this.claim), [...reads.keys()]],
         )
       ).rows;
       current[kind] = new Map(rows.map((row) => [row.id, row]));
-      for (const [id, revision] of reads) {
+      for (const [id, version] of reads) {
         const row = current[kind].get(id);
-        if ((row ? String(row.revision) : null) === revision) continue;
+        if ((row ? String(row.version) : null) === version) continue;
         if (
           publishing &&
           kind !== "facts" &&
-          alreadyPublished(this.staged[kind].get(id), revision, row)
+          alreadyPublished(this.staged[kind].get(id), version, row)
         ) {
           if (!row) missingRemoval = true;
           published[kind].add(id);
@@ -1261,11 +1258,11 @@ export class MaintenanceContext {
     this.active();
     return { current, published, impactIds: impact ? [...impact].sort() : null };
   }
-  private track(kind: Collection, id: string, revision: unknown) {
-    const rev = revision == null ? null : String(revision);
-    if (this.reads[kind].has(id) && this.reads[kind].get(id) !== rev)
+  private track(kind: Collection, id: string, value: unknown) {
+    const version = value == null ? null : String(value);
+    if (this.reads[kind].has(id) && this.reads[kind].get(id) !== version)
       fail("maintenance_read_conflict", "Related memory changed", true);
-    this.reads[kind].set(id, rev);
+    this.reads[kind].set(id, version);
   }
   remaining() {
     return Object.fromEntries(
@@ -1309,7 +1306,7 @@ export class MaintenanceContext {
         [...scoped(this.claim), ids],
       );
       for (const row of rows.rows) {
-        this.track(kind, row.id, row.revision);
+        this.track(kind, row.id, row.version);
         this.required[kind].add(row.id);
       }
     }
@@ -1443,11 +1440,12 @@ export class MaintenanceContext {
       const item = {
         ...data,
         id: row.id,
-        revision: row.revision,
+        version: row.version,
         ...(kind === "profiles" ? { content: row.content } : {}),
         fact_ids: supports.get(row.id) ?? [],
       };
       delete item._impact_fact_ids;
+      delete item._fact_revisions;
       delete item.evidence;
       if (this.required[kind].has(row.id)) {
         for (const field of [
@@ -1472,18 +1470,18 @@ export class MaintenanceContext {
       const row = originals.find((r) => r.id === id);
       if (
         (this.reads[kind].get(id) ?? null) !==
-        (row ? String(row.revision) : null)
+        (row ? String(row.version) : null)
       )
         fail("maintenance_read_conflict", "Staged target changed", true);
       if (change.action === "remove" && !row) continue;
       let item: QueryResultRow = row
         ? itemOf(row)
-        : { id, revision: null, fact_ids: [] };
+        : { id, version: null, fact_ids: [] };
       // A proposal replaces the stored entry; omitted fields must not leak old prose.
       if (change.action === "upsert")
         item = {
           id,
-          revision: row?.revision ?? null,
+          version: row?.version ?? null,
           ...change,
           ...(kind === "events" ? { event_tip: change.content } : {}),
         };
@@ -1559,7 +1557,7 @@ export class MaintenanceContext {
     }
     this.active();
     for (const item of items) {
-      this.track(kind, item.id, item.revision);
+      this.track(kind, item.id, kind === "facts" ? item.revision : item.version);
       if (kind !== "facts" && stage.get(item.id)?.action !== "upsert")
         this.derivedReads[kind].add(item.id);
       if (
@@ -1739,14 +1737,7 @@ export class MaintenanceContext {
       );
     const vectors = await this.eventVectors(resuming);
     const { db } = this.runtime;
-    const lease = await acquireUserLease(db, this.claim, 30_000);
-    try {
-      await this.publish(lease, vectors, resuming);
-      await finishUserLease(db, lease);
-    } catch (error) {
-      await releaseUserLease(db, lease).catch(() => {});
-      throw error;
-    }
+    await this.publish(vectors, resuming);
     this.active();
     assertRunning(this.runtime, 1000);
     const ids = (kind: Derived) =>
@@ -1792,7 +1783,7 @@ export class MaintenanceContext {
         .filter(Boolean)
         .join("\n");
     const existing = await this.runtime.db.query(
-      "SELECT id,revision,event_data AS data,embedding FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])",
+      "SELECT id,version,event_data AS data,embedding FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])",
       [...scoped(this.claim), upserts.map(([id]) => id)],
     );
     const current = new Map(existing.rows.map((row) => [row.id, row]));
@@ -1832,7 +1823,7 @@ export class MaintenanceContext {
     return vectors;
   }
 
-  private async publish(lease: UserLease, vectors: Map<string, string>, resuming: boolean) {
+  private async publish(vectors: Map<string, string>, resuming: boolean) {
     const { db } = this.runtime;
     const scope = scoped(this.claim);
     const { config: currentConfig, stored } = await getConfigSnapshot(
@@ -1919,8 +1910,8 @@ export class MaintenanceContext {
       fail("maintenance_read_conflict", "Fact support changed", true);
     const fence = [
       ...scope,
-      lease.generation,
-      lease.version,
+      [...this.reads.facts.keys()],
+      [...this.reads.facts.values()],
       this.claim.id,
       this.claim.owner,
       stored,
@@ -1937,16 +1928,21 @@ export class MaintenanceContext {
         ),
       ].sort();
       const written = await db.query(
-        `WITH ${publicationFence}, saved AS (
+        `WITH ${publicationFence}, changed AS (
+           UPDATE memoia.user_events SET event_data=$10::jsonb,embedding=$11,
+             version=version+1,updated_at=clock_timestamp()
+           FROM allowed
+           WHERE id=$8 AND user_id=$1 AND project_id=$2 AND version=$9::bigint
+           RETURNING id
+         ), created AS (
            INSERT INTO memoia.user_events(id,user_id,project_id,event_data,embedding)
            SELECT $8,$1,$2,$10::jsonb,$11 FROM allowed
-           WHERE NOT EXISTS (SELECT 1 FROM memoia.memory_deleted_events WHERE user_id=$1 AND project_id=$2 AND id=$8)
-             AND ($9::bigint IS NULL OR EXISTS (
-               SELECT 1 FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=$8 AND revision=$9))
-           ON CONFLICT(id,project_id) DO UPDATE SET event_data=excluded.event_data,embedding=excluded.embedding,
-             revision=user_events.revision+1,updated_at=clock_timestamp()
-           WHERE user_events.user_id=$1 AND user_events.revision=$9
+           WHERE $9::bigint IS NULL AND NOT EXISTS (
+             SELECT 1 FROM memoia.memory_deleted_events WHERE user_id=$1 AND project_id=$2 AND id=$8)
+           ON CONFLICT DO NOTHING
            RETURNING id
+         ), saved AS (
+           SELECT id FROM changed UNION ALL SELECT id FROM created
          ), removed AS (
            DELETE FROM memoia.memory_event_facts ef USING saved
            WHERE ef.user_id=$1 AND ef.project_id=$2 AND ef.event_id=saved.id
@@ -1983,9 +1979,18 @@ export class MaintenanceContext {
         fence,
         profiles.map(([id, change]) => ({
           id,
-          revision: this.reads.profiles.get(id) ?? null,
+          version: this.reads.profiles.get(id) ?? null,
           content: change.action === "upsert" ? change.content! : null,
-          data: change.action === "upsert" ? dataFor(change) : null,
+          data: change.action === "upsert" ? {
+            ...dataFor(change),
+            _fact_revisions: Object.fromEntries(
+              [...new Set([...(change.fact_ids ?? []), ...(impactIds ?? [])])]
+                .flatMap((factId) => {
+                  const revision = this.reads.facts.get(factId);
+                  return revision == null ? [] : [[factId, revision]];
+                }),
+            ),
+          } : null,
         })),
       );
     for (const [id, change] of events) {
@@ -1994,7 +1999,7 @@ export class MaintenanceContext {
       const removed = await db.query(
         `WITH ${publicationFence}
          DELETE FROM memoia.user_events USING allowed
-         WHERE user_id=$1 AND project_id=$2 AND id=$8 AND revision=$9`,
+         WHERE user_id=$1 AND project_id=$2 AND id=$8 AND version=$9`,
         [...fence, id, this.reads.events.get(id) ?? null],
       );
       if (!removed.rowCount)
@@ -2006,7 +2011,7 @@ export class MaintenanceContext {
     fence: unknown[],
     changes: {
       id: string;
-      revision: string | null;
+      version: string | null;
       content: string | null;
       data: Record<string, unknown> | null;
     }[],
@@ -2047,68 +2052,98 @@ export class MaintenanceContext {
           fact_ids: [...(r.attributes.fact_ids ?? [])].sort(),
           source_ids: [...(r.attributes.source_ids ?? [])].sort(),
           _impact_fact_ids: r.attributes._impact_fact_ids ?? null,
+          _fact_revisions: r.attributes._fact_revisions ?? {},
         }));
     const existing = (
       await db.query(
-        "SELECT id,content,attributes FROM memoia.user_profiles WHERE user_id=$1 AND project_id=$2 ORDER BY id",
-        scope,
+        "SELECT id,content,attributes FROM memoia.user_profiles WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])",
+        [...scope, changes.map(({ id }) => id)],
       )
     ).rows;
-    const before = historySafe(existing, pendingIds);
-    const proposed = new Map(existing.map((row) => [row.id, row]));
-    for (const { id, content, data } of changes) {
-      if (content === null) proposed.delete(id);
-      else proposed.set(id, { id, content, attributes: data });
-    }
-    const after = historySafe(
-      [...proposed.values()].sort((a, b) => a.id.localeCompare(b.id)),
-      futureIds,
+    const proposed = changes.flatMap(({ id, content, data }) =>
+      content === null ? [] : [{ id, content, attributes: data }],
     );
-    const old = new Map(before.map((row) => [row.id, row]));
-    const next = new Map(after.map((row) => [row.id, row]));
+    const old = new Map(historySafe(existing, pendingIds).map((row) => [row.id, row]));
+    const next = new Map(historySafe(proposed, futureIds).map((row) => [row.id, row]));
+    const history = changes.flatMap(({ id }) => {
+      const previous = old.get(id) ?? null;
+      const proposed = next.get(id) ?? null;
+      return isDeepStrictEqual(previous, proposed) ? [] : [{ id, previous, proposed }];
+    });
     this.active();
     const written = await db.query(
       `WITH ${publicationFence}, input AS MATERIALIZED (
-         SELECT * FROM jsonb_to_recordset($8::jsonb) AS p(id uuid,revision bigint,content text,data jsonb)
-       ), ready AS MATERIALIZED (
-         SELECT p.* FROM input p CROSS JOIN allowed WHERE NOT EXISTS (
-           SELECT 1 FROM input i LEFT JOIN memoia.user_profiles existing
-             ON existing.id=i.id AND existing.project_id=$2
-           WHERE existing.revision IS DISTINCT FROM i.revision
-              OR (existing.id IS NOT NULL AND existing.user_id<>$1))
+         SELECT p.* FROM jsonb_to_recordset($8::jsonb) AS p(id uuid,version bigint,content text,data jsonb)
+         CROSS JOIN allowed
        ), removed AS (
-         DELETE FROM memoia.user_profiles existing USING ready
-         WHERE ready.content IS NULL AND existing.id=ready.id AND existing.user_id=$1
-           AND existing.project_id=$2 AND existing.revision=ready.revision RETURNING existing.id
-       ), saved AS (
+         DELETE FROM memoia.user_profiles existing USING input
+         WHERE input.content IS NULL AND existing.id=input.id AND existing.user_id=$1
+           AND existing.project_id=$2 AND existing.version=input.version RETURNING existing.id
+       ), changed AS (
+         UPDATE memoia.user_profiles p SET content=input.content,attributes=input.data,
+           version=p.version+1,updated_at=clock_timestamp()
+         FROM input WHERE input.content IS NOT NULL AND p.id=input.id
+           AND p.user_id=$1 AND p.project_id=$2 AND p.version=input.version
+         RETURNING p.id
+       ), created AS (
          INSERT INTO memoia.user_profiles(id,user_id,project_id,content,attributes)
-         SELECT id,$1,$2,content,data FROM ready WHERE content IS NOT NULL
-         ON CONFLICT(id,project_id) DO UPDATE SET content=excluded.content,attributes=excluded.attributes,
-           revision=user_profiles.revision+1,updated_at=clock_timestamp()
-         WHERE user_profiles.user_id=$1
-           AND user_profiles.revision=(SELECT i.revision FROM input i WHERE i.id=excluded.id)
-         RETURNING id
+         SELECT id,$1,$2,content,data FROM input WHERE content IS NOT NULL AND version IS NULL
+         ON CONFLICT DO NOTHING RETURNING id
+       ), applied AS (
+         SELECT id FROM removed UNION ALL SELECT id FROM changed UNION ALL SELECT id FROM created
+       ), snapshot_rows AS (
+         SELECT p.id,p.content,p.attributes FROM memoia.user_profiles p
+         WHERE p.user_id=$1 AND p.project_id=$2 AND NOT EXISTS (SELECT 1 FROM applied a WHERE a.id=p.id)
+         UNION ALL
+         SELECT i.id,i.content,i.data FROM input i JOIN applied a USING (id) WHERE i.content IS NOT NULL
+       ), snapshot AS (
+         SELECT id,jsonb_build_object(
+           'id',id,'content',content,'topic',COALESCE(attributes->>'topic',''),
+           'sub_topic',COALESCE(attributes->>'sub_topic',''),
+           'fact_ids',COALESCE(NULLIF(attributes->'fact_ids','null'::jsonb),'[]'::jsonb),
+           'source_ids',COALESCE(NULLIF(attributes->'source_ids','null'::jsonb),'[]'::jsonb),
+           '_impact_fact_ids',attributes->'_impact_fact_ids',
+           '_fact_revisions',COALESCE(attributes->'_fact_revisions','{}'::jsonb)
+         ) AS profile
+         FROM snapshot_rows WHERE attributes->'memoia_v2'='true'::jsonb AND (
+           cardinality($11::text[])=0 OR (
+             jsonb_typeof(attributes->'_impact_fact_ids')='array'
+             AND NOT (attributes->'_impact_fact_ids' ?| $11::text[])
+             AND NOT (COALESCE(attributes->'fact_ids','[]'::jsonb) ?| $11::text[])
+           )
+         )
+       ), delta AS (
+         SELECT h.* FROM jsonb_to_recordset($10::jsonb) AS h(id uuid,previous jsonb,proposed jsonb)
+         JOIN applied a USING (id)
+       ), recorded AS (
+         INSERT INTO memoia.memory_profile_revisions AS prior
+           (id,user_id,project_id,operation_id,profiles,added,removed)
+         SELECT $9,$1,$2,$5,
+           COALESCE((SELECT jsonb_agg(profile ORDER BY id) FROM snapshot),'[]'::jsonb),
+           COALESCE((SELECT jsonb_agg(proposed ORDER BY id) FROM delta WHERE proposed IS NOT NULL),'[]'::jsonb),
+           COALESCE((SELECT jsonb_agg(previous ORDER BY id) FROM delta WHERE previous IS NOT NULL),'[]'::jsonb)
+         WHERE EXISTS (SELECT 1 FROM applied)
+         ON CONFLICT(operation_id) DO UPDATE SET profiles=excluded.profiles,(added,removed)=(
+           WITH earlier AS (
+             SELECT COALESCE(b.value->>'id',a.value->>'id') AS id,b.value AS previous,a.value AS proposed
+             FROM jsonb_array_elements(prior.removed) b FULL JOIN jsonb_array_elements(prior.added) a
+               ON b.value->>'id'=a.value->>'id'
+           ), merged AS (
+             SELECT COALESCE(e.id,d.id::text) AS id,
+               CASE WHEN e.id IS NULL THEN d.previous ELSE e.previous END AS previous,
+               CASE WHEN d.id IS NULL THEN e.proposed ELSE d.proposed END AS proposed
+             FROM earlier e FULL JOIN delta d ON d.id::text=e.id
+           )
+           SELECT
+             COALESCE(jsonb_agg(proposed ORDER BY id) FILTER (WHERE proposed IS NOT NULL),'[]'::jsonb),
+             COALESCE(jsonb_agg(previous ORDER BY id) FILTER (WHERE previous IS NOT NULL),'[]'::jsonb)
+           FROM merged WHERE previous IS DISTINCT FROM proposed
+         )
        )
-       INSERT INTO memoia.memory_profile_revisions(id,user_id,project_id,operation_id,profiles,added,removed)
-       SELECT $9,$1,$2,$5,$10::jsonb,$11::jsonb,$12::jsonb
-       WHERE (SELECT count(*) FROM saved)+(SELECT count(*) FROM removed)=(SELECT count(*) FROM input)
-       ON CONFLICT(operation_id) DO UPDATE
-       SET profiles=excluded.profiles,added=excluded.added,removed=excluded.removed
-       RETURNING id`,
-      [
-        ...fence,
-        JSON.stringify(changes),
-        crypto.randomUUID(),
-        JSON.stringify(after),
-        JSON.stringify(
-          after.filter((row) => !isDeepStrictEqual(old.get(row.id), row)),
-        ),
-        JSON.stringify(
-          before.filter((row) => !isDeepStrictEqual(next.get(row.id), row)),
-        ),
-      ],
+       SELECT id FROM applied`,
+      [...fence, JSON.stringify(changes), crypto.randomUUID(), JSON.stringify(history), [...futureIds]],
     );
-    if (!written.rowCount)
+    if (written.rowCount !== changes.length)
       fail(
         "maintenance_read_conflict",
         "Profile changed before publication",

@@ -1,4 +1,4 @@
-import type { Database } from "./db";
+import { isForgottenUser, type Database, type UserScope } from "./db";
 import type { Principal, Scope } from "./auth";
 import { SourceError } from "./errors";
 
@@ -68,23 +68,21 @@ export async function createProject(
 ) {
   authorize(principal, undefined, true);
   try {
-    return await db.transaction(async (tx) => {
-      const r = await tx.query(
-        `INSERT INTO memoia.projects (id,project_id,project_secret,status)
-        VALUES ($1,$2,$3,'active') RETURNING project_id,status,created_at`,
-        [crypto.randomUUID(), projectId, `sk-${projectId}-${randomHex(32)}`],
-      );
-      const billingId = crypto.randomUUID();
-      await tx.query(
-        `INSERT INTO memoia.billings (id,usage_left,next_refill_at) VALUES ($1,-1,date_trunc('month',now())+interval '1 month')`,
-        [billingId],
-      );
-      await tx.query(
-        `INSERT INTO memoia.project_billings (project_id,billing_id) VALUES ($1,$2)`,
-        [projectId, billingId],
-      );
-      return r.rows[0];
-    });
+    const r = await db.query(
+      `WITH project AS (
+         INSERT INTO memoia.projects (id,project_id,project_secret,status)
+         VALUES ($1,$2,$3,'active') RETURNING project_id,status,created_at
+       ), billing AS (
+         INSERT INTO memoia.billings (id,usage_left,next_refill_at)
+         VALUES ($4,-1,date_trunc('month',now())+interval '1 month') RETURNING id
+       ), linked AS (
+         INSERT INTO memoia.project_billings (project_id,billing_id)
+         SELECT project.project_id,billing.id FROM project CROSS JOIN billing
+       )
+       SELECT * FROM project`,
+      [crypto.randomUUID(), projectId, `sk-${projectId}-${randomHex(32)}`, crypto.randomUUID()],
+    );
+    return r.rows[0];
   } catch (error) {
     if ((error as { code?: string }).code === "23505")
       throw new SourceError(
@@ -195,37 +193,7 @@ export async function rotateLegacyToken(
   return { token };
 }
 
-import {
-  acquireUserLease,
-  assertUserLease,
-  finishUserLease,
-  releaseUserLease,
-  lockIdentity,
-} from "./db";
-import type { Sql, UserScope } from "./db";
 
-async function userWrite<T>(
-  db: Database,
-  scope: UserScope,
-  fn: (tx: Sql) => Promise<T>,
-): Promise<T> {
-  const lease = await acquireUserLease(db, scope, 30_000);
-  try {
-    return await db.transaction(async (tx) => {
-      await assertUserLease(tx, lease);
-      const result = await fn(tx);
-      await finishUserLease(tx, lease);
-      return result;
-    });
-  } catch (error) {
-    try {
-      await releaseUserLease(db, lease);
-    } catch {
-      /* Preserve the original failure. */
-    }
-    throw error;
-  }
-}
 export async function createUser(
   db: Database,
   projectId: string,
@@ -233,25 +201,13 @@ export async function createUser(
 ) {
   const id = body.id ?? crypto.randomUUID();
   try {
-    await db.transaction(async (tx) => {
-      await lockIdentity(tx, { projectId, userId: id });
-      const tombstone = await tx.query(
-        "SELECT 1 FROM memoia.memory_user_tombstones WHERE user_id=$1 AND project_id=$2",
-        [id, projectId],
-      );
-      if (tombstone.rowCount)
-        throw new SourceError(
-          "user_forgotten",
-          "User identity was permanently forgotten",
-          403,
-          false,
-        );
-      await tx.query(
-        "INSERT INTO memoia.users (id,project_id,additional_fields) VALUES ($1,$2,$3::jsonb)",
-        [id, projectId, JSON.stringify(body.data ?? null)],
-      );
-    });
+    await db.query(
+      "INSERT INTO memoia.users (id,project_id,additional_fields) VALUES ($1,$2,$3::jsonb)",
+      [id, projectId, JSON.stringify(body.data ?? null)],
+    );
   } catch (error) {
+    if (isForgottenUser(error))
+      throw new SourceError("user_forgotten", "User identity was permanently forgotten", 403, false);
     if ((error as { code?: string }).code === "23505")
       throw new SourceError("user_exists", "User already exists", 409, false);
     throw error;
@@ -305,22 +261,21 @@ export async function addProfile(
   body: { content: string; topic: string; sub_topic: string },
 ) {
   const id = crypto.randomUUID();
-  await userWrite(db, scope, (tx) =>
-    tx.query(
-      "INSERT INTO memoia.user_profiles (id,user_id,project_id,content,attributes) VALUES ($1,$2,$3,$4,$5::jsonb)",
-      [
-        id,
-        scope.userId,
-        scope.projectId,
-        body.content,
-        JSON.stringify({
-          topic: body.topic,
-          sub_topic: body.sub_topic,
-          _impact_fact_ids: [],
-        }),
-      ],
-    ),
+  const inserted = await db.query(
+    "INSERT INTO memoia.user_profiles (id,user_id,project_id,content,attributes) SELECT $1,id,project_id,$4,$5::jsonb FROM memoia.users WHERE id=$2 AND project_id=$3",
+    [
+      id,
+      scope.userId,
+      scope.projectId,
+      body.content,
+      JSON.stringify({
+        topic: body.topic,
+        sub_topic: body.sub_topic,
+        _impact_fact_ids: [],
+      }),
+    ],
   );
+  if (!inserted.rowCount) missing("User");
   return { id };
 }
 export async function updateProfile(
@@ -329,52 +284,41 @@ export async function updateProfile(
   id: string,
   body: { content: string; topic: string; sub_topic: string },
 ) {
-  await userWrite(db, scope, async (tx) => {
-    const r = await tx.query(
-      `UPDATE memoia.user_profiles SET content=$4,attributes=$5::jsonb || COALESCE((SELECT jsonb_object_agg(k,v) FROM jsonb_each(COALESCE(attributes,'{}'::jsonb)) AS old(k,v) WHERE k='_impact_fact_ids' OR (attributes->>'memoia_v2'='true' AND k IN ('memoia_v2','fact_ids','source_ids'))),'{}'::jsonb),
-      revision=revision+1,updated_at=now() WHERE id=$3 AND user_id=$1 AND project_id=$2 RETURNING id`,
-      [
-        scope.userId,
-        scope.projectId,
-        id,
-        body.content,
-        JSON.stringify({ topic: body.topic, sub_topic: body.sub_topic }),
-      ],
-    );
-    if (!r.rowCount) missing("Profile");
-  });
+  const r = await db.query(
+    `UPDATE memoia.user_profiles SET content=$4,attributes=$5::jsonb || COALESCE((SELECT jsonb_object_agg(k,v) FROM jsonb_each(COALESCE(attributes,'{}'::jsonb)) AS old(k,v) WHERE k='_impact_fact_ids' OR (attributes->>'memoia_v2'='true' AND k IN ('memoia_v2','fact_ids','source_ids','_fact_revisions'))),'{}'::jsonb),
+    version=version+1,updated_at=now() WHERE id=$3 AND user_id=$1 AND project_id=$2 RETURNING id`,
+    [
+      scope.userId,
+      scope.projectId,
+      id,
+      body.content,
+      JSON.stringify({ topic: body.topic, sub_topic: body.sub_topic }),
+    ],
+  );
+  if (!r.rowCount) missing("Profile");
 }
 export async function deleteProfile(
   db: Database,
   scope: UserScope,
   id: string,
 ) {
-  await userWrite(db, scope, async (tx) => {
-    const r = await tx.query(
-      "DELETE FROM memoia.user_profiles WHERE id=$3 AND user_id=$1 AND project_id=$2 RETURNING id",
-      [scope.userId, scope.projectId, id],
-    );
-    if (!r.rowCount) missing("Profile");
-  });
+  const r = await db.query(
+    "DELETE FROM memoia.user_profiles WHERE id=$3 AND user_id=$1 AND project_id=$2 RETURNING id",
+    [scope.userId, scope.projectId, id],
+  );
+  if (!r.rowCount) missing("Profile");
 }
 export async function deleteEvent(db: Database, scope: UserScope, id: string) {
-  await userWrite(db, scope, async (tx) => {
-    const r = await tx.query(
-      "SELECT id FROM memoia.user_events WHERE id=$3 AND user_id=$1 AND project_id=$2 FOR UPDATE",
-      [scope.userId, scope.projectId, id],
-    );
-    if (!r.rowCount) missing("Event");
-    await tx.query(
-      "UPDATE memoia.memory_blobs SET event_deleted=true WHERE event_id=$3 AND user_id=$1 AND project_id=$2",
-      [scope.userId, scope.projectId, id],
-    );
-    await tx.query(
-      "INSERT INTO memoia.memory_deleted_events (id,user_id,project_id) VALUES ($3,$1,$2) ON CONFLICT DO NOTHING",
-      [scope.userId, scope.projectId, id],
-    );
-    await tx.query(
-      "DELETE FROM memoia.user_events WHERE id=$3 AND user_id=$1 AND project_id=$2",
-      [scope.userId, scope.projectId, id],
-    );
-  });
+  const removed = await db.query(
+    `WITH removed AS (
+         DELETE FROM memoia.user_events WHERE id=$3 AND user_id=$1 AND project_id=$2
+         RETURNING id,user_id,project_id
+       ), tombstone AS (
+         INSERT INTO memoia.memory_deleted_events (id,user_id,project_id)
+         SELECT id,user_id,project_id FROM removed ON CONFLICT DO NOTHING
+       )
+       SELECT id FROM removed`,
+    [scope.userId, scope.projectId, id],
+  );
+  if (!removed.rowCount) missing("Event");
 }

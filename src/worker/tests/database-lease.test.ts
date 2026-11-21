@@ -3,18 +3,14 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
   Database,
-  acquireUserLease,
-  assertUserLease,
-  finishUserLease,
-  renewUserLease,
-  LeaseLostError,
+  bumpMemoryVersion,
   addUsage,
   monthlyTokenUsage,
 } from "../src/db";
 
 const url = process.env.MEMOIA_TEST_DATABASE_URL;
 test(
-  "user lease fences stale writers and rolls back expired writes; usage counters are atomic",
+  "memory versions and usage counters are atomic across concurrent writes",
   { skip: !url },
   async () => {
     const db = new Database(url!);
@@ -30,47 +26,16 @@ test(
         userId,
         projectId,
       ]);
-      const first = await acquireUserLease(db, scope, 10_000);
-      await assert.rejects(acquireUserLease(db, scope, 10_000), LeaseLostError);
-      await renewUserLease(db, first, 10_000);
-      const version = await db.transaction(async (tx) => {
-        await assertUserLease(tx, first);
-        await tx.query(
-          "UPDATE memoia.users SET additional_fields=$3 WHERE id=$1 AND project_id=$2",
-          [userId, projectId, { accepted: true }],
-        );
-        return finishUserLease(tx, first);
-      });
-      assert.equal(version, "1");
-      await assert.rejects(renewUserLease(db, first, 10_000), LeaseLostError);
-      const expired = await acquireUserLease(db, scope, 10_000);
-      await assert.rejects(
-        db.transaction(async (tx) => {
-          await assertUserLease(tx, expired);
-          await tx.query(
-            "UPDATE memoia.users SET additional_fields=$3 WHERE id=$1 AND project_id=$2",
-            [userId, projectId, { shouldRollback: true }],
-          );
-          await tx.query(
-            "UPDATE memoia.memory_user_states SET writer_lease_until=clock_timestamp()-interval '1 second' WHERE user_id=$1 AND project_id=$2",
-            [userId, projectId],
-          );
-          await finishUserLease(tx, expired);
-        }),
-        LeaseLostError,
-      );
-      const row = await db.query(
-        "SELECT additional_fields FROM memoia.users WHERE id=$1 AND project_id=$2",
-        [userId, projectId],
-      );
-      assert.deepEqual(row.rows[0].additional_fields, { accepted: true });
-      await db.query(
-        "UPDATE memoia.memory_user_states SET writer_lease_until=clock_timestamp()-interval '1 second' WHERE user_id=$1 AND project_id=$2",
-        [userId, projectId],
-      );
-      await assert.rejects(renewUserLease(db, expired, 10_000), LeaseLostError);
-      const next = await acquireUserLease(db, scope, 10_000);
-      assert.notEqual(next.generation, expired.generation);
+      const versions = await Promise.all([
+        bumpMemoryVersion(db, scope),
+        bumpMemoryVersion(db, scope),
+      ]);
+      assert.deepEqual(versions.sort(), [1, 2]);
+      await assert.rejects(db.transaction(async (tx) => {
+        assert.equal(await bumpMemoryVersion(tx, scope), 3);
+        throw new Error("rollback");
+      }), /rollback/);
+      assert.equal(await bumpMemoryVersion(db, scope), 3);
       await db.transaction(async (tx) => {
         await addUsage(tx, projectId, {
           llm_input_tokens: 9,
@@ -109,19 +74,16 @@ test(
 );
 
 test(
-  "vector types and operators resolve from the installed extension schema",
+  "standalone SQL resolves vector types and operators from the installed schema",
   { skip: !url },
   async () => {
     const db = new Database(url!);
     try {
-      const query = "SELECT '[1,0]'::vector <=> '[1,0]'::vector AS distance";
-      assert.equal(
-        await db.transaction(
-          async (tx) => (await tx.query(query)).rows[0].distance,
-          { vector: true, readOnly: true },
-        ),
-        0,
+      const schema = await db.vectorSchema();
+      const result = await db.query(
+        `SELECT '[1,0]'::${schema}.vector OPERATOR(${schema}.<=>) '[1,0]'::${schema}.vector AS distance`,
       );
+      assert.equal(result.rows[0].distance, 0);
     } finally {
       await db.close();
     }
@@ -129,33 +91,20 @@ test(
 );
 
 test(
-  "transaction declares snapshot isolation before resolving vector schema",
+  "short write transactions use the PostgreSQL default isolation",
   { skip: !url },
   async () => {
     const db = new Database(url!);
     try {
-      await db.transaction(
-        async (tx) => {
-          const state = await tx.query(
-            "SELECT current_setting('transaction_isolation') AS isolation, current_setting('transaction_read_only') AS read_only",
-          );
-          assert.deepEqual(state.rows[0], {
-            isolation: "repeatable read",
-            read_only: "on",
-          });
-          const vector = await tx.query(
-            "SELECT '[1,0]'::vector <=> '[1,0]'::vector AS distance",
-          );
-          assert.equal(vector.rows[0].distance, 0);
-        },
-        { isolation: "repeatable read", readOnly: true, vector: true },
-      );
-      await assert.rejects(
-        db.transaction(
-          (tx) => tx.query("CREATE TEMP TABLE readonly_forbidden (id int)"),
-          { isolation: "repeatable read", readOnly: true },
-        ),
-      );
+      await db.transaction(async (tx) => {
+        const state = await tx.query(
+          "SELECT current_setting('transaction_isolation') AS isolation, current_setting('transaction_read_only') AS read_only",
+        );
+        assert.deepEqual(state.rows[0], {
+          isolation: "read committed",
+          read_only: "off",
+        });
+      });
     } finally {
       await db.close();
     }

@@ -8,13 +8,13 @@ Install Node.js 22, pnpm 10.12.4, Docker and PostgreSQL client tools. Install ea
 
 `pnpm build:node` bundles the Node API, maintenance worker and migration CLI with the same Prompt files and SQL migrations. Production Docker uses Node 24. Its Compose stack runs its own PostgreSQL/pgvector; Supabase/Hyperdrive remains the Cloudflare deployment path. See the [Docker setup](../deploy/README.md#docker-independent-postgresql) for explicit initialization and startup.
 
-Explicitly supply local test database URLs. The complete root gate in [the deployment guide](../deploy/README.md) starts isolated PostgreSQL/Redis and runs every required integration test. Worker runtime needs no Redis: its PostgreSQL writer lease and Legato Task lease have separate owners, and model waits hold neither SQL transactions nor the short commit lease. A running task renews its lease every 60 seconds. The lease expires 180 seconds after claim or the last successful renewal, capped by the slice's hard deadline.
+Explicitly supply local test database URLs. The complete root gate in [the deployment guide](../deploy/README.md) starts isolated PostgreSQL/Redis and runs every required integration test. Worker runtime uses Legato Task leases for execution ownership. Model waits hold no database transaction or checked-out connection. A running task renews its lease every 60 seconds. The lease expires 180 seconds after claim or the last successful renewal, capped by the slice's hard deadline.
 
 ## Configuration
 
 Cloudflare Workers require a Hyperdrive binding with query caching disabled, including local Workers development. Node and Docker use an explicit `DATABASE_URL`. Worker secrets include `ACCESS_TOKEN`, `OPENAI_API_KEY` and any separate embedding/billing credential. `MEMOIA_CONFIG` supplies supported service settings as JSON; project settings override model, reasoning, language, topics and Fact-specific selection through the normal management API. Store sensitive gateway headers as secrets. No credentials belong in repository templates or logs.
 
-Service configuration must be a JSON object with supported field names and valid types. Invalid configuration is rejected before accepting business work, including unknown/retired keys; diagnostics contain field names, not values. `source_input_retention_seconds` is a positive integer (default 604800): it governs temporary import and correction input. Existing unexpired inputs keep their original expiry on retry; completion erases input immediately.
+Service configuration must be a JSON object with supported field names and valid types. Invalid configuration is rejected before accepting business work, including unknown/retired keys; diagnostics contain field names, not values. `source_input_retention_seconds` is a positive integer (default 604800): it governs temporary import input. Existing unexpired inputs keep their original expiry on retry; completion erases input immediately.
 
 The default embedding model is `text-embedding-3-large` with 1536 dimensions, matching the former deployment template and the TS database baseline. Preserve the effective model and dimension of existing vectors when migrating, including explicit configuration overrides: equal dimensions do not make vectors from different models interchangeable. Changing the model requires regenerating its vectors; changing dimensions also requires a compatible schema/index migration and retrieval evaluation.
 
@@ -30,10 +30,15 @@ Dependency versions and security overrides live in package manifests/locks. The 
 
 ## Database statements and transactions
 
-- Use `db.query` for one schema-qualified SQL statement. It runs directly for a probe, independent read or self-contained write. PostgreSQL provides statement-level atomicity.
-- A Queue task must never wrap its execution in a database transaction. Release the transaction and checked-out connection before model calls (including Flex), embedding, Queue sends, other external I/O, or retry waits. Use the Legato watchdog for in-process checks and standalone conditional updates for transitions that only change the task row.
-- Open an explicit transaction only for a bounded SQL unit with a documented reason, such as a consistent snapshot or dependent writes that must succeed together. Keep scope and lock time to that unit.
-- Set `vector: true` on transactions that use pgvector types or operators. Only these transactions set a local search path that includes the installed extension's schema.
+The rules below define the target for implementation and review. Verify each affected entry point against them.
+
+- Use standalone, schema-qualified statements for probes, ordinary retrieval and independent writes. Retrieval uses ordinary `SELECT` statements without an explicit read transaction.
+- Use PostgreSQL’s default isolation for short write transactions (normally READ COMMITTED). Open one only when dependent writes must commit together. For each explicit lock or transaction, identify the concrete failure it prevents and the business rule at stake. Prefer existing constraints and conditional writes.
+- Use Legato's standalone claim for Fact and maintenance tasks, with the watchdog tracking execution ownership. Read the fixed batch after claiming. Never wrap an entire Queue task in a transaction. Release the transaction and checked-out connection before model calls (including Flex), embedding, Queue sends, other external I/O or retry waits.
+- Vector ranking qualifies the pgvector type and operator with the extension schema resolved from PostgreSQL. It runs as a standalone read.
+- Fact import has one execution path. Append requests stage text and visual descriptions. A Fact flush claims the fixed inputs and runs the Fact Agent. Historical synchronous import receipts remain readable.
+- Publish Profile and Event entries with their own version checks in standalone SQL. Profile history records only successful changes. Keep successful writes and resume the original Task for unfinished work. Confirm completion with the Legato CAS.
+- Fact drafts, candidates, prepared vectors and segment failures update the append receipt in one conditional statement. The statement checks task ownership and the sealed input version, so a retired executor or a retracted input cannot save a stale checkpoint. Completed checkpoints are reused on recovery. Publishing new Facts, processing their message identities and completing the original receipts still commit together.
 - Cron scans, notification reservation and acknowledgement, and retention cleanup use standalone SQL. The minute Cron only reconciles maintenance. The five-minute Cron clears expired operation input. The daily Cron removes expired usage counters. Daily history includes today and the previous 29 days, while the current calendar month counter supports quota checks. Expiry checks still apply at retry time. Blob sealing and expired lease revocation keep their concurrency protections.
 
 ## Database trace boundaries

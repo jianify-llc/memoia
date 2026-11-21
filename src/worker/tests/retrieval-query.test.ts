@@ -34,10 +34,11 @@ test("fact query scopes both ranking and evidence to one project and honors excl
           },
         ],
       };
-    if (sql.includes("FROM memoia.memory_messages"))
+    if (sql.includes("JOIN memoia.memory_messages"))
       return {
         rows: [
           {
+            source_id: "source",
             message_id: "m1",
             occurred_at: "2026-01-01T00:00:00Z",
             time_zone: null,
@@ -60,10 +61,10 @@ test("fact query scopes both ranking and evidence to one project and honors excl
   assert.match(rank.sql, /NOT \(f\.id=ANY/);
   assert.deepEqual(rank.values.slice(0, 2), [userId, "alpha"]);
   const evidence = calls.find((c) =>
-    c.sql.includes("FROM memoia.memory_messages"),
+    c.sql.includes("JOIN memoia.memory_messages"),
   )!;
-  assert.deepEqual(evidence.values.slice(0, 3), [userId, "alpha", "source"]);
-  assert.match(evidence.sql, /AND NOT deleted/);
+  assert.deepEqual(evidence.values, [userId, "alpha", ["source"], ["m1"]]);
+  assert.match(evidence.sql, /AND NOT m\.deleted/);
 });
 
 test("search without events never reads legacy stories or event associations", async () => {
@@ -97,10 +98,11 @@ test("search without events never reads legacy stories or event associations", a
           },
         ],
       };
-    if (sql.includes("FROM memoia.memory_messages"))
+    if (sql.includes("JOIN memoia.memory_messages"))
       return {
         rows: [
           {
+            source_id: "source",
             message_id: "m1",
             occurred_at: "2026-01-01T00:00:00Z",
             time_zone: null,

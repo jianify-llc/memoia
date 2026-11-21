@@ -98,37 +98,7 @@ function parseNumbers(text: string): any {
     },
   );
 }
-/** Recover exact numeric values from persisted JSONB when retrying. */
+/** Preserve metadata number spellings for request fingerprints and JSONB input. */
 export function parseImportMetadata(text: string): Record<string, unknown> {
   return parseNumbers(text).metadata ?? {};
-}
-
-/** Called after ordinary DTO validation, keeping strict Python integers for attachments. */
-export function prepareImportBody<
-  T extends {
-    metadata?: Record<string, unknown>;
-    messages: Array<{
-      images?: Array<{ width: unknown; height: unknown; byteSize: unknown }>;
-    }>;
-  },
->(text: string, body: T): T {
-  const parsed = parseNumbers(text);
-  body.metadata = parsed.metadata ?? {};
-  for (let i = 0; i < body.messages.length; i++) {
-    const images = body.messages[i].images ?? [];
-    for (let j = 0; j < images.length; j++) {
-      const original = parsed.messages[i].images[j];
-      for (const key of ["width", "height", "byteSize"] as const) {
-        const value = original[key];
-        if (
-          !(value instanceof JsonNumber) ||
-          /[.eE]/.test(value.source) ||
-          value.source.replace(/^-/, "").length > 4300
-        )
-          throw new TypeError("Image dimensions must be integers");
-        images[j][key] = value;
-      }
-    }
-  }
-  return body;
 }

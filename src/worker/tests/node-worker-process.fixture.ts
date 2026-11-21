@@ -94,13 +94,17 @@ await test("SIGKILL and restart resume the saved checkpoint on the original task
   let first: ChildProcess | undefined, second: ChildProcess | undefined;
   let firstExit: ReturnType<typeof exited> | undefined,
     secondExit: ReturnType<typeof exited> | undefined;
-  let locked = false;
+  const applicationName = `memoia-crash-${scope.userId}`;
+  const crashUrl = new URL(databaseUrl);
+  crashUrl.searchParams.set("application_name", applicationName);
+  const gate = "memoia_test_pause_final_cas";
+  let installed = false;
   let stderr = "";
-  function start() {
+  function start(firstRun = false) {
     const child = spawn(
       process.execPath,
       [process.env.MEMOIA_TEST_WORKER_CLI!],
-      { env, stdio: ["ignore", "ignore", "pipe"] },
+      { env: firstRun ? { ...env, DATABASE_URL: crashUrl.toString() } : env, stdio: ["ignore", "ignore", "pipe"] },
     );
     child.stderr?.on("data", (chunk) => {
       stderr += chunk.toString();
@@ -139,18 +143,19 @@ await test("SIGKILL and restart resume the saved checkpoint on the original task
       [scope.userId, projectId, factId, blobId, JSON.stringify([[messageId]])],
     );
     const op = await flush(runtime, scope, "restart");
-    await db.query(
-      "INSERT INTO memoia.memory_user_states(user_id,project_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
-      [scope.userId, projectId],
-    );
     await lock.connect();
-    await lock.query("BEGIN");
-    locked = true;
-    await lock.query(
-      "SELECT 1 FROM memoia.memory_user_states WHERE user_id=$1 AND project_id=$2 FOR UPDATE",
-      [scope.userId, projectId],
-    );
-    first = start();
+    await lock.query("SELECT pg_advisory_lock(83201531)");
+    await db.query(`CREATE FUNCTION memoia.${gate}() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.status='succeeded' AND current_setting('application_name')='${applicationName}' THEN
+          PERFORM pg_advisory_xact_lock(83201531);
+        END IF;
+        RETURN NEW;
+      END $$`);
+    await db.query(`CREATE TRIGGER ${gate} BEFORE UPDATE ON memoia.queue_tasks
+      FOR EACH ROW EXECUTE FUNCTION memoia.${gate}()`);
+    installed = true;
+    first = start(true);
     firstExit = exited(first);
     const read = async () =>
       db.transaction((tx) => maintenanceTasks.readInTx(tx, op.operation_id));
@@ -162,11 +167,17 @@ await test("SIGKILL and restart resume the saved checkpoint on the original task
       "saved checkpoint",
     );
     assert.equal(requests, 1);
+    const blocked = await until(
+      async () => (await db.query(
+        "SELECT pid FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock'",
+        [applicationName],
+      )).rows[0],
+      Boolean, "final CAS to wait behind the test gate",
+    );
     first.kill("SIGKILL");
     assert.equal((await firstExit).signal, "SIGKILL");
-    await lock.query("ROLLBACK");
-    locked = false;
-    // Advance only this test task's local database clock fields to avoid waiting for lease and retry timers.
+    await db.query("SELECT pg_terminate_backend($1,5000)", [blocked.pid]);
+    await lock.query("SELECT pg_advisory_unlock(83201531)");
     await db.query(
       "UPDATE memoia.queue_tasks SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
       [op.operation_id],
@@ -186,7 +197,17 @@ await test("SIGKILL and restart resume the saved checkpoint on the original task
       read,
       (row) => row?.status === "succeeded",
       "checkpoint completion",
-    );
+    ).catch(async (error) => {
+      const task = await read();
+      const state = {
+        status: task?.status,
+        resultCode: task?.resultCode,
+        lastFailure: task?.lastFailure?.resultCode,
+        requests,
+      };
+      throw new Error(`${error.message}: ${JSON.stringify(state)}
+${stderr}`, { cause: error });
+    });
     assert.equal(requests, 1);
     assert.equal(Number(after!.runAttempts), Number(before!.runAttempts) + 1);
     assert.equal(Number(after!.failureCount), 1);
@@ -213,8 +234,9 @@ await test("SIGKILL and restart resume the saved checkpoint on the original task
       second.kill("SIGKILL");
       await secondExit;
     }
-    if (locked) await lock.query("ROLLBACK");
     await lock.end();
+    if (installed)
+      await db.query(`DROP TRIGGER ${gate} ON memoia.queue_tasks; DROP FUNCTION memoia.${gate}()`);
     await new Promise<void>((resolve, reject) =>
       server.close((err) => (err ? reject(err) : resolve())),
     );

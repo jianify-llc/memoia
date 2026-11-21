@@ -41,6 +41,7 @@ export interface Runtime {
   db: Database;
   ownsDatabase?: boolean;
   maintenanceWakeup?: MaintenanceWakeup;
+  waitUntil?: (work: Promise<void>) => void;
   modelFetch?: typeof fetch;
   env: RuntimeEnv;
   deadline: number;

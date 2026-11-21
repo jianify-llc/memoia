@@ -420,6 +420,10 @@ test(
         { idempotency_key: "retract-before-stage", message_ids: ["m1"] },
       );
       assert.equal(tombstone.status, 200);
+      assert.equal((await db.query(
+        "SELECT 1 FROM memoia.memory_messages WHERE user_id=$1 AND source_id='retracted-source'",
+        [user],
+      )).rowCount, 0);
       const absent = await api(
         "POST",
         `/api/users/${user}/blobs`,
@@ -437,7 +441,7 @@ test(
         "SELECT request->'messages' AS messages FROM memoia.memory_operations WHERE id=$1",
         [absentId],
       );
-      assert.deepEqual(withdrawn.rows[0].messages, []);
+      assert.deepEqual(withdrawn.rows[0].messages, input.messages);
       assert.equal(relayCalls, 3);
       assert.equal(embeddingCalls, 2);
       const retrySource = "retry-source";

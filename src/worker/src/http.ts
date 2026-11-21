@@ -6,7 +6,7 @@ import { InactiveUserError, LeaseLostError } from "./db";
 import { authenticate, allows, requiredScope, type Principal } from "./auth";
 import * as management from "./management";
 import * as retrieval from "./retrieval";
-import { prepareImportBody } from "./canonical";
+import { parseImportMetadata } from "./canonical";
 // Generated from the checked-in OpenAPI contract, shared with the SDK.
 // @ts-ignore standalone generated JavaScript
 import * as generated from "../../../sdks/typescript/src/generated/validators.js";
@@ -16,7 +16,7 @@ const maintenanceApi = () => import("./maintenance");
 
 type Env = {
   Bindings: RuntimeEnv;
-  Variables: { runtime: Runtime; principal: Principal };
+  Variables: { runtime: Runtime; principal: Principal; requestBody: string };
 };
 type C = any;
 type Validator = (value: unknown) => boolean;
@@ -46,10 +46,10 @@ function scope(c: C) {
     projectId: c.get("principal").projectId,
   };
 }
-async function body(c: C, name: string): Promise<any> {
+async function readRequestBody(request: Request): Promise<string> {
   const chunks: Uint8Array[] = [];
   let size = 0;
-  const reader = c.req.raw.body?.getReader();
+  const reader = request.body?.getReader();
   if (reader)
     try {
       while (true) {
@@ -57,7 +57,7 @@ async function body(c: C, name: string): Promise<any> {
         if (part.done) break;
         size += part.value.byteLength;
         if (size > 2 * 1024 * 1024) {
-          await reader.cancel();
+          await reader.cancel().catch(() => {});
           throw new SourceError(
             "body_too_large",
             "Request body exceeds 2 MiB",
@@ -76,7 +76,10 @@ async function body(c: C, name: string): Promise<any> {
     buffer.set(chunk, at);
     at += chunk.byteLength;
   }
-  const rawText = new TextDecoder().decode(buffer);
+  return new TextDecoder().decode(buffer);
+}
+function body(c: C, name: string): any {
+  const rawText = c.get("requestBody") ?? "";
   let value: any;
   try {
     value = JSON.parse(rawText);
@@ -86,7 +89,7 @@ async function body(c: C, name: string): Promise<any> {
   check(name, value);
   if (name === "Import")
     try {
-      value = prepareImportBody(rawText, value);
+      value.metadata = parseImportMetadata(rawText);
     } catch {
       return invalid();
     }
@@ -236,24 +239,7 @@ export function createApp(
         ["POST", "PUT", "PATCH", "DELETE"].includes(c.req.method) &&
         c.req.raw.body
       ) {
-        const reader = c.req.raw.clone().body!.getReader();
-        let size = 0;
-        try {
-          while (true) {
-            const part = await reader.read();
-            if (part.done) break;
-            size += part.value.byteLength;
-            if (size > 2 * 1024 * 1024)
-              throw new SourceError(
-                "body_too_large",
-                "Request body exceeds 2 MiB",
-                413,
-                false,
-              );
-          }
-        } finally {
-          reader.releaseLock();
-        }
+        c.set("requestBody", await readRequestBody(c.req.raw));
       }
       await next();
     } finally {
@@ -312,7 +298,7 @@ export function createApp(
       await management.createProject(
         runtime(c).db,
         principal(c),
-        (await body(c, "ProjectCreate")).project_id,
+        body(c, "ProjectCreate").project_id,
       ),
       201,
     ),
@@ -323,7 +309,7 @@ export function createApp(
         runtime(c).db,
         principal(c),
         c.req.param("project_id"),
-        (await body(c, "ProjectUpdate")).status,
+        body(c, "ProjectUpdate").status,
       ),
     ),
   );
@@ -345,7 +331,7 @@ export function createApp(
         runtime(c).db,
         principal(c),
         c.req.param("project_id"),
-        await body(c, "KeyCreate"),
+        body(c, "KeyCreate"),
       ),
       201,
     ),
@@ -373,7 +359,7 @@ export function createApp(
       await management.createUser(
         runtime(c).db,
         principal(c).projectId,
-        await body(c, "UserInput"),
+        body(c, "UserInput"),
       ),
       201,
     ),
@@ -410,12 +396,12 @@ export function createApp(
       c,
       await (
         await factApi()
-      ).stageImport(runtime(c), scope(c), await body(c, "Import")),
+      ).stageImport(runtime(c), scope(c), body(c, "Import")),
     ),
   );
   app.post("/api/users/:user_id/blobs/:blob_id/flush", async (c) =>
     receipt(c, await (await import("./fact-flush.js")).flushBlob(
-      runtime(c), scope(c), c.req.param("blob_id"), await body(c, "FactFlushInput"),
+      runtime(c), scope(c), c.req.param("blob_id"), body(c, "FactFlushInput"),
     )),
   );
   app.get("/api/users/:user_id/operations", async (c) => {
@@ -461,7 +447,7 @@ export function createApp(
       ).flush(
         runtime(c),
         scope(c),
-        (await body(c, "FlushInput")).idempotency_key,
+        body(c, "FlushInput").idempotency_key,
       ),
     ),
   );
@@ -500,7 +486,7 @@ export function createApp(
         runtime(c),
         scope(c),
         c.req.param("source_id"),
-        await body(c, "MessageDeletion"),
+        body(c, "MessageDeletion"),
       ),
     ),
   );
@@ -520,7 +506,7 @@ export function createApp(
         runtime(c),
         scope(c),
         pathUuid(c, "fact_id"),
-        await body(c, "UpdateFact"),
+        body(c, "UpdateFact"),
       ),
     ),
   );
@@ -533,7 +519,7 @@ export function createApp(
         runtime(c),
         scope(c),
         pathUuid(c, "fact_id"),
-        await body(c, "DeleteFact"),
+        body(c, "DeleteFact"),
       ),
     ),
   );
@@ -553,7 +539,7 @@ export function createApp(
       await management.addProfile(
         runtime(c).db,
         scope(c),
-        await body(c, "ProfileInput"),
+        body(c, "ProfileInput"),
       ),
       201,
     ),
@@ -563,7 +549,7 @@ export function createApp(
       runtime(c).db,
       scope(c),
       pathUuid(c, "profile_id"),
-      await body(c, "ProfileInput"),
+      body(c, "ProfileInput"),
     );
     return c.body(null, 204);
   });
@@ -599,7 +585,7 @@ export function createApp(
       await retrieval.queryFacts(
         runtime(c),
         scope(c),
-        await body(c, "FactQuery"),
+        body(c, "FactQuery"),
       ),
     ),
   );
@@ -608,7 +594,7 @@ export function createApp(
       await retrieval.queryEvents(
         runtime(c),
         scope(c),
-        await body(c, "EventQuery"),
+        body(c, "EventQuery"),
       ),
     ),
   );
@@ -617,7 +603,7 @@ export function createApp(
       await retrieval.queryProfiles(
         runtime(c),
         scope(c),
-        await body(c, "ProfileQuery"),
+        body(c, "ProfileQuery"),
       ),
     ),
   );
@@ -626,7 +612,7 @@ export function createApp(
       await retrieval.search(
         runtime(c),
         scope(c),
-        await body(c, "SearchInput"),
+        body(c, "SearchInput"),
       ),
     ),
   );
@@ -635,7 +621,7 @@ export function createApp(
       await retrieval.context(
         runtime(c),
         scope(c),
-        await body(c, "ContextInput"),
+        body(c, "ContextInput"),
       ),
     ),
   );
@@ -646,7 +632,7 @@ export function createApp(
     await retrieval.updateConfig(
       runtime(c),
       principal(c).projectId,
-      await body(c, "Config"),
+      body(c, "Config"),
     );
     return c.body(null, 204);
   });

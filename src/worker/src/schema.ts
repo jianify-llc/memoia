@@ -277,6 +277,12 @@ export const queueTasksInMemoia = memoia.table(
   taskColumns({ id: "uuid" }),
   (table): PgTableExtraConfigValue[] => [
     ...taskConstraints(table),
+    uniqueIndex("uq_memoia_running_task_scope")
+      .on(table.userId, sql`(${table.bizParams}->>'project_id')`, table.type)
+      .where(sql`status='running' AND type IN ('fact_flush','maintenance_flush')`),
+    uniqueIndex("uq_memoia_active_fact_blob")
+      .on(sql`(${table.bizParams}->>'blob_id')`)
+      .where(sql`type='fact_flush' AND status IN ('pending','queued','running','retry_wait')`),
     foreignKey({
       columns: [table.id],
       foreignColumns: [memoryOperationsInMemoia.id],
@@ -878,7 +884,7 @@ export const userEventsInMemoia = memoia.table(
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
-    revision: bigint({ mode: "bigint" })
+    version: bigint({ mode: "bigint" })
       .default(sql`1`)
       .notNull(),
   },
@@ -927,7 +933,7 @@ export const userProfilesInMemoia = memoia.table(
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
-    revision: bigint({ mode: "bigint" })
+    version: bigint({ mode: "bigint" })
       .default(sql`1`)
       .notNull(),
   },

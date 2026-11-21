@@ -50,9 +50,9 @@ test(
         data: content ? JSON.parse(content) : null,
       };
     };
+    const project = `p${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    const other = `p${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
     try {
-      const project = `p${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
-      const other = `p${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
       assert.equal(
         (
           await api("POST", "/api/projects", "local-root", {
@@ -122,6 +122,10 @@ test(
           )
         ).status,
         204,
+      );
+      assert.equal(
+        (await db.query("SELECT version FROM memoia.user_profiles WHERE id=$1", [profile.data.id])).rows[0].version,
+        "2",
       );
       const blob = crypto.randomUUID(),
         fact = crypto.randomUUID(),
@@ -424,7 +428,11 @@ test(
         401,
       );
     } finally {
-      await db.end();
+      try {
+        await db.query("DELETE FROM memoia.projects WHERE project_id=ANY($1::text[])", [[project, other]]);
+      } finally {
+        await db.end();
+      }
     }
   },
 );

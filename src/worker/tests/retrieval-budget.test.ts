@@ -51,9 +51,9 @@ test("event pages skip filtered and oversized entries, preserve evidence, and st
       };
     if (sql.startsWith("SELECT DISTINCT x.value")) return { rows: [] };
     if (sql.startsWith("SELECT f.*,b.source_id")) return { rows: [fact] };
-    if (sql.includes("FROM memoia.memory_messages"))
+    if (sql.includes("JOIN memoia.memory_messages"))
       return {
-        rows: [{ message_id: "m1", occurred_at: date, time_zone: null }],
+        rows: [{ source_id: "source", message_id: "m1", occurred_at: date, time_zone: null }],
       };
     throw new Error(sql);
   };
@@ -111,9 +111,9 @@ test("fact and profile queries hydrate only the first ranked page when limit is 
         return { rows: [{ id: factId }] };
       if (kind === "profiles" && sql.startsWith("SELECT f.*,b.source_id"))
         return { rows: [fact] };
-      if (sql.includes("FROM memoia.memory_messages"))
+      if (sql.includes("JOIN memoia.memory_messages"))
         return {
-          rows: [{ message_id: "m1", occurred_at: date, time_zone: null }],
+          rows: [{ source_id: "source", message_id: "m1", occurred_at: date, time_zone: null }],
         };
       throw new Error(sql);
     };

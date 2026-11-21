@@ -42,10 +42,11 @@ function fits(value: unknown, max: number): boolean {
   return countTokens(JSON.stringify(value)) <= max;
 }
 async function complete(
+  runtime: Runtime,
   field: string,
   ranking: Array<{ id: string; score: number }>,
   input: Query,
-  load: (page: Array<{ id: string; score: number }>) => Promise<any[]>,
+  load: (tx: Sql, page: Array<{ id: string; score: number }>) => Promise<any[]>,
 ) {
   const result: Record<string, any[]> = { [field]: [] };
   if (!fits(result, budget(input)))
@@ -55,8 +56,10 @@ async function complete(
       422,
       false,
     );
+  if (!ranking.length) return result;
+  const tx = runtime.db;
   for (let start = 0; start < ranking.length; start += 20) {
-    const entries = await load(ranking.slice(start, start + 20));
+    const entries = await load(tx, ranking.slice(start, start + 20));
     for (const item of entries) {
       if (fits({ [field]: [...result[field], item] }, budget(input)))
         result[field].push(item);
@@ -64,15 +67,6 @@ async function complete(
     }
   }
   return result;
-}
-async function snapshot<T>(
-  runtime: Runtime,
-  fn: (tx: Sql) => Promise<T>,
-): Promise<T> {
-  return runtime.db.transaction(fn, {
-    isolation: "repeatable read",
-    readOnly: true,
-  });
 }
 async function pending(
   tx: Sql,
@@ -114,13 +108,20 @@ async function evidence(tx: Sql, scope: UserScope, rows: any[]) {
     bySource.set(row.source_id, ids);
   }
   const observations = new Map<string, any[]>();
-  for (const [source, ids] of bySource) {
-    const r = await tx.query(
-      `SELECT message_id,occurred_at,time_zone FROM memoia.memory_messages
-      WHERE user_id=$1 AND project_id=$2 AND source_id=$3 AND message_id=ANY($4::text[]) AND NOT deleted`,
-      [...params(scope), source, [...ids]],
+  const pairs = [...bySource].flatMap(([source, ids]) => [...ids].map((id) => ({ source, id })));
+  if (pairs.length) {
+    const { rows } = await tx.query(
+      `SELECT m.source_id,m.message_id,m.occurred_at,m.time_zone
+       FROM unnest($3::text[],$4::text[]) AS wanted(source_id,message_id)
+       JOIN memoia.memory_messages m USING (source_id,message_id)
+       WHERE m.user_id=$1 AND m.project_id=$2 AND NOT m.deleted`,
+      [...params(scope), pairs.map(({ source }) => source), pairs.map(({ id }) => id)],
     );
-    observations.set(source, r.rows);
+    for (const row of rows) {
+      let source = observations.get(row.source_id);
+      if (!source) observations.set(row.source_id, source = []);
+      source.push(row);
+    }
   }
   return new Map(
     rows.map((row) => [
@@ -250,7 +251,7 @@ async function queryVector(
       : timer;
     return (
       (
-        await embeddings({ ...runtime, signal }, projectId, [query], "query")
+        await embeddings({ ...runtime, signal }, projectId, [query], "query", config)
       )[0] ?? null
     );
   } catch (error: any) {
@@ -273,6 +274,11 @@ async function queryVector(
     return null;
   }
 }
+async function vectorDistance(runtime: Runtime, column: string, parameter: number) {
+  const schema = await runtime.db.vectorSchema();
+  return `${column} OPERATOR(${schema}.<=>) $${parameter}::${schema}.vector`;
+}
+
 async function rank(
   runtime: Runtime,
   scope: UserScope,
@@ -300,13 +306,13 @@ async function rank(
       ? Promise.resolve(null)
       : (sharedVector ?? queryVector(runtime, scope.projectId, input.query));
   const [lex, embedding] = await Promise.all([lexical, vector]);
-  const sem = embedding
-    ? await runtime.db.transaction(
-        (tx) => tx.query(
-          `SELECT ${base.alias}.id FROM ${base.from} WHERE ${base.where} AND ${base.alias}.embedding IS NOT NULL AND 1-(${base.alias}.embedding <=> $${base.v.length + 1}::vector) > 0.2 ORDER BY ${base.alias}.embedding <=> $${base.v.length + 1}::vector,${base.alias}.id LIMIT ${cap}`,
-          [...base.v, `[${embedding.join(",")}]`],
-        ),
-        { readOnly: true, vector: true },
+  const distance = embedding && await vectorDistance(runtime, `${base.alias}.embedding`, base.v.length + 1);
+  const sem = embedding && distance
+    ? await runtime.db.query(
+        `SELECT ${base.alias}.id FROM ${base.from} WHERE ${base.where}
+         AND ${base.alias}.embedding IS NOT NULL AND 1-(${distance}) > 0.2
+         ORDER BY ${distance},${base.alias}.id LIMIT ${cap}`,
+        [...base.v, `[${embedding.join(",")}]`],
       )
     : { rows: [] };
   const scores = new Map<string, number>();
@@ -450,22 +456,20 @@ export async function queryFacts(
   input: Query,
 ) {
   const ranking = await rank(runtime, scope, "facts", input);
-  return snapshot(runtime, (tx) =>
-    complete("facts", ranking, input, async (page) => {
-      const rows = await selectedRows(
-        tx,
-        scope,
-        "facts",
-        input,
-        page.map((x) => x.id),
-      );
-      const proof = await evidence(tx, scope, rows);
-      const byId = new Map(rows.map((row) => [row.id, row]));
-      return page.flatMap(({ id, score }) =>
-        byId.has(id) ? [factEntry(byId.get(id), proof.get(id), score)] : [],
-      );
-    }),
-  );
+  return complete(runtime, "facts", ranking, input, async (tx, page) => {
+    const rows = await selectedRows(
+      tx,
+      scope,
+      "facts",
+      input,
+      page.map((x) => x.id),
+    );
+    const proof = await evidence(tx, scope, rows);
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    return page.flatMap(({ id, score }) =>
+      byId.has(id) ? [factEntry(byId.get(id), proof.get(id), score)] : [],
+    );
+  });
 }
 export async function queryEvents(
   runtime: Runtime,
@@ -473,57 +477,55 @@ export async function queryEvents(
   input: Query,
 ) {
   const ranking = await rank(runtime, scope, "events", input);
-  return snapshot(runtime, (tx) =>
-    complete("events", ranking, input, async (page) => {
-      const rows = await selectedRows(
-        tx,
-        scope,
-        "events",
-        input,
-        page.map((x) => x.id),
-      );
-      const data = await views(tx, scope, rows);
-      const byId = new Map(rows.map((row) => [row.id, row]));
-      const entries = page.flatMap(({ id, score }) => {
-        const row = byId.get(id);
-        if (!row) return [];
-        if (input.fact_ids?.length || input.event_after || input.event_before) {
-          const refs = data.get(id).fact_ids as string[];
-          if (
-            input.fact_ids?.length &&
-            !refs.some((x) => input.fact_ids!.includes(x))
-          )
-            return [];
-          if (
-            (input.event_after || input.event_before) &&
-            !data
-              .get(id)
-              .evidence.some(
-                (p: any) =>
-                  p.fact_time &&
-                  (!input.event_after ||
-                    p.fact_time.end >= input.event_after) &&
-                  (!input.event_before ||
-                    p.fact_time.start <= input.event_before) &&
-                  (!input.fact_ids?.length ||
-                    input.fact_ids.includes(p.fact_id)),
-              )
-          )
-            return [];
-        }
-        return [
-          {
-            id,
-            score,
-            event_data: data.get(id),
-            created_at: row.created_at,
-            updated_at: row.updated_at,
-          },
-        ];
-      });
-      return entries;
-    }),
-  );
+  return complete(runtime, "events", ranking, input, async (tx, page) => {
+    const rows = await selectedRows(
+      tx,
+      scope,
+      "events",
+      input,
+      page.map((x) => x.id),
+    );
+    const data = await views(tx, scope, rows);
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const entries = page.flatMap(({ id, score }) => {
+      const row = byId.get(id);
+      if (!row) return [];
+      if (input.fact_ids?.length || input.event_after || input.event_before) {
+        const refs = data.get(id).fact_ids as string[];
+        if (
+          input.fact_ids?.length &&
+          !refs.some((x) => input.fact_ids!.includes(x))
+        )
+          return [];
+        if (
+          (input.event_after || input.event_before) &&
+          !data
+            .get(id)
+            .evidence.some(
+              (p: any) =>
+                p.fact_time &&
+                (!input.event_after ||
+                  p.fact_time.end >= input.event_after) &&
+                (!input.event_before ||
+                  p.fact_time.start <= input.event_before) &&
+                (!input.fact_ids?.length ||
+                  input.fact_ids.includes(p.fact_id)),
+            )
+        )
+          return [];
+      }
+      return [
+        {
+          id,
+          score,
+          event_data: data.get(id),
+          created_at: row.created_at,
+          updated_at: row.updated_at,
+        },
+      ];
+    });
+    return entries;
+  });
 }
 export async function queryProfiles(
   runtime: Runtime,
@@ -531,48 +533,45 @@ export async function queryProfiles(
   input: Query,
 ) {
   const ranking = await rank(runtime, scope, "profiles", input);
-  return snapshot(runtime, (tx) =>
-    complete("profiles", ranking, input, async (page) => {
-      const rows = await selectedRows(
-        tx,
-        scope,
-        "profiles",
-        input,
-        page.map((x) => x.id),
-      );
-      const scores = new Map(page.map((x) => [x.id, x.score]));
-      const entries = await profileEntries(tx, scope, rows, scores);
-      const byId = new Map(entries.map((row) => [row.id, row]));
-      return page.flatMap(({ id }) => (byId.has(id) ? [byId.get(id)] : []));
-    }),
-  );
+  return complete(runtime, "profiles", ranking, input, async (tx, page) => {
+    const rows = await selectedRows(
+      tx,
+      scope,
+      "profiles",
+      input,
+      page.map((x) => x.id),
+    );
+    const scores = new Map(page.map((x) => [x.id, x.score]));
+    const entries = await profileEntries(tx, scope, rows, scores);
+    const byId = new Map(entries.map((row) => [row.id, row]));
+    return page.flatMap(({ id }) => (byId.has(id) ? [byId.get(id)] : []));
+  });
 }
 export async function getProfiles(runtime: Runtime, scope: UserScope) {
-  return snapshot(runtime, async (tx) => {
-    const rows = (
-      await tx.query(
-        "SELECT * FROM memoia.user_profiles WHERE user_id=$1 AND project_id=$2",
-        [...params(scope)],
-      )
-    ).rows;
-    const entries = await profileEntries(tx, scope, rows, new Map());
-    const sourceById = new Map(rows.map((row) => [row.id, row.attributes]));
-    return {
-      profiles: entries
-        .map(({ score, fact_ids, ...row }) => {
-          const attrs = sourceById.get(row.id);
-          return attrs && !Object.hasOwn(attrs, "fact_ids")
-            ? { ...row, source_ids: attrs.source_ids ?? [] }
-            : row;
-        })
-        .sort(
-          (a, b) =>
-            a.topic.localeCompare(b.topic) ||
-            a.sub_topic.localeCompare(b.sub_topic) ||
-            a.id.localeCompare(b.id),
-        ),
-    };
-  });
+  const tx = runtime.db;
+  const rows = (
+    await tx.query(
+      "SELECT * FROM memoia.user_profiles WHERE user_id=$1 AND project_id=$2",
+      [...params(scope)],
+    )
+  ).rows;
+  const entries = await profileEntries(tx, scope, rows, new Map());
+  const sourceById = new Map(rows.map((row) => [row.id, row.attributes]));
+  return {
+    profiles: entries
+      .map(({ score, fact_ids, ...row }) => {
+        const attrs = sourceById.get(row.id);
+        return attrs && !Object.hasOwn(attrs, "fact_ids")
+          ? { ...row, source_ids: attrs.source_ids ?? [] }
+          : row;
+      })
+      .sort(
+        (a, b) =>
+          a.topic.localeCompare(b.topic) ||
+          a.sub_topic.localeCompare(b.sub_topic) ||
+          a.id.localeCompare(b.id),
+      ),
+  };
 }
 export async function getEvents(
   runtime: Runtime,
@@ -580,26 +579,25 @@ export async function getEvents(
   count: number,
   days: number,
 ) {
-  return snapshot(runtime, async (tx) => {
-    const rows = (
-      await tx.query(
-        `SELECT * FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND created_at>now()-($3 * interval '1 day') ORDER BY created_at DESC,id LIMIT $4`,
-        [...params(scope), days, count],
-      )
-    ).rows;
-    const data = await views(tx, scope, rows);
-    return {
-      events: rows.map((row) => {
-        const { fact_ids, ...eventData } = data.get(row.id);
-        return {
-          id: row.id,
-          event_data: eventData,
-          created_at: row.created_at,
-          updated_at: row.updated_at,
-        };
-      }),
-    };
-  });
+  const tx = runtime.db;
+  const rows = (
+    await tx.query(
+      `SELECT * FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND created_at>now()-($3 * interval '1 day') ORDER BY created_at DESC,id LIMIT $4`,
+      [...params(scope), days, count],
+    )
+  ).rows;
+  const data = await views(tx, scope, rows);
+  return {
+    events: rows.map((row) => {
+      const { fact_ids, ...eventData } = data.get(row.id);
+      return {
+        id: row.id,
+        event_data: eventData,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+      };
+    }),
+  };
 }
 type Search = {
   query: string;
@@ -630,13 +628,12 @@ async function legacyRank(
   );
   const vector = sharedVector ?? queryVector(runtime, scope.projectId, query);
   const [lex, embedding] = await Promise.all([lexical, vector]);
-  const sem = embedding
-    ? await runtime.db.transaction(
-        (tx) => tx.query(
-          `SELECT id FROM memoia.user_events WHERE ${where} AND embedding IS NOT NULL AND 1-(embedding <=> $4::vector)>0.2 ORDER BY embedding <=> $4::vector,id LIMIT ${cap}`,
-          [...params(scope), excluded, `[${embedding.join(",")}]`],
-        ),
-        { readOnly: true, vector: true },
+  const distance = embedding && await vectorDistance(runtime, "embedding", 4);
+  const sem = embedding && distance
+    ? await runtime.db.query(
+        `SELECT id FROM memoia.user_events WHERE ${where} AND embedding IS NOT NULL
+         AND 1-(${distance})>0.2 ORDER BY ${distance},id LIMIT ${cap}`,
+        [...params(scope), excluded, `[${embedding.join(",")}]`],
       )
     : { rows: [] };
   const scores = new Map<string, number>();
@@ -693,201 +690,197 @@ export async function search(
           vector,
         ),
   ]);
-  return snapshot(runtime, async (tx) => {
-    const candidates = [
-      ...unseen.slice(0, Math.min(500, Math.max(50, count * 5))),
-      ...seen.slice(0, Math.min(500, Math.max(50, count * 5))),
-    ];
-    const hydrated = await hydrateFacts(
-      tx,
-      scope,
-      candidates.map((x) => x.id),
-    );
-    const bundle: { facts: any[]; events: any[]; profiles: any[] } = {
+  const bundle: { facts: any[]; events: any[]; profiles: any[] } = {
       facts: [],
       events: [],
       profiles: [],
-    };
-    if (!fits(bundle, max))
+  };
+  if (!fits(bundle, max))
       throw new SourceError(
         "search_rejected",
         "Search request rejected",
         422,
         false,
-      );
-    const selectedScores = new Map<string, number>();
-    for (const entry of unseen) {
-      const found = hydrated.get(entry.id);
-      if (!found) continue;
-      const next = factEntry(found.row, found.proof, entry.score);
-      if (
-        bundle.facts.length < count &&
-        fits({ ...bundle, facts: [...bundle.facts, next] }, max)
-      ) {
-        bundle.facts.push(next);
-        selectedScores.set(entry.id, entry.score);
-      }
+    );
+  if (!unseen.length && !seen.length && !legacy.length) return bundle;
+  const tx = runtime.db;
+  const hydrated = await hydrateFacts(
+    tx,
+    scope,
+    [...unseen.slice(0, candidateLimit), ...seen.slice(0, candidateLimit)].map((x) => x.id),
+  );
+  const selectedScores = new Map<string, number>();
+  for (const entry of unseen) {
+    const found = hydrated.get(entry.id);
+    if (!found) continue;
+    const next = factEntry(found.row, found.proof, entry.score);
+    if (
+      bundle.facts.length < count &&
+      fits({ ...bundle, facts: [...bundle.facts, next] }, max)
+    ) {
+      bundle.facts.push(next);
+      selectedScores.set(entry.id, entry.score);
     }
-    for (const entry of seen)
-      if (hydrated.has(entry.id)) selectedScores.set(entry.id, entry.score);
-    const ids = [...selectedScores.keys()];
-    const scores = ids.map((id) => selectedScores.get(id)!);
-    const profiles = ids.length
+  }
+  for (const entry of seen)
+    if (hydrated.has(entry.id)) selectedScores.set(entry.id, entry.score);
+  const ids = [...selectedScores.keys()];
+  const scores = ids.map((id) => selectedScores.get(id)!);
+  const profiles = ids.length
+    ? (
+        await tx.query(
+          `SELECT p.* FROM memoia.user_profiles p
+          CROSS JOIN LATERAL (SELECT max(s.score) AS score FROM unnest($5::text[], $6::float8[]) AS s(id,score)
+            WHERE p.attributes->'fact_ids' @> jsonb_build_array(s.id)) matched
+          WHERE p.user_id=$1 AND p.project_id=$2 AND NOT(p.id=ANY($3::uuid[]))
+            AND (p.attributes->>'topic' IS NULL OR NOT(p.attributes->>'topic'=ANY($4::text[]))) AND matched.score IS NOT NULL
+          ORDER BY matched.score DESC,p.id LIMIT $7`,
+          [
+            ...params(scope),
+            excludedProfiles,
+            excludedTopics,
+            ids,
+            scores,
+            candidateLimit,
+          ],
+        )
+      ).rows
+    : [];
+  const profileCandidates = await profileEntries(
+    tx,
+    scope,
+    profiles,
+    new Map(),
+  );
+  const associated: any[] = [];
+  for (const p of profileCandidates) {
+    const matched = p.fact_ids.filter((id) => selectedScores.has(id));
+    if (!matched.length) continue;
+    p.score = Math.max(...matched.map((id) => selectedScores.get(id)!));
+    associated.push({ kind: "profiles", value: p });
+  }
+  if (input.include_events !== false) {
+    const events = ids.length
       ? (
           await tx.query(
-            `SELECT p.* FROM memoia.user_profiles p
-            CROSS JOIN LATERAL (SELECT max(s.score) AS score FROM unnest($5::text[], $6::float8[]) AS s(id,score)
-              WHERE p.attributes->'fact_ids' @> jsonb_build_array(s.id)) matched
-            WHERE p.user_id=$1 AND p.project_id=$2 AND NOT(p.id=ANY($3::uuid[]))
-              AND (p.attributes->>'topic' IS NULL OR NOT(p.attributes->>'topic'=ANY($4::text[]))) AND matched.score IS NOT NULL
-            ORDER BY matched.score DESC,p.id LIMIT $7`,
-            [
-              ...params(scope),
-              excludedProfiles,
-              excludedTopics,
-              ids,
-              scores,
-              candidateLimit,
-            ],
+            `SELECT e.* FROM memoia.user_events e JOIN (
+              SELECT ef.event_id,max(s.score) AS score FROM memoia.memory_event_facts ef
+              JOIN unnest($4::uuid[], $5::float8[]) AS s(id,score) ON s.id=ef.fact_id
+              WHERE ef.user_id=$1 AND ef.project_id=$2 AND NOT(ef.event_id=ANY($3::uuid[]))
+              GROUP BY ef.event_id
+            ) matched ON matched.event_id=e.id
+            WHERE e.user_id=$1 AND e.project_id=$2
+            ORDER BY matched.score DESC,e.id LIMIT $6`,
+            [...params(scope), excludedEvents, ids, scores, candidateLimit],
           )
         ).rows
       : [];
-    const profileCandidates = await profileEntries(
-      tx,
-      scope,
-      profiles,
-      new Map(),
+    const data = await views(tx, scope, events);
+    const allRefs = [
+      ...new Set(
+        events.flatMap((row) => data.get(row.id).fact_ids as string[]),
+      ),
+    ];
+    const sourcesById = new Map(
+      (await factRows(tx, scope, allRefs)).map((row) => [
+        row.id,
+        row.source_id,
+      ]),
     );
-    const associated: any[] = [];
-    for (const p of profileCandidates) {
-      const matched = p.fact_ids.filter((id) => selectedScores.has(id));
-      if (!matched.length) continue;
-      p.score = Math.max(...matched.map((id) => selectedScores.get(id)!));
-      associated.push({ kind: "profiles", value: p });
-    }
-    if (input.include_events !== false) {
-      const events = ids.length
-        ? (
-            await tx.query(
-              `SELECT e.* FROM memoia.user_events e JOIN (
-                SELECT ef.event_id,max(s.score) AS score FROM memoia.memory_event_facts ef
-                JOIN unnest($4::uuid[], $5::float8[]) AS s(id,score) ON s.id=ef.fact_id
-                WHERE ef.user_id=$1 AND ef.project_id=$2 AND NOT(ef.event_id=ANY($3::uuid[]))
-                GROUP BY ef.event_id
-              ) matched ON matched.event_id=e.id
-              WHERE e.user_id=$1 AND e.project_id=$2
-              ORDER BY matched.score DESC,e.id LIMIT $6`,
-              [...params(scope), excludedEvents, ids, scores, candidateLimit],
-            )
-          ).rows
-        : [];
-      const data = await views(tx, scope, events);
-      const allRefs = [
-        ...new Set(
-          events.flatMap((row) => data.get(row.id).fact_ids as string[]),
-        ),
-      ];
-      const sourcesById = new Map(
-        (await factRows(tx, scope, allRefs)).map((row) => [
-          row.id,
-          row.source_id,
-        ]),
+    for (const row of events) {
+      const v = data.get(row.id);
+      const refs = (v.fact_ids as string[]).filter((id) =>
+        selectedScores.has(id),
       );
-      for (const row of events) {
-        const v = data.get(row.id);
-        const refs = (v.fact_ids as string[]).filter((id) =>
-          selectedScores.has(id),
-        );
-        if (!refs.length) continue;
-        const sources = new Set(
-          v.evidence
-            .map((p: any) => sourcesById.get(p.fact_id))
-            .filter(Boolean),
-        );
-        const blobs = new Set(v.evidence.map((p: any) => p.blob_id));
+      if (!refs.length) continue;
+      const sources = new Set(
+        v.evidence
+          .map((p: any) => sourcesById.get(p.fact_id))
+          .filter(Boolean),
+      );
+      const blobs = new Set(v.evidence.map((p: any) => p.blob_id));
+      associated.push({
+        kind: "events",
+        value: {
+          id: row.id,
+          content: v.content || v.event_tip || "",
+          title: v.title ?? null,
+          summary: v.summary ?? null,
+          keywords: v.keywords ?? null,
+          event_time: v.event_time ?? null,
+          location: v.location ?? null,
+          interpretation: v.interpretation ?? null,
+          fact_ids: v.fact_ids,
+          source_id: sources.size === 1 ? [...sources][0] : null,
+          blob_id: blobs.size === 1 ? [...blobs][0] : null,
+          score: Math.max(...refs.map((id) => selectedScores.get(id)!)),
+          occurred_at: row.created_at,
+          evidence: v.evidence,
+        },
+      });
+    }
+    if (legacy.length) {
+      const rows = (
+        await tx.query(
+          `SELECT * FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[]) AND event_data->>'blob_id' IS NULL AND NOT(event_data ? 'memoia_v2')`,
+          [
+            ...params(scope),
+            legacy.slice(0, candidateLimit).map((x) => x.id),
+          ],
+        )
+      ).rows;
+      const scores = new Map(
+        legacy.slice(0, candidateLimit).map((x) => [x.id, x.score]),
+      );
+      for (const row of rows) {
+        const d = row.event_data ?? {};
         associated.push({
           kind: "events",
           value: {
             id: row.id,
-            content: v.content || v.event_tip || "",
-            title: v.title ?? null,
-            summary: v.summary ?? null,
-            keywords: v.keywords ?? null,
-            event_time: v.event_time ?? null,
-            location: v.location ?? null,
-            interpretation: v.interpretation ?? null,
-            fact_ids: v.fact_ids,
-            source_id: sources.size === 1 ? [...sources][0] : null,
-            blob_id: blobs.size === 1 ? [...blobs][0] : null,
-            score: Math.max(...refs.map((id) => selectedScores.get(id)!)),
+            content: d.event_tip || "",
+            title: d.title ?? null,
+            summary: d.summary ?? null,
+            keywords: d.keywords ?? null,
+            event_time: d.event_time ?? null,
+            location: d.location ?? null,
+            interpretation: d.interpretation ?? null,
+            fact_ids: [],
+            source_id: d.source_id ?? null,
+            blob_id: d.blob_id ?? null,
+            score: scores.get(row.id),
             occurred_at: row.created_at,
-            evidence: v.evidence,
+            evidence: [],
           },
         });
       }
-      if (legacy.length) {
-        const rows = (
-          await tx.query(
-            `SELECT * FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[]) AND event_data->>'blob_id' IS NULL AND NOT(event_data ? 'memoia_v2')`,
-            [
-              ...params(scope),
-              legacy.slice(0, candidateLimit).map((x) => x.id),
-            ],
-          )
-        ).rows;
-        const scores = new Map(
-          legacy.slice(0, candidateLimit).map((x) => [x.id, x.score]),
-        );
-        for (const row of rows) {
-          const d = row.event_data ?? {};
-          associated.push({
-            kind: "events",
-            value: {
-              id: row.id,
-              content: d.event_tip || "",
-              title: d.title ?? null,
-              summary: d.summary ?? null,
-              keywords: d.keywords ?? null,
-              event_time: d.event_time ?? null,
-              location: d.location ?? null,
-              interpretation: d.interpretation ?? null,
-              fact_ids: [],
-              source_id: d.source_id ?? null,
-              blob_id: d.blob_id ?? null,
-              score: scores.get(row.id),
-              occurred_at: row.created_at,
-              evidence: [],
-            },
-          });
-        }
-      }
     }
-    associated.sort(
-      (a, b) =>
-        b.value.score - a.value.score ||
-        a.kind.localeCompare(b.kind) ||
-        a.value.id.localeCompare(b.value.id),
-    );
-    let eventTokens = 0;
-    for (const candidate of associated) {
-      const list = bundle[candidate.kind as "events" | "profiles"];
-      const size = countTokens(JSON.stringify(candidate.value));
-      if (
-        list.length >= count ||
-        (candidate.kind === "events" &&
-          input.event_max_tokens != null &&
-          eventTokens + size > input.event_max_tokens)
-      )
-        continue;
-      if (
-        fits({ ...bundle, [candidate.kind]: [...list, candidate.value] }, max)
-      ) {
-        list.push(candidate.value);
-        if (candidate.kind === "events") eventTokens += size;
-      }
+  }
+  associated.sort(
+    (a, b) =>
+      b.value.score - a.value.score ||
+      a.kind.localeCompare(b.kind) ||
+      a.value.id.localeCompare(b.value.id),
+  );
+  let eventTokens = 0;
+  for (const candidate of associated) {
+    const list = bundle[candidate.kind as "events" | "profiles"];
+    const size = countTokens(JSON.stringify(candidate.value));
+    if (
+      list.length >= count ||
+      (candidate.kind === "events" &&
+        input.event_max_tokens != null &&
+        eventTokens + size > input.event_max_tokens)
+    )
+      continue;
+    if (
+      fits({ ...bundle, [candidate.kind]: [...list, candidate.value] }, max)
+    ) {
+      list.push(candidate.value);
+      if (candidate.kind === "events") eventTokens += size;
     }
-    return bundle;
-  });
+  }
+  return bundle;
 }
 async function contextRanking(
   runtime: Runtime,
@@ -906,14 +899,13 @@ async function contextRanking(
     lexical,
     queryVector(runtime, scope.projectId, query),
   ]);
-  const sem = vector
+  const distance = vector && await vectorDistance(runtime, "embedding", 3);
+  const sem = vector && distance
     ? (
-        await runtime.db.transaction(
-          (tx) => tx.query(
-            `SELECT id,kind FROM ${docs} WHERE embedding IS NOT NULL AND 1-(embedding <=> $3::vector)>0.2 ORDER BY embedding <=> $3::vector,id LIMIT 250`,
-            [...params(scope), `[${vector.join(",")}]`],
-          ),
-          { readOnly: true, vector: true },
+        await runtime.db.query(
+          `SELECT id,kind FROM ${docs} WHERE embedding IS NOT NULL
+           AND 1-(${distance})>0.2 ORDER BY ${distance},id LIMIT 250`,
+          [...params(scope), `[${vector.join(",")}]`],
         )
       ).rows
     : [];
@@ -994,42 +986,42 @@ export async function context(
       .filter((row) => row.kind === "fact")
       .map((row) => ({ id: row.id, score: 1000 - sorted.indexOf(row) }));
   }
-  return snapshot(runtime, async (tx) => {
-    const facts = await hydrateFacts(
-      tx,
-      scope,
-      factsRank.map((x) => x.id),
-    );
-    const events = legacy.length
-      ? (
-          await tx.query(
-            `SELECT id,event_data FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[]) AND event_data->>'blob_id' IS NULL AND NOT(event_data ? 'memoia_v2')`,
-            [...params(scope), legacy.map((x) => x.id)],
-          )
-        ).rows
-      : [];
-    const eventMap = new Map(
-      events.map((row) => [row.id, row.event_data?.event_tip ?? ""]),
-    );
-    const candidates = [
-      ...factsRank.flatMap((x) => {
-        const found = facts.get(x.id);
-        return found
-          ? [{ ...x, entry: contextEntry(found.row, found.proof) }]
-          : [];
-      }),
-      ...legacy.flatMap((x) =>
-        eventMap.has(x.id) ? [{ ...x, entry: eventMap.get(x.id) }] : [],
-      ),
-    ].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
-    const entries: string[] = [];
-    for (const item of candidates) {
-      const next = [...entries, item.entry].join("\n\n");
-      if (item.entry && countTokens(next) <= (input.max_token_size ?? 8192))
-        entries.push(item.entry);
-    }
-    return { context: entries.join("\n\n"), entries };
-  });
+  if (!factsRank.length && !legacy.length) return { context: "", entries: [] };
+  const tx = runtime.db;
+  const facts = await hydrateFacts(
+    tx,
+    scope,
+    factsRank.map((x) => x.id),
+  );
+  const events = legacy.length
+    ? (
+        await tx.query(
+          `SELECT id,event_data FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[]) AND event_data->>'blob_id' IS NULL AND NOT(event_data ? 'memoia_v2')`,
+          [...params(scope), legacy.map((x) => x.id)],
+        )
+      ).rows
+    : [];
+  const eventMap = new Map(
+    events.map((row) => [row.id, row.event_data?.event_tip ?? ""]),
+  );
+  const candidates = [
+    ...factsRank.flatMap((x) => {
+      const found = facts.get(x.id);
+      return found
+        ? [{ ...x, entry: contextEntry(found.row, found.proof) }]
+        : [];
+    }),
+    ...legacy.flatMap((x) =>
+      eventMap.has(x.id) ? [{ ...x, entry: eventMap.get(x.id) }] : [],
+    ),
+  ].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+  const entries: string[] = [];
+  for (const item of candidates) {
+    const next = [...entries, item.entry].join("\n\n");
+    if (item.entry && countTokens(next) <= (input.max_token_size ?? 8192))
+      entries.push(item.entry);
+  }
+  return { context: entries.join("\n\n"), entries };
 }
 export async function getConfig(runtime: Runtime, projectId: string) {
   const r = await runtime.db.query(

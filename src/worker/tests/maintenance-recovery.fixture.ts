@@ -4,8 +4,6 @@ import { SliceBudget, TaskTimeout, TaskYield } from "@jianify/legato";
 import {
   Database,
   DatabaseUnavailableError,
-  acquireUserLease,
-  releaseUserLease,
   type Sql,
 } from "../src/db";
 import {
@@ -19,10 +17,13 @@ import {
 } from "../src/maintenance";
 import { createUser } from "../src/management";
 import worker from "../src/index";
+import { createApp } from "../src/http";
+import { createCloudflareRuntime } from "../src/cloudflare-runtime";
 import type { Runtime } from "../src/runtime";
 import { SourceError } from "../src/errors";
 import {
   deleteMessages,
+  forgetUser,
   prepareFactAppend,
   getOperation,
   listOperations,
@@ -32,7 +33,7 @@ import {
 } from "../src/facts";
 import { runFactAgent } from "../src/fact-agent";
 import { flushBlob } from "../src/fact-flush";
-import { maintenanceTasks, projectOperation } from "../src/maintenance-task";
+import { claimTask, maintenanceTasks, projectOperation } from "../src/maintenance-task";
 
 const db = new Database(process.env.MEMOIA_TEST_DATABASE_URL!);
 const runtime = {
@@ -242,13 +243,220 @@ async function importGroup(
 
 try {
   await db.query(
-    "INSERT INTO memoia.projects(id,project_id,project_secret,status) VALUES($1,$2,'local','active')",
-    [crypto.randomUUID(), projectId],
+    "INSERT INTO memoia.projects(id,project_id,project_secret,status) VALUES($1,$2,$3,'active')",
+    [crypto.randomUUID(), projectId, `sk-${projectId}-local`],
   );
-  await test("all-noop flush completes without contacting a provider", async () => {
+  await test("a deletion receipt returns while its Queue hint is unconfirmed and Cron can recover it", async () => {
+    const scope = await user();
+    const blobId = await batch(scope, "added");
+    const {
+      rows: [{ message_id: messageId }],
+    } = await db.query(
+      "SELECT message_id FROM memoia.memory_messages WHERE user_id=$1 AND project_id=$2",
+      [scope.userId, scope.projectId],
+    );
+    const pending: Promise<unknown>[] = [];
+    let rejectDelivery!: (error: Error) => void;
+    const delivery = new Promise<never>((_, reject) => {
+      rejectDelivery = reject;
+    });
+    const sent: unknown[] = [];
+    const env = {
+      ...runtime.env,
+      HYPERDRIVE: { connectionString: process.env.MEMOIA_TEST_DATABASE_URL! },
+      waitUntil(work: Promise<unknown>) {
+        pending.push(work);
+      },
+      MAINTENANCE_QUEUE: {
+        send(message: unknown, options: unknown) {
+          sent.push([message, options]);
+          return delivery;
+        },
+      },
+    };
+    const request = new Request(
+      `https://local.test/api/users/${scope.userId}/sources/s/messages`,
+      {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer sk-${projectId}-local`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          idempotency_key: "retract",
+          message_ids: [messageId],
+        }),
+      },
+    );
+    const response = createApp(createCloudflareRuntime).fetch(request, env);
+    try {
+      const result = await Promise.race([
+        response,
+        new Promise<never>((_, reject) => {
+          const timer = setTimeout(
+            () => reject(new Error("HTTP is still waiting for the Queue")),
+            3000,
+          );
+          timer.unref();
+        }),
+      ]);
+      assert.equal(result.status, 200);
+      const receipt = (await result.json()) as {
+        operation_id: string;
+        status: string;
+      };
+      assert.equal(receipt.status, "completed");
+      assert.equal(
+        (
+          await getOperation(runtime, scope, {
+            operationId: receipt.operation_id,
+          })
+        ).status,
+        "completed",
+      );
+      assert.equal(pending.length, 1);
+      assert.deepEqual(sent, [
+        [
+          { kind: "user", user_id: scope.userId, project_id: projectId },
+          { delaySeconds: 30 },
+        ],
+      ]);
+      rejectDelivery(new Error("Queue unavailable"));
+      await Promise.all(pending);
+      await db.query(
+        "UPDATE memoia.memory_blobs SET fact_completed_at=clock_timestamp()-interval '31 seconds' WHERE user_id=$1 AND project_id=$2",
+        [scope.userId, projectId],
+      );
+      const recovered: string[] = [];
+      await reconcile({
+        ...runtime,
+        maintenanceWakeup: {
+          async send(message) {
+            if (message.kind === "flush" && message.user_id === scope.userId)
+              recovered.push(message.operation_id);
+          },
+        },
+      });
+      assert.equal(recovered.length, 1);
+      assert.ok(
+        (await operationState(recovered[0])).request.blob_ids.includes(blobId),
+      );
+    } finally {
+      void delivery.catch(() => {});
+      rejectDelivery(new Error("Test finished"));
+      await Promise.resolve(response).catch(() => {});
+      await Promise.allSettled(pending);
+    }
+  });
+  await test("Fact flush keeps its committed receipt when dispatch reservation fails and Cron reuses the Task", async (t) => {
+    const scope = await user();
+    const appended = await stageImport(runtime, scope, {
+      source_id: "s",
+      idempotency_key: "upload",
+      messages: [sourceMessage("reserve")],
+    });
+    const input = {
+      idempotency_key: "seal",
+      append_operation_ids: [appended.operation_id],
+    };
+    const reserve = maintenanceTasks.reserveDispatchInTx.bind(maintenanceTasks);
+    let attemptedId: string | undefined;
+    t.mock.method(
+      maintenanceTasks,
+      "reserveDispatchInTx",
+      async (sql: Sql, id: string, limit?: number) => {
+        if (!attemptedId) {
+          attemptedId = id;
+          throw new DatabaseUnavailableError();
+        }
+        return reserve(sql, id, limit);
+      },
+    );
+    const deliveries: Extract<
+      import("../src/runtime").Wakeup,
+      { kind: "fact_flush" }
+    >[] = [];
+    const queuedRuntime: Runtime = {
+      ...runtime,
+      maintenanceWakeup: {
+        async send(message) {
+          if (message.kind === "fact_flush" && message.user_id === scope.userId)
+            deliveries.push(message);
+        },
+      },
+    };
+    const api = createApp(() => ({ ...queuedRuntime, ownsDatabase: false }));
+    const response = await api.request(
+      `/api/users/${scope.userId}/blobs/s/flush`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer sk-${projectId}-local`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(input),
+      },
+      runtime.env,
+    );
+    assert.equal(response.status, 202);
+    const receipt = (await response.json()) as Awaited<
+      ReturnType<typeof flushBlob>
+    >;
+    assert.equal(attemptedId, receipt.operation_id);
+    assert.equal(receipt.status, "processing");
+    assert.deepEqual(deliveries, []);
+    assert.deepEqual(
+      await getOperation(runtime, scope, { key: "seal" }),
+      receipt,
+    );
+    await reconcile(queuedRuntime);
+    assert.deepEqual(deliveries, [
+      { ...wake(scope, receipt.operation_id), kind: "fact_flush" },
+    ]);
+    assert.deepEqual(await flushBlob(runtime, scope, "s", input), receipt);
+    globalThis.fetch = async () =>
+      toolResponse("finish_facts", { candidate: factCandidate("reserve") });
+    await consume(queuedRuntime, deliveries[0]);
+    const completed = await getOperation(runtime, scope, { key: "seal" });
+    assert.equal(completed.operation_id, receipt.operation_id);
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.result.fact_ids.length, 1);
+  });
+  await test("two automatic wakeups that both see due work register only one flush", async (t) => {
+    const scope = await user();
+    const blob = await batch(scope, "added");
+    await db.query(
+      "UPDATE memoia.memory_blobs SET fact_completed_at=clock_timestamp()-interval '31 seconds' WHERE id=$1",
+      [blob],
+    );
+    let bothRead!: () => void;
+    const bothSawDue = new Promise<void>((resolve) => {
+      bothRead = resolve;
+    });
+    const query = db.query.bind(db);
+    let dueReads = 0;
+    t.mock.method(db, "query", async (sql: string, values: unknown[]) => {
+      const result = await query(sql, values);
+      if (sql.includes(" AS due") && values[0] === scope.userId) {
+        assert.ok(result.rows[0].due);
+        if (++dueReads === 2) bothRead();
+        await bothSawDue;
+      }
+      return result;
+    });
+    const wakeup = {
+      kind: "user" as const,
+      user_id: scope.userId,
+      project_id: projectId,
+    };
+    await Promise.all([consume(runtime, wakeup), consume(runtime, wakeup)]);
+    assert.equal((await getStatus(runtime, scope)).flushes.length, 1);
+  });
+  await test("all-noop flush prepares once and completes without contacting a provider", async (t) => {
     const scope = await user();
     await batch(scope, "noop");
     const op = await flush(runtime, scope, "noop");
+    const prepare = t.mock.method(MaintenanceContext.prototype, "prepare");
     let calls = 0;
     globalThis.fetch = async () => {
       calls++;
@@ -258,29 +466,77 @@ try {
     const row = await operationState(op.operation_id);
     assert.equal(row.status, "completed");
     assert.equal(calls, 0);
+    assert.equal(prepare.mock.callCount(), 1);
     assert.equal(row.result.blob_ids.length, 1);
   });
-  await test("flush lists project a page of tasks with one task query", async () => {
+  await test("receipt reads join Legato state in one query and leave payloads in PostgreSQL", async (t) => {
     const scope = await user();
     await batch(scope, "noop");
-    await flush(runtime, scope, "page-one");
+    const first = await flush(runtime, scope, "page-one");
     await batch(scope, "noop");
     await flush(runtime, scope, "page-two");
-    const original = db.query.bind(db);
-    let taskReads = 0;
-    db.query = async (sql, values) => {
-      if (sql.includes('FROM "memoia"."queue_tasks"')) taskReads++;
-      return original(sql, values);
-    };
-    try {
-      assert.equal((await getStatus(runtime, scope)).flushes.length, 2);
-      assert.equal(taskReads, 1);
-      taskReads = 0;
-      assert.equal((await listOperations(runtime, scope)).length, 2);
-      assert.equal(taskReads, 1);
-    } finally {
-      db.query = original;
-    }
+    await db.query(
+      `UPDATE memoia.queue_tasks SET execution_state='{"checkpoint":"private"}' WHERE id=$1`,
+      [first.operation_id],
+    );
+    const appended = await stageImport(runtime, scope, {
+      source_id: "s",
+      idempotency_key: "private-input",
+      messages: [sourceMessage("private")],
+    });
+    const statement = db.query.bind(db);
+    const reads: string[] = [];
+    t.mock.method(
+      db,
+      "query",
+      async (...args: Parameters<Database["query"]>) => {
+        const result = await statement(...args);
+        if (args[0].includes("LEFT JOIN memoia.queue_tasks")) {
+          reads.push(args[0]);
+          for (const row of result.rows) {
+            assert.equal(row.request?.messages, undefined);
+            assert.equal(row.execution_state, undefined);
+            assert.equal(row.task_execution_state, undefined);
+          }
+        }
+        return result;
+      },
+    );
+    assert.equal((await getStatus(runtime, scope)).flushes.length, 2);
+    assert.equal((await listOperations(runtime, scope)).length, 3);
+    assert.deepEqual(
+      await getOperation(runtime, scope, { key: "private-input" }),
+      appended,
+    );
+    assert.equal(reads.length, 3);
+  });
+  await test("receipt already read with its Task stays consistent across permanent forgetting", async (t) => {
+    const scope = await user();
+    await batch(scope, "noop");
+    const receipt = await flush(runtime, scope, "forget-during-read");
+    const statement = db.query.bind(db);
+    let forgotten = false;
+    t.mock.method(
+      db,
+      "query",
+      async (...args: Parameters<Database["query"]>) => {
+        const result = await statement(...args);
+        if (!forgotten && args[1]?.[2] === receipt.operation_id) {
+          forgotten = true;
+          await forgetUser(runtime, scope);
+        }
+        return result;
+      },
+    );
+    assert.deepEqual(
+      await getOperation(runtime, scope, { operationId: receipt.operation_id }),
+      receipt,
+    );
+    assert.ok(forgotten);
+    await assert.rejects(
+      getOperation(runtime, scope, { operationId: receipt.operation_id }),
+      (error) => error instanceof SourceError && error.status === 404,
+    );
   });
 
   await test("Fact soft yield preserves new evidence coverage and charges a no-progress attempt only after a model call", async () => {
@@ -627,74 +883,67 @@ try {
     assert.equal((await operationState(group.id)).status, "failed");
     assert.equal(calls, 1);
   });
-  await test("retracting a message after the Fact candidate is saved prevents replay and removes its material", async (t) => {
-    const scope = await user();
-    const staged = await stageImport(runtime, scope, {
-      source_id: "s",
-      idempotency_key: "stage-photo",
-      messages: [
-        {
-          ...sourceMessage("photo"),
-          visual_description: "Private image description.",
-        },
-      ],
-    });
-    assert.ok(staged.blob_id);
-    const { operation_id } = await flushBlob(runtime, scope, "s", {
-      idempotency_key: "seal",
-      append_operation_ids: [staged.operation_id],
-    });
-    const message = {
-      ...wake(scope, operation_id),
-      kind: "fact_flush" as const,
-    };
-    let calls = 0;
-    globalThis.fetch = async () => {
-      calls++;
-      return toolResponse("finish_facts", {
-        candidate: factCandidate("photo"),
+  for (const timing of ["before", "after"] as const) {
+    await test(`message retraction ${timing} the Fact candidate write prevents stale replay`, async (t) => {
+      const scope = await user();
+      const staged = await stageImport(runtime, scope, {
+        source_id: "s",
+        idempotency_key: "stage-photo",
+        messages: [
+          {
+            ...sourceMessage("photo"),
+            visual_description: "Private image description.",
+          },
+        ],
       });
-    };
-    let withdrawn = false;
-    const transaction = db.transaction.bind(db);
-    t.mock.method(db, "transaction", ((run, options) => {
-      let saved = false;
-      return transaction(
-        (tx) =>
-          run({
-            query: (sql, values) => {
-              saved ||=
-                sql.includes("request=jsonb_set(o.request,ARRAY") &&
-                values?.[0] === staged.operation_id &&
-                values?.[1] === "fact_review_candidate";
-              return tx.query(sql, values);
-            },
-          }),
-        options,
-      ).then(async (result) => {
-        if (saved && !withdrawn) {
+      assert.ok(staged.blob_id);
+      const { operation_id } = await flushBlob(runtime, scope, "s", {
+        idempotency_key: "seal",
+        append_operation_ids: [staged.operation_id],
+      });
+      const message = {
+        ...wake(scope, operation_id),
+        kind: "fact_flush" as const,
+      };
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls++;
+        return toolResponse("finish_facts", {
+          candidate: factCandidate("photo"),
+        });
+      };
+      let withdrawn = false;
+      const withdraw = () => deleteMessages(runtime, scope, "s", {
+        idempotency_key: "delete",
+        message_ids: ["photo"],
+      });
+      const query = db.query.bind(db);
+      t.mock.method(db, "query", async (sql: string, values?: unknown[]) => {
+        if (!withdrawn && sql.includes("request=jsonb_set(o.request,ARRAY") &&
+            values?.[4] === staged.operation_id && values?.[6] === "fact_review_candidate") {
           withdrawn = true;
-          await deleteMessages(runtime, scope, "s", {
-            idempotency_key: "delete",
-            message_ids: ["photo"],
-          });
+          if (timing === "before") await withdraw();
+          const result = await query(sql, values);
+          assert.equal(result.rowCount, timing === "before" ? 0 : 1);
+          if (timing === "after") await withdraw();
+          return result;
         }
-        return result;
+        return query(sql, values);
       });
-    }) as typeof db.transaction);
-    await consume(runtime, message);
-    assert.equal(withdrawn, true);
-    const interrupted = await operationState(staged.operation_id);
-    assert.equal(interrupted.status, "processing");
-    assert.deepEqual(interrupted.request.messages, []);
-    assert.equal(interrupted.request.fact_review_candidate, undefined);
-    await consume(runtime, message);
-    assert.equal((await operationState(operation_id)).status, "completed");
-    const completed = await operationState(staged.operation_id);
-    assert.deepEqual(completed.result.fact_ids, []);
-    assert.equal(completed.request.messages, undefined);
-    assert.equal(calls, 1);
-  });
+      await consume(runtime, message);
+      assert.equal(withdrawn, true);
+      const interrupted = await operationState(staged.operation_id);
+      assert.equal(interrupted.status, "processing");
+      assert.deepEqual(interrupted.request.messages, []);
+      assert.equal(interrupted.request.fact_review_candidate, undefined);
+      await consume(runtime, message);
+      assert.equal((await operationState(operation_id)).status, "completed");
+      const completed = await operationState(staged.operation_id);
+      assert.deepEqual(completed.result.fact_ids, []);
+      assert.equal(completed.request.messages, undefined);
+      assert.equal(calls, 1);
+    });
+  }
   await test("many appends share the session Blob and an append arriving during extraction waits for a later flush", async () => {
     const scope = await user();
     const group = await importGroup(scope, ["first", "second"]);
@@ -783,7 +1032,7 @@ try {
       idempotency_key: "remove-active", message_ids: ["active"],
     });
     const lateReplay = await stageImport(runtime, scope, {
-      source_id: "s", idempotency_key: "late-new-key",
+      source_id: "s", idempotency_key: "late",
       messages: [sourceMessage("late")],
     });
     const saved = await operationState(lateReplay.operation_id);
@@ -1093,7 +1342,8 @@ try {
     const scope = await user();
     const blob = await batch(scope, "added");
     const op = await flush(runtime, scope, "agent-completed-resume");
-    const writer = await acquireUserLease(db, scope, 60_000);
+    const complete = maintenanceTasks.completeInTx.bind(maintenanceTasks);
+    maintenanceTasks.completeInTx = async () => { throw new DatabaseUnavailableError(); };
     let calls = 0;
     globalThis.fetch = async () => {
       calls++;
@@ -1109,7 +1359,7 @@ try {
       assert.equal(failed.failureCount, 1);
       assert.equal(calls, 1);
     } finally {
-      await releaseUserLease(db, writer);
+      maintenanceTasks.completeInTx = complete;
     }
     await db.query(
       "UPDATE memoia.queue_tasks SET next_run_at=clock_timestamp()-interval '1 second' WHERE id=$1",
@@ -1191,7 +1441,8 @@ try {
     const scope = await user();
     const blob = await batch(scope, "added");
     const op = await flush(runtime, scope, "changed-read-set");
-    const writer = await acquireUserLease(db, scope, 60_000);
+    const complete = maintenanceTasks.completeInTx.bind(maintenanceTasks);
+    maintenanceTasks.completeInTx = async () => { throw new DatabaseUnavailableError(); };
     let calls = 0;
     const requests: any[] = [];
     globalThis.fetch = async (_input, init) => {
@@ -1202,7 +1453,7 @@ try {
     try {
       await consume(runtime, wake(scope, op.operation_id));
     } finally {
-      await releaseUserLease(db, writer);
+      maintenanceTasks.completeInTx = complete;
     }
     const before = await db.transaction((tx) =>
       maintenanceTasks.readInTx(tx, op.operation_id),
@@ -1273,6 +1524,43 @@ try {
     assert.equal(done?.status, "succeeded");
     assert.equal(done.runAttempts, 2);
     assert.equal(done.failureCount, 0);
+    assert.equal(calls, 1);
+  });
+  await test("a failed fixed-batch read retries the claimed maintenance task", async () => {
+    const scope = await user();
+    const blob = await batch(scope, "added");
+    const op = await flush(runtime, scope, "batch-read-failure");
+    const message = wake(scope, op.operation_id);
+    const originalQuery = db.query.bind(db);
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return response();
+    };
+    db.query = async (sql, values, operation) => {
+      if (sql.startsWith("SELECT fact_changes FROM memoia.memory_blobs")) {
+        const task = await maintenanceTasks.readInTx({ query: originalQuery }, op.operation_id);
+        assert.equal(task?.status, "running");
+        throw new DatabaseUnavailableError();
+      }
+      return originalQuery(sql, values, operation);
+    };
+    try {
+      await consume(runtime, message);
+    } finally {
+      db.query = originalQuery;
+    }
+    assert.equal(calls, 0);
+    const waiting = await maintenanceTasks.readInTx(db, op.operation_id);
+    assert.equal(waiting?.status, "retry_wait");
+    await db.query(
+      "UPDATE memoia.queue_tasks SET next_run_at=clock_timestamp() WHERE id=$1",
+      [op.operation_id],
+    );
+    await consume(runtime, message);
+    const completed = await getOperation(runtime, scope, { operationId: op.operation_id });
+    assert.equal(completed.status, "completed");
+    assert.deepEqual(completed.result.blob_ids, [blob]);
     assert.equal(calls, 1);
   });
   await test("SDK tool failures preserve original retry policy and resume the same flush", async () => {
@@ -1426,34 +1714,24 @@ try {
     const query = db.query.bind(db);
     let eventWrites = 0,
       profileWrites = 0;
-    t.mock.method(
-      db,
-      "query",
-      async (statement: string, values?: unknown[]) => {
-        const result = await query(statement, values);
-        if (
-          statement.includes("INSERT INTO memoia.user_events") &&
-          ++eventWrites === 1
-        )
-          throw new DatabaseUnavailableError();
-        if (
-          statement.includes("INSERT INTO memoia.user_profiles") &&
-          ++profileWrites === 1
-        )
-          throw new DatabaseUnavailableError();
-        return result;
-      },
-    );
+    t.mock.method(db, "query", async (statement: string, values?: unknown[]) => {
+      const result = await query(statement, values);
+      if (statement.includes("INSERT INTO memoia.user_events") && ++eventWrites === 1)
+        throw new DatabaseUnavailableError();
+      if (statement.includes("INSERT INTO memoia.user_profiles") && ++profileWrites === 1)
+        throw new DatabaseUnavailableError();
+      return result;
+    });
     const readback = async () => {
       const events = (
         await db.query(
-          "SELECT e.id,e.revision,e.event_data,ef.fact_id FROM memoia.user_events e JOIN memoia.memory_event_facts ef ON ef.event_id=e.id AND ef.user_id=e.user_id AND ef.project_id=e.project_id WHERE e.user_id=$1 AND e.project_id=$2",
+          "SELECT e.id,e.version,e.event_data,ef.fact_id FROM memoia.user_events e JOIN memoia.memory_event_facts ef ON ef.event_id=e.id AND ef.user_id=e.user_id AND ef.project_id=e.project_id WHERE e.user_id=$1 AND e.project_id=$2",
           [scope.userId, scope.projectId],
         )
       ).rows;
       const profiles = (
         await db.query(
-          "SELECT id,revision,content FROM memoia.user_profiles WHERE user_id=$1 AND project_id=$2",
+          "SELECT id,version,content FROM memoia.user_profiles WHERE user_id=$1 AND project_id=$2",
           [scope.userId, scope.projectId],
         )
       ).rows;
@@ -1537,7 +1815,7 @@ try {
       "SELECT version FROM memoia.memory_user_states WHERE user_id=$1 AND project_id=$2",
       [scope.userId, scope.projectId],
     );
-    assert.equal(Number(state.rows[0].version), 1);
+    assert.equal(state.rowCount, 0);
     assert.equal(
       (
         await db.query(
@@ -1583,6 +1861,22 @@ try {
     const final = await operationState(op.operation_id);
     assert.equal(final.status, "completed");
     assert.deepEqual(final.result.blob_ids, [blob]);
+  });
+  await test("Legato CAS allows one running task per user even with different operation IDs", async () => {
+    const scope = await user();
+    await batch(scope, "added");
+    const first = await flush(runtime, scope, "claim-a");
+    await batch(scope, "added");
+    const second = await flush(runtime, scope, "claim-b");
+    const ids = [first.operation_id, second.operation_id];
+    const claims = await Promise.all(ids.map((id) => claimTask(db, id, "maintenance_flush")));
+    const winner = claims.find((claimed) => claimed !== null);
+    assert.equal(claims.filter(Boolean).length, 1);
+    assert.ok(winner?.leaseId);
+    assert.ok(await maintenanceTasks.completeInTx(db, winner.id, winner.leaseId, { resultCode: "COMPLETED" }));
+    const next = await claimTask(db, ids.find((id) => id !== winner.id)!, "maintenance_flush");
+    assert.ok(next?.leaseId);
+    assert.ok(await maintenanceTasks.completeInTx(db, next.id, next.leaseId, { resultCode: "COMPLETED" }));
   });
   await test("duplicate wakeups serialize per user while other users run and batch stays fixed", async () => {
     const a = await user(),

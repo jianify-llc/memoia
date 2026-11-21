@@ -1,4 +1,3 @@
-import type { JsonNumber } from "./canonical";
 import { SourceError } from "./errors";
 export interface FactTime {
   start: string | null;
@@ -100,13 +99,6 @@ export interface SourceMessage {
   content: string;
   occurred_at: string;
   time_zone?: string | null;
-  images?: {
-    url: string;
-    mimeType: string;
-    width: number | JsonNumber;
-    height: number | JsonNumber;
-    byteSize: number | JsonNumber;
-  }[];
 }
 export interface Fact {
   content: string;
@@ -193,11 +185,6 @@ export function validateFacts(raw: unknown, messages: SourceMessage[]): Fact[] {
   if (!hasKeys(raw, ["facts"]) || !Array.isArray(facts) || facts.length > 200)
     invalid("Fact count is invalid");
   const byId = new Map(messages.map((m) => [m.message_id, m]));
-  const urls = messages.flatMap((m) =>
-    (m.images ?? []).map((i) => i.url.split("?")[0]),
-  );
-  if (urls.some((url) => JSON.stringify(raw).includes(url)))
-    invalid("Fact output contains a temporary image URL");
   for (const fact of facts) {
     if (
       !hasKeys(fact, [

@@ -146,13 +146,10 @@ test("usage logs correlate the operation without changing project aggregates", a
   const { recordUsage } = await import("../src/models");
   const statements: Array<{ sql: string; values: unknown[] }> = [];
   const db = {
-    transaction: async (fn: (tx: unknown) => Promise<unknown>) =>
-      fn({
-        query: async (sql: string, values: unknown[]) => {
-          statements.push({ sql, values });
-          return { rows: [], rowCount: 1 };
-        },
-      }),
+    query: async (sql: string, values: unknown[]) => {
+      statements.push({ sql, values });
+      return { rows: [], rowCount: 1 };
+    },
   };
   const logs: string[] = [];
   const oldInfo = console.info;

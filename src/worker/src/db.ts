@@ -54,12 +54,7 @@ export interface Sql {
 }
 export type UserScope = { userId: string; projectId: string };
 type DatabaseOperation = "healthcheck" | "purge_expired_inputs";
-export type TransactionOptions = {
-  isolation?: "read committed" | "repeatable read" | "serializable";
-  readOnly?: boolean;
-  vector?: boolean;
-  operation?: DatabaseOperation;
-};
+export type TransactionOptions = { operation?: DatabaseOperation };
 
 /** Owns a bounded pool; its invocation or Node process owner closes it after work drains. */
 export class Database {
@@ -68,6 +63,7 @@ export class Database {
   private readonly transactionTimeoutMs: number;
   private readonly closeTimeoutMs: number;
   private readonly tracing?: Tracing;
+  private vectorSchemaLookup?: Promise<string>;
 
   constructor(
     connectionString: string,
@@ -101,14 +97,18 @@ export class Database {
     });
   }
 
-  private async configureSearchPath(client: Sql): Promise<void> {
-    const result =
-      await client.query(`SELECT pg_catalog.set_config('search_path',
-      pg_catalog.format('memoia,%I,extensions,public', n.nspname), true)
-      FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace
-      WHERE e.extname='vector'`);
-    if (!result.rowCount)
-      throw new Error("PostgreSQL vector extension is missing");
+  vectorSchema(): Promise<string> {
+    return this.vectorSchemaLookup ??= this.query<{ schema: string }>(
+      `SELECT pg_catalog.quote_ident(n.nspname) AS schema
+       FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace
+       WHERE e.extname='vector'`,
+    ).then(({ rows: [row] }) => {
+      if (!row) throw new Error("PostgreSQL vector extension is missing");
+      return row.schema;
+    }).catch((error) => {
+      this.vectorSchemaLookup = undefined;
+      throw error;
+    });
   }
 
   // Standalone statements must qualify application objects and use no session state.
@@ -120,37 +120,14 @@ export class Database {
     return this.withClient((client) => client.query<T>(sql, values), operation);
   }
 
-  async transaction<T>(
-    fn: (tx: Sql) => Promise<T>,
-    options: TransactionOptions = {},
-  ): Promise<T> {
-    const isolationLevels = {
-      "read committed": "READ COMMITTED",
-      "repeatable read": "REPEATABLE READ",
-      serializable: "SERIALIZABLE",
-    } as const;
-    const isolation = options.isolation && isolationLevels[options.isolation];
-    if (options.isolation && !isolation)
-      throw new Error("Invalid transaction isolation");
-    const begin = [
-      "BEGIN",
-      isolation && `ISOLATION LEVEL ${isolation}`,
-      options.readOnly === undefined
-        ? undefined
-        : options.readOnly
-          ? "READ ONLY"
-          : "READ WRITE",
-    ]
-      .filter(Boolean)
-      .join(" ");
-    return this.withClient(fn, options.operation, begin, options.vector);
+  async transaction<T>(fn: (tx: Sql) => Promise<T>, options: TransactionOptions = {}): Promise<T> {
+    return this.withClient(fn, options.operation, "BEGIN");
   }
 
   private async withClient<T>(
     fn: (tx: Sql) => Promise<T>,
     operation: DatabaseOperation | undefined,
     begin?: string,
-    vector = false,
   ): Promise<T> {
     let client: import("pg").PoolClient;
     try {
@@ -233,7 +210,6 @@ export class Database {
       if (!begin) return fn(tx);
       try {
         await query(begin, undefined, "begin");
-        if (vector) await this.configureSearchPath(tx);
         const result = await fn(tx);
         await query("COMMIT", undefined, "commit");
         return result;
@@ -296,106 +272,26 @@ export async function assertActive(tx: Sql, scope: UserScope): Promise<void> {
   if (!result.rowCount) throw new InactiveUserError();
 }
 
-export async function lockIdentity(tx: Sql, scope: UserScope): Promise<void> {
-  await tx.query(
-    "SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::uuid::text, 0))",
-    [scope.projectId, scope.userId],
-  );
+export function isForgottenUser(error: unknown): boolean {
+  return error instanceof pg.DatabaseError && error.constraint === "memoia_user_forgotten";
 }
 
-/** Serialize short user-scoped transactions with deletion and other writers. */
-export async function lockUser(tx: Sql, scope: UserScope): Promise<void> {
-  await lockIdentity(tx, scope);
-  const result = await tx.query(
-    `SELECT 1 FROM memoia.users u
-    WHERE u.id=$1 AND u.project_id=$2 AND NOT EXISTS (
-      SELECT 1 FROM memoia.memory_user_tombstones t
-      WHERE t.user_id=u.id AND t.project_id=u.project_id) FOR UPDATE OF u`,
+export async function bumpMemoryVersion(sql: Sql, scope: UserScope): Promise<number> {
+  const { rows: [row] } = await sql.query<{ version: string }>(
+    `INSERT INTO memoia.memory_user_states AS old (user_id,project_id,version)
+     VALUES ($1,$2,1)
+     ON CONFLICT (user_id,project_id) DO UPDATE SET version=old.version+1
+     RETURNING version`,
     [scope.userId, scope.projectId],
   );
-  if (!result.rowCount) throw new InactiveUserError();
+  return Number(row.version);
 }
 
-export type UserLease = UserScope & { generation: string; version: string };
+export const identityLockSql =
+  "SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::uuid::text, 0))";
 
-/** Acquire or replace an expired lease. Each acquisition increments the fencing generation. */
-export async function acquireUserLease(
-  db: Database,
-  scope: UserScope,
-  ttlMs: number,
-): Promise<UserLease> {
-  if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0)
-    throw new RangeError("Invalid lease duration");
-  return db.transaction(async (tx) => {
-    await lockUser(tx, scope);
-    await tx.query(
-      `INSERT INTO memoia.memory_user_states (user_id, project_id)
-      VALUES ($1,$2) ON CONFLICT (user_id,project_id) DO NOTHING`,
-      [scope.userId, scope.projectId],
-    );
-    const result = await tx.query<{ generation: string; version: string }>(
-      `UPDATE memoia.memory_user_states
-      SET generation=generation+1, writer_lease_until=clock_timestamp()+($3 * interval '1 millisecond')
-      WHERE user_id=$1 AND project_id=$2 AND (writer_lease_until IS NULL OR writer_lease_until <= clock_timestamp())
-      RETURNING generation, version`,
-      [scope.userId, scope.projectId, ttlMs],
-    );
-    if (!result.rowCount) throw new LeaseLostError();
-    return { ...scope, ...result.rows[0] };
-  });
-}
-
-/** Validate while holding the state row lock, in the same transaction as final writes. */
-export async function assertUserLease(
-  tx: Sql,
-  lease: UserLease,
-): Promise<void> {
-  await lockUser(tx, lease);
-  const result = await tx.query(
-    `SELECT 1 FROM memoia.memory_user_states
-    WHERE user_id=$1 AND project_id=$2 AND generation=$3 AND version=$4
-      AND writer_lease_until > clock_timestamp() FOR UPDATE`,
-    [lease.userId, lease.projectId, lease.generation, lease.version],
-  );
-  if (!result.rowCount) throw new LeaseLostError();
-}
-
-export async function renewUserLease(
-  db: Database,
-  lease: UserLease,
-  ttlMs: number,
-): Promise<void> {
-  if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0)
-    throw new RangeError("Invalid lease duration");
-  // Check the expiry after any row-lock wait so a late renewal cannot revive a lease.
-  const result = await db.query(
-    `WITH locked AS MATERIALIZED (
-       SELECT user_id,project_id,writer_lease_until FROM memoia.memory_user_states
-       WHERE user_id=$1 AND project_id=$2 AND generation=$3 AND version=$4
-       FOR UPDATE
-     )
-     UPDATE memoia.memory_user_states s
-     SET writer_lease_until=clock_timestamp()+($5 * interval '1 millisecond')
-     FROM locked
-     WHERE s.user_id=locked.user_id AND s.project_id=locked.project_id
-       AND locked.writer_lease_until>clock_timestamp()`,
-    [lease.userId, lease.projectId, lease.generation, lease.version, ttlMs],
-  );
-  if (!result.rowCount) throw new LeaseLostError();
-}
-
-export async function releaseUserLease(
-  db: Database,
-  lease: UserLease,
-): Promise<void> {
-  await db.transaction(async (tx) => {
-    await assertUserLease(tx, lease);
-    await tx.query(
-      `UPDATE memoia.memory_user_states SET writer_lease_until=NULL
-      WHERE user_id=$1 AND project_id=$2 AND generation=$3 AND version=$4`,
-      [lease.userId, lease.projectId, lease.generation, lease.version],
-    );
-  });
+export async function lockIdentity(tx: Sql, scope: UserScope): Promise<void> {
+  await tx.query(identityLockSql, [scope.projectId, scope.userId]);
 }
 
 export const USAGE_HISTORY_DAYS = 30;
@@ -514,24 +410,4 @@ export async function debitBilling(
     [projectId, inputTokens + outputTokens],
   );
   if (!result.rowCount) throw new Error("Billing not found");
-}
-
-/** Call last in the write transaction: failure rolls back all preceding writes. */
-export async function finishUserLease(
-  tx: Sql,
-  lease: UserLease,
-): Promise<string> {
-  const result = await tx.query<{ version: string }>(
-    `UPDATE memoia.memory_user_states s
-    SET version=s.version+1, writer_lease_until=NULL
-    WHERE s.user_id=$1 AND s.project_id=$2 AND s.generation=$3 AND s.version=$4
-      AND s.writer_lease_until>clock_timestamp()
-      AND EXISTS (SELECT 1 FROM memoia.users u WHERE u.id=s.user_id AND u.project_id=s.project_id)
-      AND NOT EXISTS (SELECT 1 FROM memoia.memory_user_tombstones t
-        WHERE t.user_id=s.user_id AND t.project_id=s.project_id)
-    RETURNING version`,
-    [lease.userId, lease.projectId, lease.generation, lease.version],
-  );
-  if (!result.rowCount) throw new LeaseLostError();
-  return result.rows[0].version;
 }

@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Database } from "../src/db";
-import { forgetUser, importSource } from "../src/facts";
+import { forgetUser, getOperation, stageImport } from "../src/facts";
+import { consumeFactFlush, flushBlob } from "../src/fact-flush";
 import { pythonHash } from "../src/canonical";
 
 test("10,000 existing Facts: small imports retrieve only batch messages, then scoped deletion completes", async () => {
@@ -39,6 +40,7 @@ test("10,000 existing Facts: small imports retrieve only batch messages, then sc
     db: tracked(db),
     env: {
       OPENAI_API_KEY: "local-test-only",
+      MAINTENANCE_ENABLED: "true",
       OPENAI_BASE_URL: "https://provider.invalid/v1",
       MEMOIA_CONFIG: '{"enable_event_embedding":false}',
     },
@@ -58,36 +60,44 @@ test("10,000 existing Facts: small imports retrieve only batch messages, then sc
     assert.equal(new URL(url).pathname, "/v1/responses");
     modelCalls++;
     return Response.json({
+      id: `resp_${crypto.randomUUID()}`,
       status: "completed",
-      output: [
-        {
-          type: "message",
-          status: "completed",
-          content: [
-            {
-              type: "output_text",
-              text: JSON.stringify({
-                messages: [
-                  {
-                    message_id: activeMessage,
-                    facts: [
-                      {
-                        content: `New Fact ${activeMessage}`,
-                        subject: "user",
-                        reporter: "user",
-                        certainty: "asserted",
-                        fact_time: null,
-                        any_of: [{ all_of: [activeMessage] }],
-                      },
-                    ],
-                  },
-                ],
-              }),
-            },
-          ],
-        },
-      ],
+      model: "gpt-6-luna",
+      output: [{
+        id: `fc_${crypto.randomUUID()}`,
+        call_id: `call_${crypto.randomUUID()}`,
+        type: "function_call",
+        status: "completed",
+        name: "finish_facts",
+        arguments: JSON.stringify({
+          candidate: { messages: [{
+            message_id: activeMessage,
+            facts: [{
+              content: `New Fact ${activeMessage}`,
+              subject: "user",
+              reporter: "user",
+              certainty: "asserted",
+              fact_time: null,
+              any_of: [{ all_of: [activeMessage] }],
+            }],
+          }] },
+        }),
+      }],
     });
+  };
+  const publish = async (input: Parameters<typeof stageImport>[2]) => {
+    const append = await stageImport(runtime, scope, input);
+    const batch = await flushBlob(runtime, scope, input.source_id, {
+      idempotency_key: `flush-${input.idempotency_key}`,
+      append_operation_ids: [append.operation_id],
+    });
+    await consumeFactFlush(runtime, {
+      kind: "fact_flush",
+      operation_id: batch.operation_id,
+      user_id: user,
+      project_id: project,
+    });
+    return getOperation(runtime, scope, { operationId: append.operation_id });
   };
   console.info = (...args) => {
     if (!String(args[0]).includes('"event":"model_usage"'))
@@ -140,7 +150,7 @@ test("10,000 existing Facts: small imports retrieve only batch messages, then sc
       )
     ).rows[0].n;
     assert.equal(seed, 10000);
-    const noop = await importSource(runtime, scope, {
+    const noop = await publish({
       idempotency_key: "noop",
       source_id: "long-source",
       messages: [
@@ -161,7 +171,7 @@ test("10,000 existing Facts: small imports retrieve only batch messages, then sc
     for (let n = 1; n <= 201; n++) {
       const before = reads.length;
       activeMessage = `new-${n}`;
-      const result = await importSource(runtime, scope, {
+      const result = await publish({
         idempotency_key: `append-${n}`,
         source_id: "long-source",
         messages: [

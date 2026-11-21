@@ -231,6 +231,10 @@ async function main() {
       "memory_event_facts",
       "memory_deleted_events",
     ];
+    const targetColumn = (table: string, column: string) =>
+      column === "revision" && (table === "user_profiles" || table === "user_events")
+        ? "version"
+        : column;
     for (const table of tables) {
       const columnsSql = `SELECT a.attname AS column_name, format_type(a.atttypid,a.atttypmod) AS type
         FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -256,11 +260,11 @@ async function main() {
       if (
         !sourceCols.rowCount ||
         sourceCols.rows.some(
-          (r) => actual.get(r.column_name) !== normal(r.type),
+          (r) => actual.get(targetColumn(table, r.column_name)) !== normal(r.type),
         ) ||
         targetCols.rows.some(
           (r) =>
-            !sourceCols.rows.some((x) => x.column_name === r.column_name) &&
+            !sourceCols.rows.some((x) => targetColumn(table, x.column_name) === r.column_name) &&
             !allowed.includes(r.column_name),
         )
       )
@@ -276,9 +280,15 @@ async function main() {
         "SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position",
         [sourceSchema, table],
       );
-      const names = cols.rows.map((c) => identifier(c.column_name)).join(",");
+      const names = cols.rows.map(({ column_name }) => identifier(targetColumn(table, column_name))).join(",");
+      const sourceNames = cols.rows.map(({ column_name }) => {
+        const alias = targetColumn(table, column_name);
+        return alias === column_name
+          ? identifier(column_name)
+          : `${identifier(column_name)} AS ${identifier(alias)}`;
+      }).join(",");
       await source.query(
-        `DECLARE transfer_cursor NO SCROLL CURSOR FOR SELECT data FROM (SELECT row_to_json(t)::text AS data FROM ${qualified(sourceSchema, table)} t) rows ORDER BY data COLLATE "C"`,
+        `DECLARE transfer_cursor NO SCROLL CURSOR FOR SELECT data FROM (SELECT row_to_json(t)::text AS data FROM (SELECT ${sourceNames} FROM ${qualified(sourceSchema, table)}) t) rows ORDER BY data COLLATE "C"`,
       );
       let count = 0;
       const sourceHash = createHash("sha256");
@@ -328,7 +338,7 @@ async function main() {
       );
     await target.query(`INSERT INTO memoia.queue_tasks
       (id,request_key,business_key,type,user_id,biz_params,status,run_attempts,execution_ms,created_at,updated_at,next_run_at,finished_at,result,result_code,fail_reasons)
-      SELECT o.id,o.id::text,o.id::text,'maintenance_flush',NULL,'{}'::jsonb,
+      SELECT o.id,o.id::text,o.id::text,'maintenance_flush',o.user_id,jsonb_build_object('project_id',o.project_id),
         CASE o.status WHEN 'completed' THEN 'succeeded' WHEN 'failed' THEN 'failed' ELSE 'pending' END,
         o.attempts::integer,NULL,o.created_at,clock_timestamp(),COALESCE(o.available_at,clock_timestamp()),
         NULL,

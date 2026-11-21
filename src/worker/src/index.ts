@@ -15,6 +15,7 @@ export default {
   fetch(request: Request, env: CloudflareRuntimeEnv, ctx: ExecutionContext) {
     const scopedEnv = Object.assign(Object.create(env), {
       tracing: ctx.tracing,
+      waitUntil: (work: Promise<void>) => ctx.waitUntil(work),
     });
     const method = ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(
       request.method,
@@ -33,7 +34,10 @@ export default {
   ) {
     for (const message of batch.messages) {
       const runtime = createCloudflareRuntime(
-        Object.assign(Object.create(env), { tracing: ctx?.tracing }),
+        Object.assign(Object.create(env), {
+          tracing: ctx?.tracing,
+          waitUntil: ctx ? (work: Promise<void>) => ctx.waitUntil(work) : undefined,
+        }),
       );
       try {
         const kind =

@@ -1,13 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { Database } from "../src/db";
-import { parseImportMetadata, prepareImportBody } from "../src/canonical";
+import { setTimeout as delay } from "node:timers/promises";
+import { Database, DatabaseUnavailableError } from "../src/db";
+import { parseImportMetadata } from "../src/canonical";
 import {
   deleteMessages,
   updateFact,
   deleteFact,
-  importSource,
+  stageImport,
+  getOperation,
   getSource,
   getHistory,
   forgetUser,
@@ -15,7 +17,7 @@ import {
   retryOperation,
 } from "../src/facts";
 
-test("large processed imports batch identity checks and preserve tombstones", async () => {
+test("large processed imports batch identity checks and record deletion in the receipt", async () => {
   const db = new Database(process.env.MEMOIA_TEST_DATABASE_URL!);
   const projectId = `batch_${randomUUID()}`;
   const scope = { userId: randomUUID(), projectId };
@@ -29,26 +31,20 @@ test("large processed imports batch identity checks and preserve tombstones", as
   const reads: string[] = [];
   const trackedDb = new Proxy(db, {
     get(target, property) {
-      if (property === "transaction")
-        return (fn: (tx: any) => Promise<unknown>, options: any) =>
-          target.transaction(
-            (tx) =>
-              fn({
-                query(sql: string, values: unknown[]) {
-                  if (/^SELECT .* FROM memoia\.memory_messages WHERE/.test(sql))
-                    reads.push(sql);
-                  return tx.query(sql, values);
-                },
-              }),
-            options,
-          );
+      if (property === "query")
+        return (sql: string, values: unknown[]) => {
+          if (/^SELECT .* FROM memoia\.memory_messages WHERE/.test(sql)) reads.push(sql);
+          return target.query(sql, values);
+        };
       const value = Reflect.get(target, property, target);
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+  let maintenanceWakeups = 0;
   const runtime = {
     db: trackedDb,
-    env: { OPENAI_API_KEY: "unused" },
+    env: { OPENAI_API_KEY: "unused", MAINTENANCE_ENABLED: "true" },
+    maintenanceWakeup: { send: async () => { maintenanceWakeups++; } },
     deadline: Date.now() + 60000,
   };
   const message = (id: string) => ({
@@ -79,17 +75,16 @@ test("large processed imports batch identity checks and preserve tombstones", as
       source_id: sourceId,
       messages: Array.from({ length: 1000 }, (_, i) => message(`m${i + 1}`)),
     };
-    const result = await importSource(runtime, scope, request);
-    assert.equal(result.status, "completed");
-    assert.deepEqual(result.result.fact_ids, []);
-    assert.equal(reads.length, 2);
+    const result = await stageImport(runtime, scope, request);
+    assert.equal(result.status, "staged");
+    assert.equal(reads.length, 1);
     assert.ok(reads.every((sql) => sql.includes("message_id=ANY(")));
     assert.equal(
-      (await importSource(runtime, scope, request)).operation_id,
+      (await stageImport(runtime, scope, request)).operation_id,
       result.operation_id,
     );
     await assert.rejects(
-      importSource(runtime, scope, {
+      stageImport(runtime, scope, {
         ...request,
         idempotency_key: "changed",
         messages: [{ ...message("m1"), content: "different" }],
@@ -97,7 +92,7 @@ test("large processed imports batch identity checks and preserve tombstones", as
       (e: any) => e.code === "message_conflict",
     );
     await assert.rejects(
-      importSource(runtime, scope, {
+      stageImport(runtime, scope, {
         ...request,
         idempotency_key: "last-conflict",
         messages: [
@@ -116,7 +111,7 @@ test("large processed imports batch identity checks and preserve tombstones", as
       ).rowCount,
       0,
     );
-    await importSource(runtime, scope, {
+    await stageImport(runtime, scope, {
       ...request,
       idempotency_key: "timezone",
       messages: [{ ...message("m1"), time_zone: "Asia/Shanghai" }],
@@ -131,35 +126,39 @@ test("large processed imports batch identity checks and preserve tombstones", as
       "Asia/Shanghai",
     );
     await assert.rejects(
-      importSource(runtime, scope, {
+      stageImport(runtime, scope, {
         ...request,
         idempotency_key: "other-timezone",
         messages: [{ ...message("m1"), time_zone: "Europe/London" }],
       }),
       (e: any) => e.code === "message_conflict",
     );
-    await deleteMessages(runtime, scope, sourceId, {
+    const pending = await stageImport(runtime, scope, {
+      ...request, idempotency_key: "stage-late", messages: [message("late")],
+    });
+    const deleted = await deleteMessages(runtime, scope, sourceId, {
       idempotency_key: "delete-late",
       message_ids: ["late"],
     });
-    assert.equal(
-      (
-        await importSource(runtime, scope, {
-          ...request,
-          idempotency_key: "late-import",
-          messages: [message("late")],
-        })
-      ).status,
-      "completed",
+    assert.equal(deleted.status, "completed");
+    assert.equal(maintenanceWakeups, 0);
+    const { rows: [state] } = await db.query(
+      `SELECT o.request->'messages' AS messages, b.fact_completed_at
+       FROM memoia.memory_operations o JOIN memoia.memory_operations d
+         ON d.id=$2 AND d.user_id=o.user_id AND d.project_id=o.project_id
+       JOIN memoia.memory_blobs b ON b.id=d.blob_id WHERE o.id=$1`,
+      [pending.operation_id, deleted.operation_id],
     );
-    const late = (
-      await db.query(
-        "SELECT deleted,content_hash FROM memoia.memory_messages WHERE user_id=$1 AND project_id=$2 AND source_id=$3 AND message_id='late'",
-        [scope.userId, projectId, sourceId],
-      )
-    ).rows[0];
-    assert.equal(late.deleted, true);
-    assert.equal(late.content_hash, null);
+    assert.deepEqual(state.messages, []);
+    assert.equal(state.fact_completed_at, null);
+    const source = await getSource(runtime, scope, sourceId, {
+      limit: 100, messageOffset: 0,
+    });
+    assert.deepEqual(source.deleted_message_ids, ["late"]);
+    assert.equal((await db.query(
+      "SELECT 1 FROM memoia.memory_messages WHERE user_id=$1 AND project_id=$2 AND source_id=$3 AND message_id='late'",
+      [scope.userId, projectId, sourceId],
+    )).rowCount, 0);
   } finally {
     await db.query("DELETE FROM memoia.projects WHERE project_id=$1", [
       projectId,
@@ -202,7 +201,7 @@ test("configured input retention preserves live retries and purges expired input
       "INSERT INTO memoia.projects(id,project_id,project_secret,status) VALUES ($1,$2,'local','active')",
       [randomUUID(), projectId],
     );
-    await assert.rejects(importSource(runtime, scope, request));
+    await stageImport(runtime, scope, request);
     const read = async () =>
       (
         await db.query(
@@ -212,7 +211,7 @@ test("configured input retention preserves live retries and purges expired input
       ).rows[0];
     const first = await read();
     assert.ok(Number(first.remaining) > 0 && Number(first.remaining) <= 30);
-    await assert.rejects(importSource(runtime, scope, request));
+    await stageImport(runtime, scope, request);
     const retried = await read();
     assert.equal(retried.id, first.id);
     assert.equal(
@@ -230,13 +229,11 @@ test("configured input retention preserves live retries and purges expired input
       source_id: request.source_id,
       idempotency_key: request.idempotency_key,
     });
-    await assert.rejects(importSource(runtime, scope, request));
-    const restored = await read();
-    assert.equal(restored.id, first.id);
-    assert.ok(
-      Number(restored.remaining) > 0 && Number(restored.remaining) <= 30,
-    );
-    assert.equal(restored.request.messages[0].content, "hello");
+    await stageImport(runtime, scope, request);
+    const replayed = await read();
+    assert.equal(replayed.id, first.id);
+    assert.equal(replayed.input_expires_at, null);
+    assert.deepEqual(replayed.request, purged.request);
 
     const factId = randomUUID();
     await db.query(
@@ -278,50 +275,18 @@ test("configured input retention preserves live retries and purges expired input
           [scope.userId, projectId, proposal.idempotency_key],
         )
       ).rows[0];
-    const originalCorrection = await readCorrection();
-    assert.ok(
-      Number(originalCorrection.remaining) > 0 &&
-        Number(originalCorrection.remaining) <= 30,
-    );
-    await assert.rejects(
-      retryOperation(correctionRuntime, scope, originalCorrection.id),
-      (e: any) => e.code === "embedding_unavailable",
-    );
-    assert.equal(
-      (await readCorrection()).input_expires_at.getTime(),
-      originalCorrection.input_expires_at.getTime(),
-    );
-    await db.query(
-      "UPDATE memoia.memory_operations SET input_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
-      [originalCorrection.id],
-    );
-    await purgeExpiredInputs(correctionRuntime);
-    assert.equal((await readCorrection()).request.content, undefined);
-    await assert.rejects(
-      retryOperation(correctionRuntime, scope, originalCorrection.id),
-      (e: any) => e.code === "input_required",
-    );
-    const replenished = await updateFact(
-      correctionRuntime,
-      scope,
-      factId,
-      proposal,
-    );
-    assert.equal(replenished.operation_id, originalCorrection.id);
-    assert.equal(replenished.status, "failed");
-    const supplied = await readCorrection();
-    assert.ok(
-      Number(supplied.remaining) > 0 && Number(supplied.remaining) <= 30,
-    );
+    assert.equal(await readCorrection(), undefined, "a failed edit must leave no receipt");
+    assert.equal((await db.query(
+      "SELECT count(*)::int AS n FROM memoia.memory_blobs WHERE user_id=$1 AND project_id=$2 AND kind='correct'",
+      [scope.userId, projectId],
+    )).rows[0].n, 0);
     globalThis.fetch = async () =>
       Response.json({
         data: [{ index: 0, embedding: Array(1536).fill(0.01) }],
       });
-    assert.equal(
-      (await retryOperation(correctionRuntime, scope, originalCorrection.id))
-        .status,
-      "completed",
-    );
+    const edited = await updateFact(correctionRuntime, scope, factId, proposal);
+    assert.equal(edited.status, "completed");
+    assert.deepEqual(await updateFact(correctionRuntime, scope, factId, proposal), edited);
     const confirmed = await readCorrection();
     assert.equal(confirmed.input_expires_at, null);
     assert.equal(confirmed.request.content, undefined);
@@ -429,38 +394,68 @@ test("fixed imports, evidence retraction, corrections and forgetting commit atom
         },
       ],
     };
-    const imported = await importSource(runtime, scope, request);
-    assert.equal(imported.status, "completed");
-    assert.deepEqual(imported.result.fact_ids, []);
+    const imported = await stageImport(runtime, scope, request);
+    assert.equal(imported.status, "staged");
     assert.equal(
-      (await importSource(runtime, scope, request)).operation_id,
+      (await stageImport(runtime, scope, request)).operation_id,
       imported.operation_id,
     );
     await assert.rejects(
-      importSource(runtime, scope, {
+      stageImport(runtime, scope, {
         ...request,
         messages: [{ ...request.messages[0], content: "changed" }],
       }),
       (e: any) => e.code === "idempotency_conflict",
     );
     await assert.rejects(
-      importSource(runtime, scope, {
+      stageImport(runtime, scope, {
         ...request,
         idempotency_key: "another-key",
         messages: [{ ...request.messages[0], content: "changed" }],
       }),
       (e: any) => e.code === "message_conflict",
     );
-    const retract = await deleteMessages(runtime, scope, sourceId, {
-      idempotency_key: "retract-a",
-      message_ids: ["a"],
+    const deleteInput = { idempotency_key: "retract-a", message_ids: ["a"] };
+    const lostResponseDb = new Proxy(db, {
+      get(target, property) {
+        if (property === "transaction") return (async (fn, options) => {
+          await target.transaction(fn, options);
+          throw new DatabaseUnavailableError();
+        }) as Database["transaction"];
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
     });
+    await assert.rejects(
+      deleteMessages({ ...runtime, db: lostResponseDb }, scope, sourceId, deleteInput),
+      DatabaseUnavailableError,
+    );
+    const retract = await getOperation(runtime, scope, { key: deleteInput.idempotency_key });
     assert.equal(retract.status, "completed");
+    assert.deepEqual(await deleteMessages(runtime, scope, sourceId, deleteInput), retract);
+    await assert.rejects(
+      deleteMessages(runtime, scope, sourceId, { ...deleteInput, message_ids: ["b"] }),
+      { code: "idempotency_conflict" },
+    );
     const after = await getSource(runtime, scope, sourceId);
     assert.deepEqual(after.evidence[0].support_groups, [["b"]]);
     assert.equal(after.evidence[0].fact_time, null);
     assert.equal(after.evidence[0].revision, 2);
     assert.deepEqual((await getHistory(runtime, scope))[0].profiles, []);
+    // Represents a profile history write that saw the Fact before withdrawal.
+    const lateHistory = randomUUID();
+    await db.query(
+      "INSERT INTO memoia.memory_profile_revisions(id,user_id,project_id,source_id,profiles,added,removed) VALUES ($1,$2,$3,$4,$5::jsonb,'[]'::jsonb,'[]'::jsonb)",
+      [lateHistory, userId, projectId, sourceId, JSON.stringify([
+        { ...historical, _fact_revisions: { [fact]: 1 } },
+        { ...historical, content: "current supported history", _fact_revisions: { [fact]: 2 } },
+      ])],
+    );
+    const readable = (await getHistory(runtime, scope)).find((entry) => entry.revision_id === lateHistory);
+    assert.deepEqual(readable?.profiles, [{
+      id: historical.id, content: "current supported history", topic: historical.topic,
+      sub_topic: historical.sub_topic, fact_ids: [fact], source_ids: [sourceId],
+    }]);
     await assert.rejects(
       updateFact(runtime, scope, fact, {
         idempotency_key: "bad-evidence",
@@ -525,19 +520,26 @@ test("fixed imports, evidence retraction, corrections and forgetting commit atom
       }),
       (e: any) => e.code === "fact_revision_conflict",
     );
-    assert.equal(
-      (
-        await deleteFact(runtime, scope, fact, {
-          idempotency_key: "delete-fact",
-          expected_revision: 3,
-          reason: "forget",
-        })
-      ).status,
-      "completed",
-    );
+    const messageReads: string[] = [];
+    const trackedDb = new Proxy(db, {
+      get(target, property) {
+        if (property === "query") return (sql: string, values?: unknown[]) => {
+          if (/^SELECT.*memoia\.memory_messages/s.test(sql)) messageReads.push(sql);
+          return target.query(sql, values);
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const deleteProposal = { idempotency_key: "delete-fact", expected_revision: 3, reason: "forget" };
+    const deleted = await deleteFact({ ...runtime, db: trackedDb }, scope, fact, deleteProposal);
+    assert.equal(deleted.status, "completed");
+    assert.deepEqual(messageReads, []);
+    assert.deepEqual(await getOperation(runtime, scope, { key: deleteProposal.idempotency_key }), deleted);
+    assert.deepEqual(await deleteFact(runtime, scope, fact, deleteProposal), deleted);
     await forgetUser(runtime, scope);
     await assert.rejects(
-      importSource(runtime, scope, {
+      stageImport(runtime, scope, {
         ...request,
         idempotency_key: "after-forget",
       }),
@@ -551,215 +553,91 @@ test("fixed imports, evidence retraction, corrections and forgetting commit atom
   }
 });
 
-test("saved image extraction survives embedding failure and completed receipts erase temporary input", async () => {
+test("a retract waiting for append acceptance clears that exact staged input", async () => {
   const db = new Database(process.env.MEMOIA_TEST_DATABASE_URL!);
-  const projectId = `facts_${randomUUID()}`,
-    userId = randomUUID(),
-    scope = { userId, projectId };
-  const runtime = {
-    db,
-    env: {
-      OPENAI_API_KEY: "local-test-only",
-      EMBEDDING_API_KEY: "local-test-only",
-      EMBEDDING_BASE_URL: "https://embed.invalid/v1",
-      MEMOIA_CONFIG: JSON.stringify({
-        embedding_provider: "jina",
-        embedding_model: "jina-embeddings-v3",
-        embedding_dim: 1536,
-      }),
-    },
-    deadline: Date.now() + 60000,
+  const projectId = `retract_append_${randomUUID()}`;
+  const scope = { userId: randomUUID(), projectId };
+  const env = { OPENAI_API_KEY: "unused" };
+  const runtime = { db, env, deadline: Date.now() + 60_000 };
+  let release!: () => void;
+  const commit = new Promise<void>((resolve) => { release = resolve; });
+  let signal!: (pid: number) => void;
+  const written = new Promise<number>((resolve) => { signal = resolve; });
+  const request = {
+    source_id: "dialog",
+    idempotency_key: "old",
+    messages: [{
+      message_id: "x",
+      role: "user" as const,
+      content: "withdrawn original",
+      occurred_at: "2024-05-01T12:00:00Z",
+    }],
   };
-  const originalFetch = globalThis.fetch;
-  let completions = 0,
-    embedded = 0;
-  globalThis.fetch = async (request: string | URL | Request) => {
-    const url =
-      typeof request === "string"
-        ? request
-        : request instanceof URL
-          ? request.toString()
-          : request.url;
-    if (url.endsWith("/responses")) {
-      completions++;
-      return Response.json({
-        status: "completed",
-        output: [
-          {
-            type: "message",
-            status: "completed",
-            content: [
-              {
-                type: "output_text",
-                text: JSON.stringify({
-                  messages: [
-                    {
-                      message_id: "a",
-                      facts: [
-                        {
-                          content: "A blue bicycle.",
-                          subject: "bicycle",
-                          reporter: "user",
-                          certainty: "asserted",
-                          fact_time: null,
-                          any_of: [{ all_of: ["a"] }],
-                        },
-                      ],
-                    },
-                  ],
-                }),
-              },
-            ],
-          },
-        ],
-      });
-    }
-    if (url.endsWith("/embeddings")) {
-      embedded++;
-      return embedded === 1 || embedded === 3 || embedded === 5
-        ? new Response("", { status: 503 })
-        : Response.json({
-            data: [{ index: 0, embedding: Array(1536).fill(0.01) }],
-          });
-    }
-    throw new Error("Unexpected provider request");
-  };
+  let append: ReturnType<typeof stageImport> | undefined;
+  let retract: ReturnType<typeof deleteMessages> | undefined;
   try {
     await db.query(
-      "INSERT INTO memoia.projects(id,project_id,project_secret,status) VALUES ($1,$2,$3,$4)",
-      [randomUUID(), projectId, "local", "active"],
+      "INSERT INTO memoia.projects (id,project_id,project_secret,status) VALUES ($1,$2,'local','active')",
+      [randomUUID(), projectId],
     );
-    const url = "https://images.example.org/temporary.png?secret=test";
-    const imageRaw = String.raw`{"idempotency_key":"image","source_id":"image-source","messages":[{"message_id":"a","role":"user","content":"","occurred_at":"2024-05-01T12:00:00Z","images":[{"url":"https://images.example.org/temporary.png?secret=test","mimeType":"image/png","width":9007199254740993123456789,"height":1,"byteSize":1}]}]}`;
-    const request = prepareImportBody(imageRaw, JSON.parse(imageRaw));
-    for (const privateUrl of [
-      "http://127.0.0.1/a",
-      "http://10.0.0.1/a",
-      "http://[::1]/a",
-      "http://localhost./a",
-      "https://user:pass@example.com/a",
-    ]) {
-      await assert.rejects(
-        importSource(runtime, scope, {
-          ...request,
-          messages: [
-            {
-              ...request.messages[0],
-              images: [{ ...request.messages[0].images[0], url: privateUrl }],
-            },
-          ],
-        }),
-        (e: any) => e.code === "invalid_input",
-      );
+    await stageImport(runtime, scope, { ...request, idempotency_key: "seed" });
+    const pausedDb = new Proxy(db, {
+      get(target, property) {
+        if (property !== "query") {
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (sql: string, args?: unknown[]) => {
+          if (!sql.startsWith("WITH messages AS (")) return target.query(sql, args);
+          return target.transaction(async (tx) => {
+            const result = await tx.query(sql, args);
+            signal((await tx.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
+            await commit;
+            return result;
+          });
+        };
+      },
+    });
+    append = stageImport({ ...runtime, db: pausedDb }, scope, request);
+    const pid = await Promise.race([written, append.then(() => {
+      throw new Error("Expected to pause append before commit");
+    })]);
+    retract = deleteMessages(runtime, scope, "dialog", {
+      idempotency_key: "retract",
+      message_ids: ["x"],
+    });
+    void retract.catch(() => {});
+    let blocked = false;
+    for (let attempt = 0; attempt < 100 && !blocked; attempt++) {
+      blocked = (await db.query(
+        "SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND query LIKE 'DELETE FROM memoia.memory_messages%'",
+        [pid],
+      )).rowCount === 1;
+      if (!blocked) await delay(10);
     }
-    await assert.rejects(
-      importSource(runtime, scope, request),
-      (e: any) => e.code === "embedding_unavailable",
-    );
-    const failed = (
-      await db.query(
-        "SELECT * FROM memoia.memory_operations WHERE user_id=$1 AND project_id=$2",
-        [userId, projectId],
-      )
-    ).rows[0];
-    assert.equal(failed.status, "failed");
-    const imageHash = (
-      await db.query(
-        "SELECT content_hash FROM memoia.memory_messages WHERE user_id=$1 AND project_id=$2 AND source_id='image-source' AND message_id='a'",
-        [userId, projectId],
-      )
-    ).rows[0].content_hash;
-    assert.equal(
-      imageHash,
-      "38f3ce91a99a7c5b4f84840a059046d16a950cd2dd547e5669e86f8a0db17325",
-    );
-    assert.ok(failed.request.fact_review_candidate);
-    assert.equal(JSON.stringify(failed.request).includes(url), false);
-    const result = await importSource(runtime, scope, request);
-    assert.equal(result.status, "completed");
-    assert.equal(completions, 1);
-    assert.equal(embedded, 2);
-    const completed = (
-      await db.query(
-        "SELECT request,input_expires_at FROM memoia.memory_operations WHERE id=$1",
-        [result.operation_id],
-      )
-    ).rows[0];
-    assert.deepEqual(completed.request, {
-      source_id: "image-source",
-      idempotency_key: "image",
-    });
-    assert.equal(completed.input_expires_at, null);
-    const expiredRequest = {
+    assert.equal(blocked, true);
+    release();
+    const [old] = await Promise.all([append, retract]);
+    const added = await stageImport(runtime, scope, {
       ...request,
-      idempotency_key: "expired",
-      source_id: "expired-source",
-    };
-    await assert.rejects(
-      importSource(runtime, scope, expiredRequest),
-      (e: any) => e.code === "embedding_unavailable",
-    );
-    await db.query(
-      "UPDATE memoia.memory_operations SET input_expires_at=clock_timestamp()-interval '1 second' WHERE user_id=$1 AND project_id=$2 AND idempotency_key='expired'",
-      [userId, projectId],
-    );
-    await purgeExpiredInputs(runtime);
-    const expired = (
-      await db.query(
-        "SELECT request,input_expires_at FROM memoia.memory_operations WHERE user_id=$1 AND project_id=$2 AND idempotency_key='expired'",
-        [userId, projectId],
-      )
-    ).rows[0];
-    assert.deepEqual(expired.request, {
-      source_id: "expired-source",
-      idempotency_key: "expired",
+      idempotency_key: "new",
+      messages: [{ ...request.messages[0]!, content: "new submission" }],
     });
-    assert.equal(expired.input_expires_at, null);
-    assert.equal(
-      (await importSource(runtime, scope, expiredRequest)).status,
-      "completed",
+    const { rows } = await db.query(
+      "SELECT id,request->'messages' AS messages FROM memoia.memory_operations WHERE id=ANY($1::uuid[])",
+      [[old.operation_id, added.operation_id]],
     );
-    assert.equal(completions, 3);
-    const raw = String.raw`{"metadata":{"fraction":1.0,"exponent":1e20,"integer":9007199254740993123456789}}`;
-    const textRequest = {
-      idempotency_key: "numeric-retry",
-      source_id: "numeric-source",
-      metadata: parseImportMetadata(raw),
-      messages: [
-        {
-          message_id: "a",
-          role: "user" as const,
-          content: "A blue bicycle.",
-          occurred_at: "2024-05-01T12:00:00Z",
-        },
-      ],
-    };
-    await assert.rejects(
-      importSource(runtime, scope, textRequest),
-      (e: any) => e.code === "embedding_unavailable",
-    );
-    const pending = (
-      await db.query(
-        "SELECT id,request->'metadata'->>'integer' AS number FROM memoia.memory_operations WHERE user_id=$1 AND project_id=$2 AND idempotency_key='numeric-retry'",
-        [userId, projectId],
-      )
-    ).rows[0];
-    assert.equal(pending.number, "9007199254740993123456789");
-    assert.equal(
-      (await retryOperation(runtime, scope, pending.id)).status,
-      "completed",
-    );
-    assert.equal(completions, 4);
+    assert.deepEqual(rows.find((row) => row.id === old.operation_id)?.messages, []);
+    assert.equal(rows.find((row) => row.id === added.operation_id)?.messages[0].content, "new submission");
   } finally {
-    globalThis.fetch = originalFetch;
-    await db.query("DELETE FROM memoia.projects WHERE project_id=$1", [
-      projectId,
-    ]);
+    release();
+    await Promise.allSettled([append, retract]);
+    await db.query("DELETE FROM memoia.projects WHERE project_id=$1", [projectId]);
     await db.close();
   }
 });
 
-test("a Python-created receipt remains readable for the original numeric metadata payload", async () => {
+test("old receipts remain readable and only staged imports accept new input", async () => {
   const db = new Database(process.env.MEMOIA_TEST_DATABASE_URL!);
   const projectId = `facts_${randomUUID()}`,
     userId = randomUUID(),
@@ -772,8 +650,7 @@ test("a Python-created receipt remains readable for the original numeric metadat
     deadline: Date.now() + 60000,
   };
   const raw = String.raw`{"idempotency_key":"golden","source_id":"source","messages":[{"message_id":"a","role":"user","content":"hello","occurred_at":"2024-05-01T12:00:00Z"}],"metadata":{"tiny":1e-7,"whole":1.0,"large":1e20,"negative_zero":-0.0,"hugeint":9007199254740993123456789,"nested":[1e-6,1e-5,1e15,1e16,1.2345678901234567],"\ue000":1,"\ud800\udc00":2,"__proto__":{"x":1.0}}}`;
-  const request = JSON.parse(raw);
-  request.metadata = parseImportMetadata(raw);
+  const request = { ...JSON.parse(raw), metadata: parseImportMetadata(raw) };
   try {
     await db.query(
       "INSERT INTO memoia.projects(id,project_id,project_secret,status) VALUES ($1,$2,$3,$4)",
@@ -813,10 +690,23 @@ test("a Python-created receipt remains readable for the original numeric metadat
         JSON.stringify(output),
       ],
     );
-    assert.equal(
-      (await importSource(runtime, scope, request)).operation_id,
-      opId,
+    const receipt = await getOperation(runtime, scope, { operationId: opId });
+    assert.equal(receipt.status, "completed");
+    assert.deepEqual(receipt.result, output);
+    assert.equal((await retryOperation(runtime, scope, opId)).operation_id, opId);
+    await db.query("UPDATE memoia.memory_operations SET status='processing' WHERE id=$1", [opId]);
+    await assert.rejects(retryOperation(runtime, scope, opId),
+      (err: any) => err.code === "operation_kind_unsupported");
+    await assert.rejects(stageImport(runtime, scope, request),
+      (err: any) => err.code === "idempotency_conflict");
+    const input = { ...request, source_id: "new-source", idempotency_key: "append" };
+    const staged = await stageImport(runtime, scope, input);
+    assert.equal((await stageImport(runtime, scope, input)).operation_id, staged.operation_id);
+    const { rows: [saved] } = await db.query(
+      "SELECT request->'metadata'->>'hugeint' AS integer FROM memoia.memory_operations WHERE id=$1",
+      [staged.operation_id],
     );
+    assert.equal(saved.integer, "9007199254740993123456789");
   } finally {
     await db.query("DELETE FROM memoia.projects WHERE project_id=$1", [
       projectId,

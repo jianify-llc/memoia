@@ -24,18 +24,3 @@ test("matching Python treats integral and floating metadata as distinct", async 
   const floating = parseImportMetadata('{"metadata":{"n":1.0}}');
   assert.notEqual(await pythonHash(integral), await pythonHash(floating));
 });
-
-test("attachment dimensions retain Python strict integer semantics and precision", async () => {
-  const { prepareImportBody } = await import("../src/canonical");
-  const raw =
-    '{"messages":[{"images":[{"width":9007199254740993123456789,"height":2,"byteSize":3}]}]}';
-  const body = prepareImportBody(raw, JSON.parse(raw));
-  assert.equal(
-    pythonJson(body),
-    '{"messages":[{"images":[{"byteSize":3,"height":2,"width":9007199254740993123456789}]}],"metadata":{}}',
-  );
-  for (const token of ["1.0", "1e0"]) {
-    const invalid = `{"messages":[{"images":[{"width":${token},"height":2,"byteSize":3}]}]}`;
-    assert.throws(() => prepareImportBody(invalid, JSON.parse(invalid)));
-  }
-});
