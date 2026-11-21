@@ -257,9 +257,7 @@ export async function recordUsage(
   );
   try {
     if (!complete) {
-      await runtime.db.transaction((tx) =>
-        addUsage(tx, projectId, { llm_usage_unknown: 1 }),
-      );
+      await addUsage(runtime.db, projectId, { llm_usage_unknown: 1 });
     } else {
       await runtime.db.transaction(async (tx) => {
         await addUsage(tx, projectId, {
@@ -269,9 +267,7 @@ export async function recordUsage(
       });
       if (!runtime.env.ADMIN_URL) {
         try {
-          await runtime.db.transaction((tx) =>
-            debitBilling(tx, projectId, Number(input), Number(output)),
-          );
+          await debitBilling(runtime.db, projectId, Number(input), Number(output));
         } catch {
           console.warn(
             JSON.stringify({
@@ -720,11 +716,9 @@ async function embed(
     }
   }
   try {
-    await runtime.db.transaction((tx) =>
-      addUsage(tx, projectId, {
-        embedding_tokens: countTokens(texts.join("\n")),
-      }),
-    );
+    await addUsage(runtime.db, projectId, {
+      embedding_tokens: countTokens(texts.join("\n")),
+    });
   } catch {
     console.warn(
       JSON.stringify({

@@ -233,13 +233,13 @@ export async function consumeFactFlush(
   });
   if (!claimed) return;
   const { owner, startedAt, leaseExpiresAt, appendIds } = claimed;
-  const sql = { query: runtime.db.statement.bind(runtime.db) };
+  const { db } = runtime;
   try {
     await runSlice({
       startedAt,
       leaseExpiresAt,
       signal: runtime.signal,
-      renew: () => maintenanceTasks.renewInTx(sql, id, owner),
+      renew: () => maintenanceTasks.renewInTx(db, id, owner),
       onTimeout: async () => {
         await runtime.db.transaction(async (tx) => {
           await lockIdentity(tx, scope);
@@ -259,7 +259,7 @@ export async function consumeFactFlush(
           signal: budget.signal,
           deadline: budget.hardDeadlineAt,
         };
-        const ready = await runtime.db.statement<{ id: string }>(
+        const ready = await runtime.db.query<{ id: string }>(
           `SELECT a.id FROM memoia.memory_operations a JOIN memoia.memory_operations o ON o.id=a.fact_flush_id
             WHERE a.fact_flush_id=$1 AND a.status='processing'
               AND a.input_expires_at>clock_timestamp()
@@ -341,7 +341,7 @@ export async function consumeFactFlush(
     });
   } catch (error) {
     if (error instanceof TaskYield || error instanceof LeaseLostError) {
-      await maintenanceTasks.yieldInTx(sql, id, owner, null);
+      await maintenanceTasks.yieldInTx(db, id, owner, null);
     } else if (
       !(error instanceof TaskLeaseLost) &&
       !(error instanceof TaskTimeout)

@@ -260,11 +260,11 @@ test(
       ]);
       const vector = [1, ...Array(1535).fill(0)];
       await db.query(
-        `UPDATE memoia.memory_facts SET embedding=$2::memoia.vector WHERE id=$1`,
+        `UPDATE memoia.memory_facts SET embedding=$2 WHERE id=$1`,
         [fact, `[${vector.join(",")}]`],
       );
       await db.query(
-        `UPDATE memoia.user_events SET embedding=$2::memoia.vector WHERE id=$1`,
+        `UPDATE memoia.user_events SET embedding=$2 WHERE id=$1`,
         [event, `[${vector.join(",")}]`],
       );
       let embeddingCalls = 0;

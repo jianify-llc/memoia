@@ -57,6 +57,7 @@ type DatabaseOperation = "healthcheck" | "purge_expired_inputs";
 export type TransactionOptions = {
   isolation?: "read committed" | "repeatable read" | "serializable";
   readOnly?: boolean;
+  vector?: boolean;
   operation?: DatabaseOperation;
 };
 
@@ -110,16 +111,8 @@ export class Database {
       throw new Error("PostgreSQL vector extension is missing");
   }
 
-  async query<T extends QueryResultRow = QueryResultRow>(
-    sql: string,
-    values?: unknown[],
-    operation?: DatabaseOperation,
-  ): Promise<QueryResult<T>> {
-    return this.transaction((tx) => tx.query<T>(sql, values), { operation });
-  }
-
   // Standalone statements must qualify application objects and use no session state.
-  async statement<T extends QueryResultRow = QueryResultRow>(
+  async query<T extends QueryResultRow = QueryResultRow>(
     sql: string,
     values?: unknown[],
     operation?: DatabaseOperation,
@@ -150,13 +143,14 @@ export class Database {
     ]
       .filter(Boolean)
       .join(" ");
-    return this.withClient(fn, options.operation, begin);
+    return this.withClient(fn, options.operation, begin, options.vector);
   }
 
   private async withClient<T>(
     fn: (tx: Sql) => Promise<T>,
     operation: DatabaseOperation | undefined,
     begin?: string,
+    vector = false,
   ): Promise<T> {
     let client: import("pg").PoolClient;
     try {
@@ -239,7 +233,7 @@ export class Database {
       if (!begin) return fn(tx);
       try {
         await query(begin, undefined, "begin");
-        await this.configureSearchPath(tx);
+        if (vector) await this.configureSearchPath(tx);
         const result = await fn(tx);
         await query("COMMIT", undefined, "commit");
         return result;
@@ -400,7 +394,7 @@ export async function releaseUserLease(
 export const USAGE_HISTORY_DAYS = 30;
 
 export async function purgeExpiredUsage(db: Database): Promise<void> {
-  await db.statement(
+  await db.query(
     "DELETE FROM memoia.usage_counters WHERE expires_at<=clock_timestamp()",
   );
 }

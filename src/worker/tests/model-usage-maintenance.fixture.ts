@@ -7,11 +7,12 @@ import { runMaintenance } from "../src/maintenance-agent";
 test("maintenance counts top-level numeric usage from actual SDK error responses", async () => {
   const db = new Database("postgresql://unused:unused@127.0.0.1:1/unused");
   const calls: Array<{ sql: string; values: unknown[] }> = [];
-  const query = async (sql: string, values: unknown[] = []) => {
+  const query: Database["query"] = async (sql, values = []) => {
     calls.push({ sql, values });
-    return { rows: [], rowCount: 1 };
+    return { rows: [], rowCount: 1, command: "", oid: 0, fields: [] };
   };
-  db.transaction = async (fn: any) => fn({ query });
+  db.query = query;
+  db.transaction = async (fn) => fn({ query });
   const runtime = {
     db,
     env: { OPENAI_API_KEY: "local-only" },
@@ -114,13 +115,12 @@ test("malformed maintenance usage stops before tools, fallback or commit", async
         );
         let sqlCalls = 0,
           requests = 0;
-        db.transaction = async (fn: any) =>
-          fn({
-            query: async () => {
-              sqlCalls++;
-              return { rows: [], rowCount: 1 };
-            },
-          });
+        const query: Database["query"] = async () => {
+          sqlCalls++;
+          return { rows: [], rowCount: 1, command: "", oid: 0, fields: [] };
+        };
+        db.query = query;
+        db.transaction = async (fn) => fn({ query });
         const context = new MaintenanceContext(
           {
             db,

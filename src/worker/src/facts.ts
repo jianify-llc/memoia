@@ -857,9 +857,8 @@ async function insertFacts(
     `INSERT INTO memoia.memory_facts
        (id,user_id,project_id,blob_id,content,subject,reporter,certainty,support_groups,occurred_at,fact_time,search_text,embedding,created_version)
      SELECT f.id,$1,$2,$3,f.content,f.subject,f.reporter,f.certainty,f.support_groups,
-            f.occurred_at,nullif(f.fact_time,'null'::jsonb),f.search_text,f.embedding::vector,$4
-       FROM jsonb_to_recordset($5::jsonb) AS f(id uuid,content text,subject text,reporter text,
-         certainty text,support_groups jsonb,occurred_at timestamptz,fact_time jsonb,search_text text,embedding text)`,
+            f.occurred_at,nullif(f.fact_time,'null'::jsonb),f.search_text,f.embedding,$4
+       FROM jsonb_populate_recordset(NULL::memoia.memory_facts,$5::jsonb) AS f`,
     [scope.userId, scope.projectId, blobId, version, JSON.stringify(facts.map((fact, i) => ({
       ...fact,
       search_text: renderSearchFact(fact.content, fact.fact_time),
@@ -946,7 +945,7 @@ export async function prepareFactAppend(
   appendId: string,
   budget: SliceBudget,
 ): Promise<void> {
-  const { rows: [op] } = await runtime.db.statement(
+  const { rows: [op] } = await runtime.db.query(
     `SELECT o.*,coalesce(f.request->>'input_revision','0') AS input_revision
        FROM memoia.memory_operations o JOIN memoia.memory_operations f ON f.id=o.fact_flush_id
       WHERE o.id=$1 AND o.user_id=$2 AND o.project_id=$3 AND o.fact_flush_id=$4
@@ -955,7 +954,7 @@ export async function prepareFactAppend(
   );
   if (!op || op.request.fact_prepared?.input_revision === op.input_revision) return;
   const messagesFor = async (filter: MessageSearch) => {
-    const { rows } = await runtime.db.statement<{ message: SourceMessage }>(
+    const { rows } = await runtime.db.query<{ message: SourceMessage }>(
       `${pendingInputs} SELECT message FROM inputs
        WHERE ($2::text[] IS NULL OR message_id=ANY($2))
          AND ($3::text IS NULL OR strpos(lower(message->>'content'),lower($3))>0
@@ -966,21 +965,21 @@ export async function prepareFactAppend(
     return { messages: rows.slice(0, 10).map((r) => r.message),
       next_offset: rows.length === 11 ? filter.offset + 10 : null };
   };
-  const { rows: primary } = await runtime.db.statement<{ message: SourceMessage }>(
+  const { rows: primary } = await runtime.db.query<{ message: SourceMessage }>(
     `${pendingInputs} SELECT message FROM inputs WHERE append_id=$2 ORDER BY position`,
     [flushId, appendId],
   );
   const messages = primary.map((r) => r.message);
   const evidenceById = async (ids: string[]) => {
     if (!ids.length) return [];
-    return (await runtime.db.statement<{ message: SourceMessage }>(
+    return (await runtime.db.query<{ message: SourceMessage }>(
       `${pendingInputs} SELECT message FROM inputs WHERE message_id=ANY($2::text[])`,
       [flushId, ids],
     )).rows.map((r) => r.message);
   };
   const assertFactInput = async () => {
     budget.assertActive();
-    const current = await runtime.db.statement(
+    const current = await runtime.db.query(
       `SELECT 1 FROM memoia.memory_operations o
          JOIN memoia.memory_operations f ON f.id=o.fact_flush_id JOIN memoia.queue_tasks t ON t.id=o.fact_flush_id
         WHERE o.id=$1 AND t.id=$2 AND t.status='running' AND t.lease_id=$3
@@ -1302,7 +1301,7 @@ export async function deleteMessages(
             );
           for (const f of surviving)
             await tx.query(
-              "UPDATE memoia.memory_facts SET support_groups=$2::jsonb,occurred_at=$3,fact_time=$4::jsonb,search_text=$5,embedding=$6::vector,revision=revision+1,updated_at=now() WHERE id=$1",
+              "UPDATE memoia.memory_facts SET support_groups=$2::jsonb,occurred_at=$3,fact_time=$4::jsonb,search_text=$5,embedding=$6,revision=revision+1,updated_at=now() WHERE id=$1",
               [
                 f.id,
                 JSON.stringify(f.support_groups),
@@ -1718,7 +1717,7 @@ async function correctFact(
             );
           else if (changed)
             await tx.query(
-              "UPDATE memoia.memory_facts SET content=$2,subject=$3,reporter=$4,certainty=$5,support_groups=$6::jsonb,fact_time=$7::jsonb,occurred_at=$8,search_text=$9,embedding=$10::vector,revision=revision+1,updated_at=now() WHERE id=$1",
+              "UPDATE memoia.memory_facts SET content=$2,subject=$3,reporter=$4,certainty=$5,support_groups=$6::jsonb,fact_time=$7::jsonb,occurred_at=$8,search_text=$9,embedding=$10,revision=revision+1,updated_at=now() WHERE id=$1",
               [
                 factId,
                 value.content,
@@ -1787,7 +1786,7 @@ async function correctFact(
   }
 }
 export async function purgeExpiredInputs(runtime: Runtime) {
-  await runtime.db.statement(
+  await runtime.db.query(
     `UPDATE memoia.memory_operations
         SET request=CASE WHEN kind IN ('import','append')
               THEN jsonb_build_object('source_id',source_id,'idempotency_key',idempotency_key)

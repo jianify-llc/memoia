@@ -42,7 +42,7 @@ test("a blackholed query is bounded and the connection is destroyed without roll
   });
   await assert.rejects(db.query("blackhole"), DatabaseUnavailableError);
   assert.deepEqual(releases, [true]);
-  assert.ok(!queries.includes("ROLLBACK"));
+  assert.deepEqual(queries, ["blackhole"]);
   await db.close();
 });
 
@@ -73,7 +73,7 @@ test("transport errors discard connections; ordinary SQL errors roll back and re
       return result;
     });
     await assert.rejects(
-      db.query("broken"),
+      db.transaction((tx) => tx.query("broken")),
       transport
         ? DatabaseUnavailableError
         : (error: unknown) => error === failure,
@@ -102,7 +102,10 @@ test("COMMIT response timeout is an unknown outcome and never rolls back on that
     queries.push(sql);
     return sql === "COMMIT" ? never() : result;
   });
-  await assert.rejects(db.query("write"), DatabaseUnavailableError);
+  await assert.rejects(
+    db.transaction((tx) => tx.query("write")),
+    DatabaseUnavailableError,
+  );
   assert.deepEqual(releases, [true]);
   assert.ok(!queries.includes("ROLLBACK"));
   await db.close();
@@ -203,7 +206,7 @@ test("traces distinguish checkout, PostgreSQL rejection at BEGIN, and local dead
     tracing,
   );
   await assert.rejects(
-    db.query("private-sql-canary", undefined, "healthcheck"),
+    db.transaction((tx) => tx.query("private-sql-canary"), { operation: "healthcheck" }),
     DatabaseUnavailableError,
   );
   assert.equal(events[0]?.name, "memoia.db.acquire");
@@ -280,7 +283,7 @@ test("a 53300 after BEGIN keeps the original write error", async () => {
     return result;
   });
   await assert.rejects(
-    db.query("fixture-write"),
+    db.transaction((tx) => tx.query("fixture-write")),
     (error) => error === rejected,
   );
   assert.equal(calls.filter((sql) => sql === "fixture-write").length, 1);

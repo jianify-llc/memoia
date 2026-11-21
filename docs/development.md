@@ -8,7 +8,7 @@ Install Node.js 22, pnpm 10.12.4, Docker and PostgreSQL client tools. Install ea
 
 `pnpm build:node` bundles the Node API, maintenance worker and migration CLI with the same Prompt files and SQL migrations. Production Docker uses Node 24. Its Compose stack runs its own PostgreSQL/pgvector; Supabase/Hyperdrive remains the Cloudflare deployment path. See the [Docker setup](../deploy/README.md#docker-independent-postgresql) for explicit initialization and startup.
 
-Explicitly supply local test database URLs. The complete root gate in [the deployment guide](../deploy/README.md) starts isolated PostgreSQL/Redis and runs every required integration test. Worker runtime needs no Redis: its PostgreSQL writer lease and Legato Task lease have separate owners, and model waits hold neither SQL transactions nor the short commit lease.
+Explicitly supply local test database URLs. The complete root gate in [the deployment guide](../deploy/README.md) starts isolated PostgreSQL/Redis and runs every required integration test. Worker runtime needs no Redis: its PostgreSQL writer lease and Legato Task lease have separate owners, and model waits hold neither SQL transactions nor the short commit lease. A running task renews its lease every 60 seconds. The lease expires 180 seconds after claim or the last successful renewal, capped by the slice's hard deadline.
 
 ## Configuration
 
@@ -30,8 +30,9 @@ Dependency versions and security overrides live in package manifests/locks. The 
 
 ## Database statements and transactions
 
-- Default to one schema-qualified SQL statement for a probe, independent read or self-contained write. PostgreSQL already provides statement-level atomicity. Use `db.statement` for these paths and combine related SQL when it removes round trips without coupling independent work.
+- Use `db.query` for one schema-qualified SQL statement. It runs directly for a probe, independent read or self-contained write. PostgreSQL provides statement-level atomicity.
 - Open an explicit transaction only for a required invariant such as multi-statement atomicity, a consistent snapshot, or a lock held across dependent statements. Document the invariant at the call site when it is not evident. Keep it short and keep model and Queue calls outside it.
+- Set `vector: true` on transactions that use pgvector types or operators. Only these transactions set a local search path that includes the installed extension's schema.
 - Cron scans, notification reservation and acknowledgement, and retention cleanup use standalone SQL. The minute Cron only reconciles maintenance. The five-minute Cron clears expired operation input. The daily Cron removes expired usage counters. Daily history includes today and the previous 29 days, while the current calendar month counter supports quota checks. Expiry checks still apply at retry time. Blob sealing and expired lease revocation keep their concurrency protections.
 
 ## Database trace boundaries

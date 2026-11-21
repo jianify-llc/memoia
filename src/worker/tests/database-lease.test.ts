@@ -114,10 +114,10 @@ test(
     const db = new Database(url!);
     try {
       const query = "SELECT '[1,0]'::vector <=> '[1,0]'::vector AS distance";
-      assert.equal((await db.query(query)).rows[0].distance, 0);
       assert.equal(
         await db.transaction(
           async (tx) => (await tx.query(query)).rows[0].distance,
+          { vector: true, readOnly: true },
         ),
         0,
       );
@@ -147,7 +147,7 @@ test(
           );
           assert.equal(vector.rows[0].distance, 0);
         },
-        { isolation: "repeatable read", readOnly: true },
+        { isolation: "repeatable read", readOnly: true, vector: true },
       );
       await assert.rejects(
         db.transaction(

@@ -79,7 +79,7 @@ test("write pause also stops Queue and Cron mutation before opening a database",
 
 test("Cron separates maintenance, input expiry and usage expiry", async (t) => {
   const statements: string[] = [];
-  t.mock.method(Database.prototype, "statement", async (sql: string, _values?: unknown[], operation?: string) => {
+  t.mock.method(Database.prototype, "query", async (sql: string, _values?: unknown[], operation?: string) => {
     statements.push(operation === "purge_expired_inputs" ? operation : sql.split(/\s+/, 3).join(" "));
     return { rows: [] };
   });
@@ -592,7 +592,7 @@ try {
             values?.includes(internal)
           ) {
             expired = true;
-            await db.statement(
+            await db.query(
               "UPDATE memoia.memory_operations SET input_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",
               [input.operationId],
             );
@@ -796,7 +796,7 @@ try {
     const scope = await user();
     const group = await importGroup(scope, ["ready", "retry"]);
     const retryId = group.staged[1]!.operationId;
-    await db.statement("UPDATE memoia.memory_operations SET attempts=3 WHERE id=$1", [retryId]);
+    await db.query("UPDATE memoia.memory_operations SET attempts=3 WHERE id=$1", [retryId]);
     const attempted: string[] = [];
     let rejected = true;
     globalThis.fetch = async (_url, init) => {
@@ -849,13 +849,13 @@ try {
   await test("an expired failed range keeps input_required on its original receipt", async () => {
     const scope = await user();
     const group = await importGroup(scope, ["expired-retry"]);
-    await db.statement("UPDATE memoia.memory_operations SET attempts=3 WHERE id=$1", [
+    await db.query("UPDATE memoia.memory_operations SET attempts=3 WHERE id=$1", [
       group.staged[0]!.operationId,
     ]);
     globalThis.fetch = async () => Response.json({ error: { message: "overloaded" } }, { status: 503 });
     await consume(runtime, group.message);
     assert.equal((await getOperation(runtime, scope, { operationId: group.id })).error?.retryable, true);
-    await db.statement(
+    await db.query(
       "UPDATE memoia.memory_operations SET input_expires_at=clock_timestamp()-interval '1 second' WHERE fact_flush_id=$1",
       [group.id],
     );
@@ -872,7 +872,7 @@ try {
     const scope = await user();
     const group = await importGroup(scope, ["race"]);
     const append = group.staged[0]!.operationId;
-    await db.statement("UPDATE memoia.memory_operations SET attempts=3 WHERE id=$1", [append]);
+    await db.query("UPDATE memoia.memory_operations SET attempts=3 WHERE id=$1", [append]);
     globalThis.fetch = async () => Response.json({ error: { message: "overloaded" } }, { status: 503 });
     await consume(runtime, group.message);
     assert.equal((await operationState(group.id)).error.retryable, true);
@@ -882,7 +882,7 @@ try {
       query: async <T extends import("pg").QueryResultRow>(sql: string, values?: unknown[]) => {
         const expire = async () => {
           cleared = true;
-          await db.statement(
+          await db.query(
             "UPDATE memoia.memory_operations SET input_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [append],
           );
           await purgeExpiredInputs(runtime);
@@ -908,7 +908,7 @@ try {
     });
     const old = await append("old");
     const current = await append("current");
-    await db.statement(
+    await db.query(
       "UPDATE memoia.memory_operations SET input_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [old.operation_id],
     );
     await purgeExpiredInputs(runtime);
@@ -933,7 +933,7 @@ try {
     // A previous slice already prepared every append. Exercise only the PostgreSQL
     // settlement boundary and the batch budget in this regression.
     for (const [index, append] of group.staged.entries()) {
-      await db.statement(
+      await db.query(
         "UPDATE memoia.memory_operations SET request=jsonb_set(request,'{fact_prepared}',$2::jsonb) WHERE id=$1",
         [append.operationId, JSON.stringify({
           input_revision: "0",

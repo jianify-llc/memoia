@@ -301,9 +301,12 @@ async function rank(
       : (sharedVector ?? queryVector(runtime, scope.projectId, input.query));
   const [lex, embedding] = await Promise.all([lexical, vector]);
   const sem = embedding
-    ? await runtime.db.query(
-        `SELECT ${base.alias}.id FROM ${base.from} WHERE ${base.where} AND ${base.alias}.embedding IS NOT NULL AND 1-(${base.alias}.embedding <=> $${base.v.length + 1}::vector) > 0.2 ORDER BY ${base.alias}.embedding <=> $${base.v.length + 1}::vector,${base.alias}.id LIMIT ${cap}`,
-        [...base.v, `[${embedding.join(",")}]`],
+    ? await runtime.db.transaction(
+        (tx) => tx.query(
+          `SELECT ${base.alias}.id FROM ${base.from} WHERE ${base.where} AND ${base.alias}.embedding IS NOT NULL AND 1-(${base.alias}.embedding <=> $${base.v.length + 1}::vector) > 0.2 ORDER BY ${base.alias}.embedding <=> $${base.v.length + 1}::vector,${base.alias}.id LIMIT ${cap}`,
+          [...base.v, `[${embedding.join(",")}]`],
+        ),
+        { readOnly: true, vector: true },
       )
     : { rows: [] };
   const scores = new Map<string, number>();
@@ -628,9 +631,12 @@ async function legacyRank(
   const vector = sharedVector ?? queryVector(runtime, scope.projectId, query);
   const [lex, embedding] = await Promise.all([lexical, vector]);
   const sem = embedding
-    ? await runtime.db.query(
-        `SELECT id FROM memoia.user_events WHERE ${where} AND embedding IS NOT NULL AND 1-(embedding <=> $4::vector)>0.2 ORDER BY embedding <=> $4::vector,id LIMIT ${cap}`,
-        [...params(scope), excluded, `[${embedding.join(",")}]`],
+    ? await runtime.db.transaction(
+        (tx) => tx.query(
+          `SELECT id FROM memoia.user_events WHERE ${where} AND embedding IS NOT NULL AND 1-(embedding <=> $4::vector)>0.2 ORDER BY embedding <=> $4::vector,id LIMIT ${cap}`,
+          [...params(scope), excluded, `[${embedding.join(",")}]`],
+        ),
+        { readOnly: true, vector: true },
       )
     : { rows: [] };
   const scores = new Map<string, number>();
@@ -902,9 +908,12 @@ async function contextRanking(
   ]);
   const sem = vector
     ? (
-        await runtime.db.query(
-          `SELECT id,kind FROM ${docs} WHERE embedding IS NOT NULL AND 1-(embedding <=> $3::vector)>0.2 ORDER BY embedding <=> $3::vector,id LIMIT 250`,
-          [...params(scope), `[${vector.join(",")}]`],
+        await runtime.db.transaction(
+          (tx) => tx.query(
+            `SELECT id,kind FROM ${docs} WHERE embedding IS NOT NULL AND 1-(embedding <=> $3::vector)>0.2 ORDER BY embedding <=> $3::vector,id LIMIT 250`,
+            [...params(scope), `[${vector.join(",")}]`],
+          ),
+          { readOnly: true, vector: true },
         )
       ).rows
     : [];

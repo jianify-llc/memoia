@@ -569,9 +569,9 @@ export async function retryFlush(
 export async function dispatch(runtime: Runtime, row: QueryResultRow) {
   if (runtime.env.MAINTENANCE_ENABLED !== "true" || !runtime.maintenanceWakeup)
     return;
-  const sql: Sql = { query: runtime.db.statement.bind(runtime.db) };
+  const { db } = runtime;
   const reserved = await maintenanceTasks.reserveDispatchInTx(
-    sql, row.id, row.kind === "fact_flush" ? undefined : maintenanceRetryPolicy.limit,
+    db, row.id, row.kind === "fact_flush" ? undefined : maintenanceRetryPolicy.limit,
   );
   if (!reserved) return;
   const delay = Math.max(
@@ -594,7 +594,7 @@ export async function dispatch(runtime: Runtime, row: QueryResultRow) {
     );
     if (reserved.lastDispatchAttemptAt)
       await maintenanceTasks.acknowledgeDispatchInTx(
-        sql,
+        db,
         row.id,
         reserved.lastDispatchAttemptAt,
       );
@@ -657,7 +657,7 @@ async function claim(
 }
 async function owned(tx: Sql, c: Claim, lock = false) {
   await assertActive(tx, c);
-  return maintenanceTasks.assertOwnedInTx(tx, c.id, c.owner, lock);
+  await maintenanceTasks.assertOwnedInTx(tx, c.id, c.owner, lock);
 }
 async function failClaim(runtime: Runtime, c: Claim, error: unknown) {
   const retryable =
@@ -711,7 +711,7 @@ function maintenanceEnabled(runtime: Runtime): boolean {
   );
 }
 async function prepareMaintenance(runtime: Runtime) {
-  const candidates = await runtime.db.statement<{
+  const candidates = await runtime.db.query<{
     id: string | null;
     user_id: string;
     project_id: string;
@@ -757,7 +757,7 @@ async function pendingMaintenance(
   limit: number,
   notifications: boolean,
 ) {
-  const pending = await runtime.db.statement(
+  const pending = await runtime.db.query(
     `SELECT * FROM (
     SELECT DISTINCT ON (o.project_id,o.user_id,o.kind) o.id,o.user_id,o.project_id,o.kind,t.next_run_at FROM memoia.memory_operations o JOIN memoia.queue_tasks t ON t.id=o.id WHERE o.kind IN ('flush','fact_flush') AND t.status IN ('pending','queued','retry_wait')
     AND t.next_run_at<=clock_timestamp() AND (NOT $1::boolean OR t.next_dispatch_at IS NULL OR t.next_dispatch_at<=clock_timestamp())
@@ -838,10 +838,7 @@ export async function consume(runtime: Runtime, message: Wakeup) {
         startedAt,
         leaseExpiresAt,
         signal: runtime.signal,
-        renew: () =>
-          runtime.db.transaction((tx) =>
-            maintenanceTasks.renewInTx(tx, c.id, c.owner),
-          ),
+        renew: () => maintenanceTasks.renewInTx(runtime.db, c.id, c.owner),
         onTimeout: async () => {
           const isolated = createRuntime(runtime.env);
           try {
@@ -1904,7 +1901,7 @@ export class MaintenanceContext {
                 blob_id: blobIds.length === 1 ? blobIds[0] : null,
               };
               const written = await tx.query(
-                `INSERT INTO memoia.user_events(id,user_id,project_id,event_data,embedding) VALUES($3,$1,$2,$4::jsonb,$5::vector) ON CONFLICT(id,project_id) DO UPDATE SET event_data=excluded.event_data,embedding=excluded.embedding,revision=user_events.revision+1,updated_at=clock_timestamp() WHERE user_events.user_id=excluded.user_id`,
+                `INSERT INTO memoia.user_events(id,user_id,project_id,event_data,embedding) VALUES($3,$1,$2,$4::jsonb,$5) ON CONFLICT(id,project_id) DO UPDATE SET event_data=excluded.event_data,embedding=excluded.embedding,revision=user_events.revision+1,updated_at=clock_timestamp() WHERE user_events.user_id=excluded.user_id`,
                 [
                   ...scoped(this.claim),
                   id,

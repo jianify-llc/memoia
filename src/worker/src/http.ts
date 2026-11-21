@@ -267,7 +267,7 @@ export function createApp(
     if (env.MEMOIA_HEALTHCHECK_DB_TRACE === "true" && tracing) {
       const {
         rows: [backend],
-      } = await db.statement<{
+      } = await db.query<{
         pid: number;
         started_at_ms: number;
       }>(
@@ -289,7 +289,7 @@ export function createApp(
         } catch {}
       }
     } else {
-      await db.statement("SELECT 1", undefined, "healthcheck");
+      await db.query("SELECT 1", undefined, "healthcheck");
     }
     return c.json({ status: "ok" });
   });
