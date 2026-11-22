@@ -894,6 +894,7 @@ export async function consume(runtime: Runtime, message: Wakeup) {
           const prompt = await maintenancePromptHash();
           const contextIdentity = () => digest({
             version: MAINTENANCE_CHECKPOINT_VERSION,
+            inputProtocolVersion: 2,
             prompt,
             config: context.config,
             ...(context.effortOverride === undefined
@@ -1814,6 +1815,7 @@ export class MaintenanceContext {
         this.claim.projectId,
         [...pending.values()],
         "document",
+        this.claim.userId,
         this.config,
       );
       [...pending.keys()].forEach((id, index) =>

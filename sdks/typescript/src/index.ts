@@ -5,3 +5,4 @@ export type { UpdateFact, DeleteFact } from "./client.js";
 export type { FactQuery, EventQuery, ProfileQuery, QueriedFacts, QueriedEvents, QueriedProfiles, ProjectIdentity } from "./client.js";
 export type { SourceQuery, ContextInput, Context, UserInput, UserId, User, Users, UsersQuery, Events, EventsQuery, ProfileInput, ProfileId, ProfileConfig, Usage, UsageQuery, ClientOptions, RequestOptions, Operation, ForgottenUser, Operations, BlobImport, MessageDeletion, Blob, Profiles, Sources, Source, History, Search, FactTime, Evidence, Projects, ManagedProject, ProjectCreate, ProjectUpdate, Keys, KeyCreate, IssuedKey, LegacyToken } from "./client.js";
 export type { components, paths, operations } from "./generated/openapi.js";
+export type { UsageEvents, UsageEventsQuery } from "./client.js";

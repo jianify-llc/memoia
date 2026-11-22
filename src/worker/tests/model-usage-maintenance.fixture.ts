@@ -87,6 +87,14 @@ test("maintenance counts top-level numeric usage from actual SDK error responses
       calls.filter((c) => c.sql.includes("UPDATE memoia.billings")).length,
       requests,
     );
+    const metered = calls.filter((c) =>
+      c.sql.includes("INSERT INTO memoia.usage_events"),
+    );
+    assert.equal(metered.length, requests);
+    assert.ok(metered.every((c) => c.values[1] === context.claim.userId));
+    assert.ok(
+      metered.every((c) => JSON.parse(String(c.values[3])).input_tokens === 17),
+    );
     const recorded = logs
       .map((s) => JSON.parse(s))
       .filter((v) => v.event === "model_usage");
@@ -113,14 +121,25 @@ test("malformed maintenance usage stops before tools, fallback or commit", async
         const db = new Database(
           "postgresql://unused:unused@127.0.0.1:1/unused",
         );
-        let sqlCalls = 0,
-          requests = 0;
-        const query: Database["query"] = async () => {
-          sqlCalls++;
-          return { rows: [], rowCount: 1, command: "", oid: 0, fields: [] };
+        const sqlCalls: string[] = [];
+        let requests = 0;
+        db.transaction = async (fn: any) =>
+          fn({
+            query: async (statement: string) => {
+              sqlCalls.push(statement);
+              return { rows: [], rowCount: 1 };
+            },
+          });
+        db.query = async (statement) => {
+          sqlCalls.push(statement);
+          return {
+            rows: [],
+            rowCount: 1,
+            command: "INSERT",
+            oid: 0,
+            fields: [],
+          };
         };
-        db.query = query;
-        db.transaction = async (fn) => fn({ query });
         const context = new MaintenanceContext(
           {
             db,
@@ -189,9 +208,14 @@ test("malformed maintenance usage stops before tools, fallback or commit", async
             "malformed usage cannot trigger standard fallback or SDK retry",
           );
           assert.equal(
-            sqlCalls,
-            usage.output_tokens > 32768 ? 1 : 0,
-            "invalid usage must not debit or proceed to tools",
+            sqlCalls.length,
+            usage.output_tokens > 32768 ? 2 : 1,
+            "only unknown usage recording is permitted before rejecting the overlong response",
+          );
+          assert.ok(
+            sqlCalls.every((statement) =>
+              statement.includes("INSERT INTO memoia.usage_"),
+            ),
           );
         } finally {
           await db.close();

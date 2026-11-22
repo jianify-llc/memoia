@@ -4,6 +4,7 @@ import {
   ModelBehaviorError,
   ModelRefusalError,
   Runner,
+  ToolCallError,
   tool,
   type ModelRequest,
 } from "@openai/agents-core";
@@ -12,10 +13,10 @@ import { type SliceBudget, TaskYield } from "@jianify/legato";
 import OpenAI from "openai";
 import { z } from "zod";
 import instructions from "../prompts/fact_extraction.md";
+import type { UserScope } from "./db.js";
 import { SourceError } from "./errors.js";
 import { extractionSchema, localDate } from "./extraction.js";
 import {
-  countTokens,
   errorUsage,
   getConfig,
   provider,
@@ -30,7 +31,8 @@ import {
 } from "./temporal.js";
 
 type Bucket = { message_id: string; facts: unknown[] };
-type Draft = { messages: Bucket[] };
+export type Draft = { messages: Bucket[] };
+export const FACT_EVIDENCE_ID_LIMIT = 50;
 type Config = Awaited<ReturnType<typeof getConfig>>;
 const rules = `${instructions.trim()}
 
@@ -50,9 +52,8 @@ class FactModel extends OpenAIResponsesModel {
 
   constructor(
     readonly runtime: Runtime,
-    readonly projectId: string,
+    readonly scope: UserScope,
     readonly modelId: string,
-    readonly config: Config,
     readonly budget: SliceBudget,
     readonly assertFactInput: () => Promise<void>,
   ) {
@@ -85,16 +86,6 @@ class FactModel extends OpenAIResponsesModel {
         ...body.input,
       ];
     }
-    if (
-      countTokens(JSON.stringify(body)) +
-        this.config.source_output_reserve_tokens >
-      this.config.source_context_window_tokens
-    )
-      throw new SourceError(
-        "input_too_long",
-        "Fact tool context exceeds model budget",
-        413,
-      );
     return built;
   }
 
@@ -133,10 +124,14 @@ class FactModel extends OpenAIResponsesModel {
       } catch (error) {
         await recordUsage(
           this.runtime,
-          this.projectId,
+          this.scope.projectId,
           errorUsage(error),
           "fact_extraction",
-          { requested_service_tier: tier },
+          {
+            userId: this.scope.userId,
+            requestedModel: this.modelId,
+            requested_service_tier: tier,
+          },
         );
         if (
           tier === "flex" &&
@@ -191,13 +186,15 @@ class FactModel extends OpenAIResponsesModel {
       }
       await recordUsage(
         this.runtime,
-        this.projectId,
+        this.scope.projectId,
         response.usage,
         "fact_extraction",
         {
           model: response.model,
           service_tier: response.service_tier,
           requested_service_tier: tier,
+          userId: this.scope.userId,
+          requestedModel: this.modelId,
         },
       );
       if (
@@ -229,7 +226,7 @@ class FactModel extends OpenAIResponsesModel {
 
 export async function runFactAgent(
   runtime: Runtime,
-  projectId: string,
+  scope: UserScope,
   messages: SourceMessage[],
   budget: SliceBudget,
   previous: Draft | null,
@@ -242,10 +239,12 @@ export async function runFactAgent(
       offset: number;
     }) => Promise<{ messages: SourceMessage[]; next_offset: number | null }>;
     previousEvidence: SourceMessage[];
+    readConfig?: () => Promise<Config>;
   },
 ): Promise<Fact[]> {
   if (!messages.some((message) => message.role === "user")) return [];
-  const config = await getConfig(runtime, projectId);
+  const config = await (context?.readConfig?.() ??
+    getConfig(runtime, scope.projectId));
   const model = config.fact_llm_model ?? config.llm_model;
   const effort = config.fact_reasoning_effort ?? config.reasoning_effort;
   const draft = new Map(
@@ -306,9 +305,8 @@ export async function runFactAgent(
   let finished: Fact[] | undefined;
   const modelAdapter = new FactModel(
     runtime,
-    projectId,
+    scope,
     model,
-    config,
     budget,
     assertFactInput,
   );
@@ -322,13 +320,13 @@ export async function runFactAgent(
         description:
           "Read the original messages in this Blob by ID or literal text.",
         parameters: z.object({
-          ids: z.array(z.string()).max(50).nullable(),
+          ids: z.array(z.string()).max(FACT_EVIDENCE_ID_LIMIT).nullable(),
           query: z.string().max(300).nullable(),
           offset: z.number().int().min(0),
         }),
+        errorFunction: null,
         execute: async ({ ids, query, offset }) => {
           if (context) {
-            await assertFactInput();
             const result = await context.search({ ids, query, offset });
             for (const message of result.messages)
               evidence.set(message.message_id, message);
@@ -433,18 +431,6 @@ export async function runFactAgent(
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
-  if (
-    countTokens(
-      messages
-        .map((message) => message.content + (message.visual_description ?? ""))
-        .join("\n"),
-    ) > config.source_max_input_tokens
-  )
-    throw new SourceError(
-      "input_too_long",
-      "Complete source exceeds model budget",
-      413,
-    );
   try {
     await new Runner({
       tracingDisabled: true,
@@ -453,13 +439,14 @@ export async function runFactAgent(
       agent,
       [
         {
-          role: "system",
+          role: "user",
           content: `<source_material>${source}</source_material>`,
         },
       ],
       { signal: budget.signal, maxTurns: null, reasoningItemIdPolicy: "omit" },
     );
-  } catch (error) {
+  } catch (caught) {
+    const error = caught instanceof ToolCallError ? caught.error : caught;
     if (
       error instanceof FactSoftYield &&
       modelAdapter.attemptedRequest &&

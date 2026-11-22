@@ -64,6 +64,13 @@
       "when": 1795255781339,
       "tag": "0008_profile_event_version",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795309989537,
+      "tag": "0009_user_usage_events",
+      "breakpoints": true
     }
   ]
 }

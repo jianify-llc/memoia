@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { QueryResultRow } from "pg";
 import { SliceBudget, TaskTimeout, TaskYield } from "@jianify/legato";
 import {
   Database,
@@ -34,6 +35,7 @@ import {
 import { runFactAgent } from "../src/fact-agent";
 import { flushBlob } from "../src/fact-flush";
 import { claimTask, maintenanceTasks, projectOperation } from "../src/maintenance-task";
+import { getConfig } from "../src/models";
 
 const db = new Database(process.env.MEMOIA_TEST_DATABASE_URL!);
 const runtime = {
@@ -205,6 +207,13 @@ const toolResponse = (name: string, args: unknown) =>
     id: `resp_${crypto.randomUUID()}`,
     status: "completed",
     model: "gpt-6-luna",
+    usage: {
+      input_tokens: 7,
+      output_tokens: 3,
+      total_tokens: 10,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens_details: { reasoning_tokens: 0 },
+    },
     output: [
       {
         id: `fc_fixture_${crypto.randomUUID()}`,
@@ -568,7 +577,7 @@ try {
     await assert.rejects(
       runFactAgent(
         runtime,
-        scope.projectId,
+        scope,
         messages,
         before.budget,
         null,
@@ -588,7 +597,7 @@ try {
     await assert.rejects(
       runFactAgent(
         runtime,
-        scope.projectId,
+        scope,
         messages,
         noProgress.budget,
         null,
@@ -608,7 +617,7 @@ try {
     await assert.rejects(
       runFactAgent(
         runtime,
-        scope.projectId,
+        scope,
         messages,
         progress.budget,
         null,
@@ -629,7 +638,7 @@ try {
     await assert.rejects(
       runFactAgent(
         runtime,
-        scope.projectId,
+        scope,
         messages,
         repair.budget,
         wrong,
@@ -648,7 +657,7 @@ try {
     await assert.rejects(
       runFactAgent(
         runtime,
-        scope.projectId,
+        scope,
         messages,
         repeated.budget,
         saved[0]!,
@@ -662,7 +671,7 @@ try {
       toolResponse("finish_facts", { candidate: null });
     const resumed = await runFactAgent(
       runtime,
-      scope.projectId,
+      scope,
       messages,
       attempt().budget,
       { messages: [...saved[0]!.messages, { message_id: "other", facts: [] }] },
@@ -693,6 +702,7 @@ try {
             claimed.leaseId,
             group.staged[0]!.operationId,
             budget,
+            () => getConfig(runtime, scope.projectId),
           ),
           TaskTimeout,
         );
@@ -710,6 +720,7 @@ try {
           claimed.leaseId,
           group.staged[0]!.operationId,
           new SliceBudget(Date.now(), undefined),
+          () => getConfig(runtime, scope.projectId),
         );
         const isolated = await db.query(
           "SELECT count(*)::int AS n FROM memoia.memory_facts WHERE user_id=$1 AND project_id=$2",
@@ -747,6 +758,106 @@ try {
     await consume(runtime, group.message);
     assert.deepEqual(attempted, ["first", "second"]);
     assert.equal((await operationState(group.id)).status, "completed");
+  });
+  await test("Fact append loads primary input with its checkpoint and resumes a reviewed candidate", async () => {
+    const scope = await user();
+    const group = await importGroup(scope, ["config"]);
+    const appendId = group.staged[0]!.operationId;
+    const claimed = await maintenanceTasks.claimInTx(db, group.id);
+    assert.ok(claimed?.leaseId);
+    const owner = claimed.leaseId;
+    const withEmbeddings = {
+      ...runtime,
+      env: { ...runtime.env, MEMOIA_CONFIG: "{}" },
+    };
+    const statement = db.query.bind(db);
+    let configReads = 0;
+    let inputReads = 0;
+    let modelCalls = 0;
+    let embeddingCalls = 0;
+    db.query = async <Row extends QueryResultRow>(
+      sql: string,
+      values?: unknown[],
+      operation?: Parameters<typeof statement>[2],
+    ) => {
+      const result = await statement<Row>(sql, values, operation);
+      if (sql.includes("SELECT profile_config FROM memoia.projects")) configReads++;
+      if (sql.includes("SELECT message FROM inputs WHERE append_id=$2")) {
+        inputReads++;
+        const row = result.rows[0];
+        assert.ok(row && "input_revision" in row && "messages" in row);
+        assert.equal("request" in row, false);
+        assert.equal(row.messages === null, row.reviewed !== null);
+      }
+      return result;
+    };
+    globalThis.fetch = async (url, init) => {
+      if (String(url).endsWith("/embeddings")) {
+        embeddingCalls++;
+        return Response.json({
+          data: [{ index: 0, embedding: Array(1536).fill(0.01) }],
+        });
+      }
+      modelCalls++;
+      const id = String(init?.body).includes("I drink tea (config-second).")
+        ? "config-second"
+        : "config";
+      return toolResponse("finish_facts", { candidate: factCandidate(id) });
+    };
+    const prepare = () => {
+      let configRead: ReturnType<typeof getConfig> | undefined;
+      return prepareFactAppend(
+        withEmbeddings,
+        scope,
+        group.id,
+        owner,
+        appendId,
+        new SliceBudget(Date.now(), undefined),
+        () => (configRead ??= getConfig(withEmbeddings, scope.projectId)),
+      );
+    };
+    const checkpoint = async () => (
+      await db.query(
+        "SELECT request->'fact_prepared' AS prepared FROM memoia.memory_operations WHERE id=$1",
+        [appendId],
+      )
+    ).rows[0]?.prepared;
+    try {
+      await prepare();
+      const first = await checkpoint();
+      assert.equal(first.facts.length, 1);
+      assert.equal(first.vectors[0].length, 1536);
+      assert.deepEqual(
+        { configReads, inputReads, modelCalls, embeddingCalls },
+        { configReads: 1, inputReads: 1, modelCalls: 1, embeddingCalls: 1 },
+      );
+
+      // Reproduce a restart after the review candidate was saved, before vectors were committed.
+      await db.query(
+        "UPDATE memoia.memory_operations SET request=request-'fact_prepared' WHERE id=$1",
+        [appendId],
+      );
+      configReads = inputReads = modelCalls = embeddingCalls = 0;
+      await prepare();
+      assert.deepEqual(await checkpoint(), first);
+      assert.deepEqual(
+        { configReads, inputReads, modelCalls, embeddingCalls },
+        { configReads: 1, inputReads: 1, modelCalls: 0, embeddingCalls: 1 },
+      );
+
+      const freshScope = await user();
+      const batch = await importGroup(freshScope, ["config", "config-second"]);
+      configReads = inputReads = modelCalls = embeddingCalls = 0;
+      await consume(withEmbeddings, batch.message);
+      assert.equal((await operationState(batch.id)).status, "completed");
+      assert.deepEqual(
+        { configReads, inputReads, modelCalls, embeddingCalls },
+        { configReads: 1, inputReads: 2, modelCalls: 2, embeddingCalls: 2 },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      db.query = statement;
+    }
   });
   for (const [phase, status] of [
     ["responses", 400],
@@ -947,6 +1058,11 @@ try {
   await test("many appends share the session Blob and an append arriving during extraction waits for a later flush", async () => {
     const scope = await user();
     const group = await importGroup(scope, ["first", "second"]);
+    const factUsage = () =>
+      db.query(
+        "SELECT usage->>'kind' AS kind,(usage->>'input_tokens')::int AS input,(usage->>'output_tokens')::int AS output FROM memoia.usage_events WHERE project_id=$1 AND user_id=$2",
+        [scope.projectId, scope.userId],
+      );
     const replay = await stageImport(runtime, scope, {
       source_id: "s",
       idempotency_key: "stage-first",
@@ -959,6 +1075,7 @@ try {
       append_operation_ids: group.staged.map((a) => a.operationId).reverse(),
     });
     assert.equal(repeated.operation_id, group.id);
+    assert.equal((await factUsage()).rows.length, 0);
 
     let tail: Awaited<ReturnType<typeof stageImport>> | undefined;
     const attempted: string[] = [];
@@ -987,6 +1104,10 @@ try {
     await consume(runtime, group.message);
     assert.equal((await operationState(group.id)).result.fact_ids.length, 2);
     assert.deepEqual(attempted, ["first", "second"]);
+    assert.deepEqual((await factUsage()).rows, [
+      { kind: "fact_extraction", input: 7, output: 3 },
+      { kind: "fact_extraction", input: 7, output: 3 },
+    ]);
     assert.equal(tail!.blob_id, "s");
     assert.equal((await operationState(tail!.operation_id)).status, "staged");
     const incremental = await flushBlob(runtime, scope, "s", {
@@ -998,6 +1119,7 @@ try {
       kind: "fact_flush",
     });
     assert.deepEqual(attempted, ["first", "second", "late"]);
+    assert.equal((await factUsage()).rows.length, 3);
     const {
       rows: [visible],
     } = await db.query(
@@ -1267,8 +1389,8 @@ try {
       const other = ownId === "first" ? "second" : "first";
       if (index % 2 === 0)
         return toolResponse("read_messages", {
-          ids: [other],
-          query: null,
+          ids: index === 0 ? [other] : null,
+          query: index === 0 ? null : `I drink tea (${other}).`,
           offset: 0,
         });
       assert.ok(String(init?.body).includes(`I drink tea (${other}).`));
@@ -1297,6 +1419,48 @@ try {
     );
     assert.deepEqual([...fact.support_groups[0]].sort(), ["first", "second"]);
   });
+  for (const invalidation of ["lease expiration", "input withdrawal"] as const) {
+    await test(`Fact evidence read yields after ${invalidation}`, async (t) => {
+      const scope = await user();
+      const group = await importGroup(scope, ["first", "second"]);
+      let modelCalls = 0;
+      const evidenceRows: number[] = [];
+      const statement = db.query.bind(db);
+      t.mock.method(db, "query", (async (sql, values, operation) => {
+        const result = await statement(sql, values, operation);
+        if (sql.includes("LIMIT 11 OFFSET")) evidenceRows.push(result.rows.length);
+        return result;
+      }) as typeof db.query);
+      globalThis.fetch = async () => {
+        assert.equal(++modelCalls, 1);
+        if (invalidation === "lease expiration") {
+          await db.query(
+            "UPDATE memoia.queue_tasks SET lease_expires_at=clock_timestamp() WHERE id=$1",
+            [group.id],
+          );
+        } else {
+          await deleteMessages(runtime, scope, "s", {
+            idempotency_key: "withdraw-evidence",
+            message_ids: ["second"],
+          });
+        }
+        return toolResponse("read_messages", { ids: ["second"], query: null, offset: 0 });
+      };
+      try {
+        await consume(runtime, group.message);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+      assert.deepEqual(evidenceRows, [0]);
+      assert.equal(modelCalls, 1);
+      for (const append of group.staged) {
+        const op = await operationState(append.operationId);
+        assert.equal(op.status, "processing");
+        assert.equal(op.request.fact_draft, undefined);
+        assert.equal(op.request.fact_review_candidate, undefined);
+      }
+    });
+  }
   await test("a single large session Blob has bounded derived flushes and keeps each fixed snapshot", async () => {
     const scope = await user();
     const staged = await stageImport(runtime, scope, {

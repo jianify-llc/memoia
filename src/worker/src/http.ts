@@ -7,6 +7,7 @@ import { authenticate, allows, requiredScope, type Principal } from "./auth";
 import * as management from "./management";
 import * as retrieval from "./retrieval";
 import { parseImportMetadata } from "./canonical";
+import { listUsageEvents } from "./usage";
 // Generated from the checked-in OpenAPI contract, shared with the SDK.
 // @ts-ignore standalone generated JavaScript
 import * as generated from "../../../sdks/typescript/src/generated/validators.js";
@@ -139,7 +140,10 @@ function page(c: C, defaults: Record<string, number>): Record<string, number> {
   return out;
 }
 function receipt(c: C, result: any) {
-  return c.json(result, ["processing", "staged"].includes(result.status) ? 202 : 200);
+  return c.json(
+    result,
+    ["processing", "staged"].includes(result.status) ? 202 : 200,
+  );
 }
 
 export function createApp(
@@ -154,7 +158,9 @@ export function createApp(
             code: error.code,
             message: error.message,
             retryable: error.retryable,
-            ...(error instanceof ExpiredAppendInputs && { append_operation_ids: error.appendOperationIds }),
+            ...(error instanceof ExpiredAppendInputs && {
+              append_operation_ids: error.appendOperationIds,
+            }),
           },
         },
         error.status as any,
@@ -194,6 +200,7 @@ export function createApp(
   });
   app.use("/api/*", async (c, next) => {
     const runtime = createRuntime(c.env, c.req.raw.signal);
+    if (runtime.waitUntil) runtime.retrievalUsageWrites = [];
     try {
       const deadlineHeader = c.req.header("X-Memoia-Deadline-Ms");
       if (deadlineHeader !== undefined) {
@@ -243,7 +250,15 @@ export function createApp(
       }
       await next();
     } finally {
-      await closeRuntime(runtime);
+      const usageWrites = runtime.retrievalUsageWrites;
+      if (usageWrites?.length && runtime.waitUntil) {
+        // The response no longer needs this connection pool. Finish known usage before closing it.
+        runtime.waitUntil(
+          Promise.allSettled(usageWrites).then(() => closeRuntime(runtime)),
+        );
+      } else {
+        await closeRuntime(runtime);
+      }
     }
   });
   const runtime = (c: C): Runtime => c.get("runtime");
@@ -640,6 +655,35 @@ export function createApp(
     const p = page(c, { last_days: 7 });
     return c.json(
       await retrieval.getUsage(runtime(c), principal(c).projectId, p.last_days),
+    );
+  });
+  app.get("/api/project/usage/events", async (c) => {
+    const limit = page(c, { limit: 100 }).limit;
+    const date = c.req.query("date");
+    const userId = c.req.query("user_id");
+    const cursor = c.req.query("cursor");
+    check("UsageEventsQuery", { date, limit, user_id: userId, cursor });
+    const [time, id, extra] = cursor?.split("/") ?? [];
+    if (
+      cursor &&
+      (!time ||
+        !id ||
+        extra !== undefined ||
+        !uuid.test(id) ||
+        !Number.isFinite(Date.parse(time)) ||
+        new Date(time).toISOString() !== time ||
+        !time.startsWith(`${date}T`))
+    )
+      invalid();
+    return c.json(
+      await listUsageEvents(
+        runtime(c),
+        principal(c).projectId,
+        date!,
+        limit,
+        userId?.toLowerCase(),
+        time && id ? { time, id } : undefined,
+      ),
     );
   });
   return app;

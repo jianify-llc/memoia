@@ -588,6 +588,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/project/usage/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List model use recorded on a UTC date in the authenticated project */
+        get: operations["listUsageEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1673,6 +1690,38 @@ export interface components {
         FactFlushInput: {
             idempotency_key: string;
             append_operation_ids: string[];
+        };
+        UsageEvent: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            user_id: string;
+            /** Format: date-time */
+            occurred_at: string;
+            /** @enum {string} */
+            kind: "fact_extraction" | "agent_loop" | "embedding";
+            /** @enum {string} */
+            provider: "openai" | "jina" | "ollama";
+            model: string | null;
+            service_tier: string | null;
+            input_tokens: number | null;
+            output_tokens: number | null;
+            cached_tokens?: number | null;
+            cache_write_tokens?: number | null;
+            cache_write_30m_tokens?: number | null;
+            cache_write_12h_tokens?: number | null;
+            /** @description False when the provider returned inconsistent or invalid token details. */
+            usage_valid?: boolean;
+        };
+        UsageEvents: {
+            project_id: string;
+            events: components["schemas"]["UsageEvent"][];
+            next_cursor: string | null;
+            /**
+             * Format: date
+             * @description Earliest retained UTC record date for this project or user, present on the first page.
+             */
+            first_recorded_date?: string | null;
         };
     };
     responses: never;
@@ -3099,6 +3148,40 @@ export interface operations {
                             retryable: boolean;
                         };
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    listUsageEvents: {
+        parameters: {
+            query: {
+                date: string;
+                user_id?: string;
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Model usage page */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UsageEvents"];
                 };
             };
             /** @description Validation Error */

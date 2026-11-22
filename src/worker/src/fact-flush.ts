@@ -14,6 +14,7 @@ import { ExpiredAppendInputs, SourceError } from "./errors.js";
 import { commitFactFlush, getOperation, prepareFactAppend, publicOperation } from "./facts.js";
 import { dispatch } from "./maintenance.js";
 import { claimTask, factFlushRetryPolicy, maintenanceTasks, projectFlush, projectOperation } from "./maintenance-task.js";
+import { getConfig } from "./models.js";
 import type { Runtime, Wakeup } from "./runtime.js";
 
 const MAX_FLUSH_APPENDS = 32;
@@ -234,6 +235,10 @@ export async function consumeFactFlush(
           signal: budget.signal,
           deadline: budget.hardDeadlineAt,
         };
+        // Each slice shares one project configuration across its appends and model calls.
+        let configRead: ReturnType<typeof getConfig> | undefined;
+        const readConfig = () =>
+          (configRead ??= getConfig(slice, scope.projectId));
         const ready = await runtime.db.query<{ id: string }>(
           `SELECT a.id FROM memoia.memory_operations a JOIN memoia.memory_operations o ON o.id=a.fact_flush_id
             WHERE a.fact_flush_id=$1 AND a.status='processing'
@@ -249,7 +254,15 @@ export async function consumeFactFlush(
         );
         for (const { id: appendId } of ready.rows) {
           if (budget.shouldYield(30_000)) throw new TaskYield();
-          await prepareFactAppend(slice, scope, id, owner, appendId, budget);
+          await prepareFactAppend(
+            slice,
+            scope,
+            id,
+            owner,
+            appendId,
+            budget,
+            readConfig,
+          );
         }
         // The normal path checks ownership and inputs in the publication transaction.
         const { rows } = await db.query(

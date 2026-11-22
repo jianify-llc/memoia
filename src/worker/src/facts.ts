@@ -16,7 +16,7 @@ import {
 import { embeddings, getConfig } from "./models";
 import { recordChanges, notifyUser, progress } from "./maintenance";
 import { operationReceiptQuery, projectReceipt, maintenanceRetryPolicy, maintenanceTasks } from "./maintenance-task";
-import { runFactAgent } from "./fact-agent";
+import { FACT_EVIDENCE_ID_LIMIT, runFactAgent, type Draft as FactDraft } from "./fact-agent";
 import {
   evidenceTime,
   validateFactTime,
@@ -621,19 +621,25 @@ type PreparedAppend = {
 
 type MessageSearch = { ids: string[] | null; query: string | null; offset: number };
 
-// Overlap across upload receipts is harmless. The first occurrence within the
-// sealed set owns the model decision. A later flush filters committed message IDs.
-const pendingInputs = `WITH inputs AS (
+// Filtering by ID before expansion keeps the relative position and the first
+// eligible copy across append receipts. Full scans use the ordinary array iterator.
+function pendingInputs(ids?: "$2" | "$5") {
+  const messages = ids
+    ? `jsonb_path_query(a.request->'messages', '$[*] ? (@.message_id == $ids[*])',
+        jsonb_build_object('ids', ${ids}::text[]))`
+    : "jsonb_array_elements(a.request->'messages')";
+  return `WITH inputs AS (
   SELECT DISTINCT ON (m.message_id) a.id AS append_id,a.created_at,a.user_id,a.project_id,a.source_id,
     m.message_id,input.message,input.position
   FROM memoia.memory_operations a
-  CROSS JOIN LATERAL jsonb_array_elements(a.request->'messages') WITH ORDINALITY AS input(message, position)
+  CROSS JOIN LATERAL ${messages} WITH ORDINALITY AS input(message, position)
   JOIN memoia.memory_messages m ON m.user_id=a.user_id AND m.project_id=a.project_id
     AND m.source_id=a.source_id AND m.message_id=input.message->>'message_id'
   WHERE a.fact_flush_id=$1 AND a.status='processing' AND a.input_expires_at>clock_timestamp()
     AND NOT m.deleted AND NOT m.processed
   ORDER BY m.message_id,a.created_at,a.id,input.position
 )`;
+}
 
 export async function prepareFactAppend(
   runtime: Runtime,
@@ -642,36 +648,61 @@ export async function prepareFactAppend(
   owner: string,
   appendId: string,
   budget: SliceBudget,
+  readConfig: () => ReturnType<typeof getConfig>,
 ): Promise<void> {
-  const { rows: [op] } = await runtime.db.query(
-    `SELECT o.*,coalesce(f.request->>'input_revision','0') AS input_revision
+  // Load the checkpoint and its primary input together. A reviewed revision
+  // only needs its candidate, and a prepared revision needs no input at all.
+  const { rows: [op] } = await runtime.db.query<{
+    attempts: number;
+    generation: number | string | null;
+    input_revision: string;
+    reviewed: { input_revision: string; facts: PreparedAppend["facts"] } | null;
+    draft: { input_revision: string; draft: FactDraft; evidenceIds: string[] } | null;
+    messages: SourceMessage[] | null;
+  }>(
+    `WITH append AS (
+       SELECT o.attempts,o.generation,coalesce(f.request->>'input_revision','0') AS input_revision,
+         o.request->'fact_prepared'->'input_revision' AS prepared_revision,
+         o.request->'fact_review_candidate' AS reviewed,o.request->'fact_draft' AS draft
        FROM memoia.memory_operations o JOIN memoia.memory_operations f ON f.id=o.fact_flush_id
-      WHERE o.id=$1 AND o.user_id=$2 AND o.project_id=$3 AND o.fact_flush_id=$4
-        AND o.status='processing' AND o.input_expires_at>clock_timestamp()`,
-    [appendId, scope.userId, scope.projectId, flushId],
+       WHERE o.id=$2 AND o.user_id=$3 AND o.project_id=$4 AND o.fact_flush_id=$1
+         AND o.status='processing' AND o.input_expires_at>clock_timestamp()
+     )
+     SELECT attempts,generation,input_revision,reviewed,draft,
+       CASE WHEN reviewed->'input_revision' IS DISTINCT FROM to_jsonb(input_revision)
+         THEN ARRAY(${pendingInputs()} SELECT message FROM inputs WHERE append_id=$2 ORDER BY position)
+       END AS messages
+     FROM append WHERE prepared_revision IS DISTINCT FROM to_jsonb(input_revision)`,
+    [flushId, appendId, scope.userId, scope.projectId],
   );
-  if (!op || op.request.fact_prepared?.input_revision === op.input_revision) return;
+  if (!op) return;
+  const activeInput = `SELECT 1 FROM memoia.memory_operations o
+    JOIN memoia.memory_operations f ON f.id=o.fact_flush_id JOIN memoia.queue_tasks t ON t.id=o.fact_flush_id
+    WHERE t.id=$1 AND o.id=$2 AND t.status='running' AND t.lease_id=$3
+      AND t.lease_expires_at>clock_timestamp() AND coalesce(f.request->>'input_revision','0')=$4
+      AND o.status='processing' AND o.input_expires_at>clock_timestamp()`;
+  const inputIdentity = [flushId, appendId, owner, op.input_revision];
   const messagesFor = async (filter: MessageSearch) => {
-    const { rows } = await runtime.db.query<{ message: SourceMessage }>(
-      `${pendingInputs} SELECT message FROM inputs
-       WHERE ($2::text[] IS NULL OR message_id=ANY($2))
-         AND ($3::text IS NULL OR strpos(lower(message->>'content'),lower($3))>0
-              OR strpos(lower(message->>'visual_description'),lower($3))>0)
-       ORDER BY created_at,append_id,position LIMIT 11 OFFSET $4`,
-      [flushId, filter.ids, filter.query, filter.offset],
+    budget.assertActive();
+    // The lease and revision gate the source read in the same database snapshot.
+    const { rows: [page] } = await runtime.db.query<{ messages: SourceMessage[] }>(
+      `SELECT ARRAY(${pendingInputs(filter.ids ? "$5" : undefined)} SELECT message FROM inputs
+       WHERE ($5::text[] IS NULL OR message_id=ANY($5))
+         AND ($6::text IS NULL OR strpos(lower(message->>'content'),lower($6))>0
+              OR strpos(lower(message->>'visual_description'),lower($6))>0)
+       ORDER BY created_at,append_id,position LIMIT 11 OFFSET $7) AS messages
+       WHERE EXISTS (${activeInput})`,
+      [...inputIdentity, filter.ids, filter.query, filter.offset],
     );
-    return { messages: rows.slice(0, 10).map((r) => r.message),
-      next_offset: rows.length === 11 ? filter.offset + 10 : null };
+    if (!page) throw new TaskYield();
+    return { messages: page.messages.slice(0, 10),
+      next_offset: page.messages.length === 11 ? filter.offset + 10 : null };
   };
-  const { rows: primary } = await runtime.db.query<{ message: SourceMessage }>(
-    `${pendingInputs} SELECT message FROM inputs WHERE append_id=$2 ORDER BY position`,
-    [flushId, appendId],
-  );
-  const messages = primary.map((r) => r.message);
   const evidenceById = async (ids: string[]) => {
     if (!ids.length) return [];
+    const idFilter = ids.length <= FACT_EVIDENCE_ID_LIMIT ? "$2" : undefined;
     return (await runtime.db.query<{ message: SourceMessage }>(
-      `${pendingInputs} SELECT message FROM inputs WHERE message_id=ANY($2::text[])`,
+      `${pendingInputs(idFilter)} SELECT message FROM inputs WHERE message_id=ANY($2::text[])`,
       [flushId, ids],
     )).rows.map((r) => r.message);
   };
@@ -701,15 +732,25 @@ export async function prepareFactAppend(
   };
   try {
     const operationRuntime = { ...runtime, operationId: appendId };
-    const stored = op.request.fact_review_candidate;
-    const staged = op.request.fact_draft;
+    const stored = op.reviewed;
+    const staged = op.draft;
     const usableDraft = staged?.input_revision === op.input_revision ? staged : null;
     let extracted: ExtractedFact[];
     if (stored?.input_revision === op.input_revision) extracted = stored.facts;
     else {
-      const facts = await runFactAgent(operationRuntime, scope.projectId, messages, budget, usableDraft?.draft ?? null,
-        (draft, evidenceIds) => save("fact_draft", { draft, evidenceIds }), assertFactInput,
-        { search: messagesFor, previousEvidence: await evidenceById(usableDraft?.evidenceIds ?? []) },
+      const facts = await runFactAgent(
+        operationRuntime,
+        scope,
+        op.messages ?? [],
+        budget,
+        usableDraft?.draft ?? null,
+        (draft, evidenceIds) => save("fact_draft", { draft, evidenceIds }),
+        assertFactInput,
+        {
+          search: messagesFor,
+          previousEvidence: await evidenceById(usableDraft?.evidenceIds ?? []),
+          readConfig,
+        },
       );
       const evidence = await evidenceById([...new Set(facts.flatMap((fact) => fact.support_groups.flat()))]);
       await assertFactInput();
@@ -719,12 +760,18 @@ export async function prepareFactAppend(
       await save("fact_review_candidate", { facts: extracted });
     }
     if (budget.shouldYield(30_000)) throw new TaskYield();
-    const config = extracted.length ? await getConfig(runtime, scope.projectId) : null;
+    const config = extracted.length ? await readConfig() : null;
     let vectors: (number[] | null)[] = extracted.map(() => null);
     if (config?.enable_event_embedding) {
       await assertFactInput();
-      vectors = await embeddings({ ...operationRuntime, deadline: budget.softDeadlineAt - 15_000 },
-        scope.projectId, extracted.map((f) => renderSearchFact(f.content, f.fact_time)), "document", config);
+      vectors = await embeddings(
+        { ...operationRuntime, deadline: budget.softDeadlineAt - 15_000 },
+        scope.projectId,
+        extracted.map((f) => renderSearchFact(f.content, f.fact_time)),
+        "document",
+        scope.userId,
+        config,
+      );
     }
     if (vectors.length !== extracted.length)
       throw new SourceError("embedding_unavailable", "Embedding count mismatch", 503, true);
@@ -778,7 +825,7 @@ export async function commitFactFlush(
     const version = await bumpMemoryVersion(tx, scope);
     const changes = await insertFacts(tx, scope, first.blob_id, version, facts, vectors);
     await tx.query(
-      `${pendingInputs}
+      `${pendingInputs()}
        UPDATE memoia.memory_messages target SET processed=true FROM inputs
         WHERE target.user_id=inputs.user_id AND target.project_id=inputs.project_id
           AND target.source_id=inputs.source_id AND target.message_id=inputs.message_id`,
@@ -904,6 +951,7 @@ export async function deleteMessages(
           scope.projectId,
           reindex.map((f) => f.search_text),
           "document",
+          scope.userId,
           config,
         )
       : reindex.map(() => null);
@@ -1128,7 +1176,7 @@ async function correctFact(
       ) {
         const config = await getConfig(runtime, scope.projectId);
         const vectors = config.enable_event_embedding
-          ? await embeddings(runtime, scope.projectId, [value.search_text], "document", config)
+          ? await embeddings(runtime, scope.projectId, [value.search_text], "document", scope.userId, config)
           : [null];
         if (vectors.length !== 1)
           throw new SourceError(

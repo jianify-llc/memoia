@@ -48,12 +48,16 @@ export interface Runtime {
   signal?: AbortSignal;
   tracing?: Tracing;
   operationId?: string;
+  retrievalUsageWrites?: Promise<void>[];
 }
 export function usesOpenAIBaseUrl(base: string | undefined): boolean {
   if (base === undefined) return true;
   try {
     const href = new URL(base).href;
-    return href === "https://api.openai.com/v1" || href === "https://api.openai.com/v1/";
+    return (
+      href === "https://api.openai.com/v1" ||
+      href === "https://api.openai.com/v1/"
+    );
   } catch {
     return false;
   }

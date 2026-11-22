@@ -239,10 +239,10 @@ function pool(
 }
 async function queryVector(
   runtime: Runtime,
-  projectId: string,
+  scope: UserScope,
   query: string,
 ): Promise<number[] | null> {
-  const config = await getModelConfig(runtime, projectId);
+  const config = await getModelConfig(runtime, scope.projectId);
   if (!config.enable_event_embedding) return null;
   try {
     const timer = AbortSignal.timeout(8000);
@@ -251,7 +251,7 @@ async function queryVector(
       : timer;
     return (
       (
-        await embeddings({ ...runtime, signal }, projectId, [query], "query", config)
+        await embeddings({ ...runtime, signal }, scope.projectId, [query], "query", scope.userId, config)
       )[0] ?? null
     );
   } catch (error: any) {
@@ -304,7 +304,7 @@ async function rank(
   const vector =
     kind === "profiles"
       ? Promise.resolve(null)
-      : (sharedVector ?? queryVector(runtime, scope.projectId, input.query));
+      : (sharedVector ?? queryVector(runtime, scope, input.query));
   const [lex, embedding] = await Promise.all([lexical, vector]);
   const distance = embedding && await vectorDistance(runtime, `${base.alias}.embedding`, base.v.length + 1);
   const sem = embedding && distance
@@ -626,7 +626,7 @@ async function legacyRank(
     `SELECT id FROM memoia.user_events WHERE ${where} AND (to_tsvector('simple',${text}) @@ websearch_to_tsquery('simple',$4) OR position(lower($4) in lower(${text}))>0) ORDER BY ts_rank_cd(to_tsvector('simple',${text}),websearch_to_tsquery('simple',$4)) DESC,id LIMIT ${cap}`,
     args,
   );
-  const vector = sharedVector ?? queryVector(runtime, scope.projectId, query);
+  const vector = sharedVector ?? queryVector(runtime, scope, query);
   const [lex, embedding] = await Promise.all([lexical, vector]);
   const distance = embedding && await vectorDistance(runtime, "embedding", 4);
   const sem = embedding && distance
@@ -673,7 +673,7 @@ export async function search(
       includeEvents: input.include_events !== false,
     },
   };
-  const vector = queryVector(runtime, scope.projectId, input.query);
+  const vector = queryVector(runtime, scope, input.query);
   const [unseen, seen, legacy] = await Promise.all([
     rank(runtime, scope, "facts", query, vector),
     excludedFacts.length
@@ -897,7 +897,7 @@ async function contextRanking(
   );
   const [lex, vector] = await Promise.all([
     lexical,
-    queryVector(runtime, scope.projectId, query),
+    queryVector(runtime, scope, query),
   ]);
   const distance = vector && await vectorDistance(runtime, "embedding", 3);
   const sem = vector && distance

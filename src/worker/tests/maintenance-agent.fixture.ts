@@ -272,7 +272,8 @@ test("final HTTP keeps instructions, caches one public prefix, and continues nat
       requests[2].prompt_cache_options.comparison_response_id,
       "resp_tool",
     );
-    assert.equal(requests[0].input[1].role, "developer");
+    assert.equal(requests[0].input[1].role, "user");
+    assert.equal(requests[0].input[2].role, "user");
     assert.ok(requests[0].tools.some((t: any) => t.name === "stage_profile"));
     assert.ok(requests[0].tools.some((t: any) => t.name === "stage_event"));
   } finally {

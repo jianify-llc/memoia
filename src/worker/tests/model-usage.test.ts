@@ -15,7 +15,9 @@ function fixture() {
     return {
       rows: sql.startsWith("SELECT profile_config")
         ? [{ profile_config: "" }]
-        : [],
+        : sql.startsWith("SELECT 1 FROM memoia.users")
+          ? [{ exists: 1 }]
+          : [],
       rowCount: 1,
     };
   };
@@ -214,5 +216,65 @@ test("external billing uses ADMIN_TOKEN and never replays model or counters on r
     globalThis.fetch = oldFetch;
     console.warn = oldWarn;
     console.info = oldInfo;
+  }
+});
+
+test("document embedding meters a failed physical response before retrying", async () => {
+  const { runtime, calls } = fixture();
+  let requests = 0;
+  runtime.modelFetch = async () =>
+    ++requests === 1
+      ? Response.json(
+          { error: { code: "temporary" }, usage: { prompt_tokens: 7 } },
+          { status: 503, headers: { "retry-after-ms": "1" } },
+        )
+      : Response.json({
+          data: [{ index: 0, embedding: [0.1, 0.2] }],
+          model: "text-embedding-3-large",
+          usage: { prompt_tokens: 9 },
+        });
+  await embeddings(runtime, "p", ["document"], "document", crypto.randomUUID());
+  assert.equal(requests, 2);
+  const events = calls.filter((c) =>
+    c.sql.includes("INSERT INTO memoia.usage_events"),
+  );
+  assert.deepEqual(
+    events.map((c) => JSON.parse(String(c.values[3])).input_tokens),
+    [7, 9],
+  );
+  assert.notEqual(events[0].values[4], events[1].values[4]);
+});
+
+test("query embeddings return while known usage waits for the database", async () => {
+  const { runtime } = fixture();
+  runtime.retrievalUsageWrites = [];
+  runtime.modelFetch = async () =>
+    Response.json({
+      data: [{ index: 0, embedding: [0.1, 0.2] }],
+      model: "text-embedding-3-small",
+      usage: { prompt_tokens: 7 },
+    });
+  const statement = runtime.db.query.bind(runtime.db);
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  runtime.db.query = async (...args) => {
+    if (args[0].includes("INSERT INTO memoia.usage_events")) await pending;
+    return statement(...args);
+  };
+  try {
+    const output = embeddings(
+      runtime,
+      "p",
+      ["query"],
+      "query",
+      crypto.randomUUID(),
+    );
+    assert.equal(runtime.retrievalUsageWrites.length, 1);
+    assert.deepEqual(await output, [[0.1, 0.2]]);
+  } finally {
+    release();
+    await Promise.all(runtime.retrievalUsageWrites);
   }
 });

@@ -48,6 +48,8 @@ export type ProfileId = ResponseBody<paths["/api/users/{user_id}/profiles"]["pos
 export type ProfileConfig = ResponseBody<paths["/api/project/config"]["get"]>;
 export type Usage = ResponseBody<paths["/api/project/usage"]["get"]>;
 export type UsageQuery = NonNullable<paths["/api/project/usage"]["get"]["parameters"]["query"]>;
+export type UsageEvents = ResponseBody<paths["/api/project/usage/events"]["get"]>;
+export type UsageEventsQuery = NonNullable<paths["/api/project/usage/events"]["get"]["parameters"]["query"]>;
 export type FactTime = components["schemas"]["FactTime"];
 export type Evidence = components["schemas"]["Evidence"];
 export type Projects = ResponseBody<paths["/api/projects"]["get"]>;
@@ -344,6 +346,10 @@ export class MemoiaClient {
   getUsage(lastDays = 7, options?: RequestOptions): Promise<Usage> {
     if (!validators.validateUsageQuery({ last_days: lastDays })) throw new MemoiaError("INVALID_INPUT", null, false);
     return this.request("GET", `/api/project/usage?last_days=${lastDays}`, validators.validateUsage, options);
+  }
+
+  listUsageEvents(query: UsageEventsQuery, options?: RequestOptions): Promise<UsageEvents> {
+    return this.request("GET", this.page("/api/project/usage/events", query, validators.validateUsageEventsQuery), validators.validateUsageEvents, options);
   }
 
   listProjects(options?: RequestOptions & ProjectsQuery): Promise<Projects> {

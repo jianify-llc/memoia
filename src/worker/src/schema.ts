@@ -729,6 +729,41 @@ export const usersInMemoia = memoia.table(
   ],
 );
 
+export const usageEventsInMemoia = memoia.table(
+  "usage_events",
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    projectId: varchar("project_id", { length: 64 }).notNull(),
+    userId: uuid("user_id").notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true, precision: 3 })
+      .default(sql`clock_timestamp()`)
+      .notNull(),
+    occurredAt: timestamp("occurred_at", {
+      withTimezone: true,
+      precision: 3,
+    }).notNull(),
+    usage: jsonb().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      name: "usage_events_user_fk",
+      columns: [table.projectId, table.userId],
+      foreignColumns: [usersInMemoia.projectId, usersInMemoia.id],
+    }).onDelete("cascade"),
+    index("usage_events_project_date_idx").on(
+      table.projectId,
+      table.recordedAt,
+      table.id,
+    ),
+    index("usage_events_user_date_idx").on(
+      table.projectId,
+      table.userId,
+      table.recordedAt,
+      table.id,
+    ),
+  ],
+);
+
 export const usageCountersInMemoia = memoia.table(
   "usage_counters",
   {

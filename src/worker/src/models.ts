@@ -1,6 +1,7 @@
 /** Provider requests share fixed prompts and numerical usage; no model text enters logs. */
 import OpenAI from "openai";
-import { addUsage, debitBilling, type Sql } from "./db.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { addUsage, debitBilling, type Sql, type UserScope } from "./db.js";
 import defaultTopics from "./default-topics.json";
 import { encode } from "gpt-tokenizer/encoding/o200k_base";
 import { parse } from "yaml";
@@ -8,6 +9,7 @@ import { assertRunning, usesOpenAIBaseUrl, type Runtime } from "./runtime.js";
 import { SourceError } from "./errors.js";
 import { inSpan } from "./observability.js";
 import { readServiceConfig } from "./config.js";
+import { writeUsageEvent } from "./usage.js";
 
 export const countTokens = (text: string): number => encode(text).length;
 export interface ModelConfig {
@@ -206,22 +208,22 @@ export async function recordUsage(
     model?: string | null;
     service_tier?: string | null;
     requested_service_tier?: string | null;
+    userId?: string;
+    requestedModel?: string;
   },
 ): Promise<void> {
+  const occurredAt = new Date();
   const data = usage as Record<string, unknown> | null;
   const input = data?.input_tokens;
   const output = data?.output_tokens;
   const total = data?.total_tokens;
-  if (
+  const malformed =
     kind === "agent_loop" &&
-    (data?.invalid_token_usage === true || invalidTokenUsage(data))
-  )
-    throw new SourceError(
-      "maintenance_usage_invalid",
-      "Provider returned invalid token usage",
-      502,
-    );
+    (data?.invalid_token_usage === true || invalidTokenUsage(data));
+  const invalidCache =
+    data?.invalid_cache_usage === true || invalidCacheUsage(data);
   const complete =
+    !malformed &&
     Number.isSafeInteger(input) &&
     Number.isSafeInteger(output) &&
     Number.isSafeInteger(total) &&
@@ -229,6 +231,28 @@ export async function recordUsage(
     Number(output) >= 0 &&
     Number(total) >= 0 &&
     Number(total) === Number(input) + Number(output);
+  const details = {
+    cached_tokens: safeUsageValue(
+      (data?.input_tokens_details as Record<string, unknown> | null)
+        ?.cached_tokens,
+    ),
+    cache_write_tokens: safeUsageValue(
+      (data?.input_tokens_details as Record<string, unknown> | null)
+        ?.cache_write_tokens,
+    ),
+    cache_write_30m_tokens: safeUsageValue(
+      (
+        (data?.input_tokens_details as Record<string, unknown> | null)
+          ?.cache_write_tokens_details as Record<string, unknown> | null
+      )?.ttl_30m_tokens,
+    ),
+    cache_write_12h_tokens: safeUsageValue(
+      (
+        (data?.input_tokens_details as Record<string, unknown> | null)
+          ?.cache_write_tokens_details as Record<string, unknown> | null
+      )?.ttl_12h_tokens,
+    ),
+  };
   console.info(
     JSON.stringify({
       event: "model_usage",
@@ -239,31 +263,43 @@ export async function recordUsage(
       input_tokens: complete ? input : null,
       output_tokens: complete ? output : null,
       total_tokens: complete ? total : null,
-      cached_tokens: safeUsageValue(
-        (data?.input_tokens_details as Record<string, unknown> | null)
-          ?.cached_tokens,
-      ),
-      cache_write_tokens: safeUsageValue(
-        (data?.input_tokens_details as Record<string, unknown> | null)
-          ?.cache_write_tokens,
-      ),
-      cache_write_30m_tokens: safeUsageValue(
-        (
-          (data?.input_tokens_details as Record<string, unknown> | null)
-            ?.cache_write_tokens_details as Record<string, unknown> | null
-        )?.ttl_30m_tokens,
-      ),
-      cache_write_12h_tokens: safeUsageValue(
-        (
-          (data?.input_tokens_details as Record<string, unknown> | null)
-            ?.cache_write_tokens_details as Record<string, unknown> | null
-        )?.ttl_12h_tokens,
-      ),
+      ...details,
       model: providerMetadata?.model ?? null,
       service_tier: providerMetadata?.service_tier ?? null,
       requested_service_tier: providerMetadata?.requested_service_tier ?? null,
     }),
   );
+  const userId = providerMetadata?.userId;
+  if (userId && (kind === "fact_extraction" || kind === "agent_loop")) {
+    try {
+      await writeUsageEvent(runtime.db, { projectId, userId }, occurredAt, {
+        kind,
+        provider: "openai",
+        model:
+          providerMetadata.model ?? providerMetadata.requestedModel ?? null,
+        service_tier: providerMetadata.service_tier ?? null,
+        usage_valid: !malformed && !invalidCache,
+        input_tokens: complete ? Number(input) : null,
+        output_tokens: complete ? Number(output) : null,
+        ...details,
+      });
+    } catch {
+      // Per-user export and the established project billing have independent write paths.
+      console.warn(
+        JSON.stringify({
+          event: "model_usage_event_failed",
+          kind,
+          project_id: projectId,
+        }),
+      );
+    }
+  }
+  if (malformed)
+    throw new SourceError(
+      "maintenance_usage_invalid",
+      "Provider returned invalid token usage",
+      502,
+    );
   try {
     if (!complete) {
       await addUsage(runtime.db, projectId, { llm_usage_unknown: 1 });
@@ -400,16 +436,25 @@ export async function embeddings(
   projectId: string,
   texts: string[],
   phase: EmbeddingPhase = "document",
+  userId?: string,
   config?: ModelConfig,
 ): Promise<number[][]> {
-  return inSpan(
+  const usageWrites: Promise<void>[] | undefined =
+    phase === "query" && runtime.retrievalUsageWrites ? [] : undefined;
+  const vectors = inSpan(
     runtime.tracing,
     "memoia.model",
     { kind: "embedding", phase, operation_id: runtime.operationId },
-    async () => texts.length
-      ? embed(runtime, projectId, texts, phase, config ?? await getConfig(runtime, projectId))
-      : [],
+    () => embed(runtime, projectId, texts, phase, userId, usageWrites, config),
   );
+  if (usageWrites) {
+    // Register at launch because a parallel search query can already fail before usage arrives.
+    const drain = async () => {
+      await Promise.allSettled(usageWrites);
+    };
+    runtime.retrievalUsageWrites?.push(vectors.then(drain, drain));
+  }
+  return vectors;
 }
 
 async function embed(
@@ -417,8 +462,22 @@ async function embed(
   projectId: string,
   texts: string[],
   phase: EmbeddingPhase,
-  config: ModelConfig,
+  userId?: string,
+  usageWrites?: Promise<void>[],
+  resolvedConfig?: ModelConfig,
 ): Promise<number[][]> {
+  if (!texts.length) return [];
+  const config = resolvedConfig ?? (await getConfig(runtime, projectId));
+  if (phase === "query" && userId) {
+    if (!config.enable_event_embedding) return [];
+    // Empty accounts have no vectors to match and cannot own a billable embedding.
+    const account = await runtime.db.query(
+      "SELECT 1 FROM memoia.users WHERE project_id=$1 AND id=$2",
+      [projectId, userId],
+    );
+    if (!account.rows.length) return [];
+  }
+
   if (
     !["openai", "jina", "ollama"].includes(config.embedding_provider) ||
     !Number.isSafeInteger(config.embedding_batch_size) ||
@@ -460,6 +519,22 @@ async function embed(
       embeddingConfigError();
     }
   }
+  const scope = userId ? { projectId, userId } : undefined;
+  const meter = (input: unknown, model = config.embedding_model) => {
+    const write = recordEmbeddingUsage(
+      runtime,
+      scope,
+      providerName,
+      model,
+      input,
+    );
+    // HTTP retrieval can return its vectors while the invocation drains its accounting writes.
+    if (usageWrites) {
+      usageWrites.push(write);
+      return;
+    }
+    return write;
+  };
   const vectors: number[][] = [];
   for (
     let offset = 0;
@@ -473,7 +548,7 @@ async function embed(
         apiKey: key,
         baseURL: base,
         fetch: usesOpenAIBaseUrl(base) ? runtime.modelFetch : undefined,
-        maxRetries: phase === "query" ? 0 : 2,
+        maxRetries: 0,
         timeout: Math.max(1, Math.min(10_000, runtime.deadline - Date.now())),
       });
       let result: OpenAI.Embeddings.CreateEmbeddingResponse;
@@ -483,24 +558,46 @@ async function embed(
       const signal = runtime.signal
         ? AbortSignal.any([runtime.signal, remaining])
         : remaining;
-      try {
-        result = await client.embeddings.create(
-          {
-            model: config.embedding_model,
-            input: slice,
-            encoding_format: "float",
-            dimensions: config.embedding_dim,
-          },
-          { signal },
-        );
-      } catch (error) {
-        const result = embeddingError(
-          error instanceof OpenAI.APIError ? error.status : undefined,
-        );
-        const usage = errorUsage(error);
-        if (usage !== null) capturedErrorUsage.set(result, usage);
-        throw result;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          result = await client.embeddings.create(
+            {
+              model: config.embedding_model,
+              input: slice,
+              encoding_format: "float",
+              dimensions: config.embedding_dim,
+            },
+            { signal },
+          );
+          break;
+        } catch (error) {
+          const usage = errorUsage(error);
+          await meter(
+            (usage as { input_tokens?: unknown } | null)?.input_tokens,
+          );
+          const retry =
+            phase === "document" &&
+            attempt < 2 &&
+            !signal.aborted &&
+            embeddingRetryDelay(error, attempt);
+          if (
+            typeof retry === "number" &&
+            retry < runtime.deadline - Date.now()
+          ) {
+            await delay(retry, undefined, { signal }).catch(() => undefined);
+            if (!signal.aborted) continue;
+          }
+          const failure = embeddingError(
+            error instanceof OpenAI.APIError ? error.status : undefined,
+          );
+          if (usage !== null) capturedErrorUsage.set(failure, usage);
+          throw failure;
+        }
       }
+      await meter(
+        result?.usage?.prompt_tokens ?? result?.usage?.total_tokens,
+        result?.model,
+      );
       if (!result || typeof result !== "object") embeddingConfigError();
       vectors.push(
         ...validatedVectors(
@@ -543,17 +640,32 @@ async function embed(
           signal,
         });
       } catch {
+        await meter(null);
         throw embeddingError();
       }
-      if (response.status !== 200) throw embeddingError(response.status);
+      if (response.status !== 200) {
+        await meter(null);
+        throw embeddingError(response.status);
+      }
       let body: unknown;
       try {
         body = await response.json();
       } catch {
+        await meter(null);
         throw embeddingError();
       }
-      if (!body || typeof body !== "object") embeddingConfigError();
-      const output = body as { data?: unknown; embeddings?: unknown };
+      const output = body as {
+        data?: unknown;
+        embeddings?: unknown;
+        usage?: { total_tokens?: unknown };
+        prompt_eval_count?: unknown;
+      } | null;
+      await meter(
+        providerName === "jina"
+          ? output?.usage?.total_tokens
+          : output?.prompt_eval_count,
+      );
+      if (!output || typeof output !== "object") embeddingConfigError();
       vectors.push(
         ...validatedVectors(
           providerName === "jina" ? output.data : output.embeddings,
@@ -579,6 +691,58 @@ async function embed(
   return vectors;
 }
 
+function embeddingRetryDelay(error: unknown, attempt: number): number | false {
+  if (!(error instanceof OpenAI.APIError)) return false;
+  const advised = error.headers?.get("x-should-retry");
+  if (advised === "false") return false;
+  const status = error.status;
+  if (
+    advised !== "true" &&
+    status !== undefined &&
+    ![408, 409, 429].includes(status) &&
+    status < 500
+  )
+    return false;
+  const ms = error.headers?.get("retry-after-ms");
+  const after = error.headers?.get("retry-after");
+  const waitMs = ms ? Number(ms) : NaN;
+  const wait = after
+    ? Number.isFinite(Number(after))
+      ? Number(after) * 1000
+      : Date.parse(after) - Date.now()
+    : NaN;
+  if (waitMs >= 0 && waitMs <= 60_000) return waitMs;
+  if (wait >= 0 && wait <= 60_000) return wait;
+  return 500 * 2 ** attempt * (1 - Math.random() * 0.25);
+}
+
+async function recordEmbeddingUsage(
+  runtime: Runtime,
+  scope: UserScope | undefined,
+  provider: ModelConfig["embedding_provider"],
+  model: string,
+  input: unknown,
+): Promise<void> {
+  if (!scope) return;
+  try {
+    await writeUsageEvent(runtime.db, scope, new Date(), {
+      kind: "embedding",
+      provider,
+      model,
+      service_tier: null,
+      input_tokens: safeUsageValue(input),
+      output_tokens: 0,
+    });
+  } catch {
+    console.warn(
+      JSON.stringify({
+        event: "embedding_usage_event_failed",
+        project_id: scope.projectId,
+      }),
+    );
+  }
+}
+
 function numericUsageFromError(error: unknown): unknown {
   if (!error || typeof error !== "object") return null;
   const record = error as Record<string, unknown>;
@@ -594,7 +758,8 @@ function numericUsageFromError(error: unknown): unknown {
     > | null;
     return {
       invalid_token_usage: invalidTokenUsage(raw),
-      input_tokens: safeUsageValue(raw.input_tokens),
+      invalid_cache_usage: invalidCacheUsage(raw),
+      input_tokens: safeUsageValue(raw.input_tokens ?? raw.prompt_tokens),
       output_tokens: safeUsageValue(raw.output_tokens),
       total_tokens: safeUsageValue(raw.total_tokens),
       input_tokens_details: {
@@ -628,4 +793,18 @@ function invalidTokenUsage(data: Record<string, unknown> | null): boolean {
     values.every((value) => value != null) &&
     Number(values[2]) !== Number(values[0]) + Number(values[1])
   );
+}
+
+function invalidCacheUsage(data: Record<string, unknown> | null): boolean {
+  const details = data?.input_tokens_details as Record<string, unknown> | null;
+  const writes = details?.cache_write_tokens_details as Record<
+    string,
+    unknown
+  > | null;
+  return [
+    details?.cached_tokens,
+    details?.cache_write_tokens,
+    writes?.ttl_30m_tokens,
+    writes?.ttl_12h_tokens,
+  ].some((value) => value != null && safeUsageValue(value) === null);
 }

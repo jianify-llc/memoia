@@ -67,7 +67,7 @@ Fact.created_at 是首次数据库插入时间，updated_at 是最近修改时�
 
 删除消息及人工修改、删除 Fact 都是同步请求。改动、派生维护登记及完成回执在一次短事务提交。提交前失败时，调用方保留原请求和原幂等键重试。请求结果未知时，先按键查询完成回执，查不到可重交原请求。同键不同请求返回冲突。人工 Fact 请求每次实际写入仍核对 expected_revision。
 
-请求最大 2 MiB、每批最多 1,000 完整消息、正文默认 16,384 tokens，另校验提示词和输出预留，不能截断成功。旧容量失败回执不改写或自动重放，只能显式恢复原操作／幂等键。对于这些旧容量失败，原文过期后按原键补交原批次只补回七天临时输入，不改变原错误或启动模型；随后再次显式 retry。正文不匹配仍报冲突，重复补交不续期。参数/鉴权错误不自动重试。embedding 每批默认 64，严格校验索引、条数、维度及有限数值。
+请求最大 2 MiB，每批最多 1,000 条完整消息。模型拒绝超出上下文容量的抽取请求时，原 Fact flush 回执记录 `fact_model_input_rejected`。旧配置 `source_max_input_tokens` 和 `source_context_window_tokens` 仍可读取，抽取输出由 `source_output_reserve_tokens` 限制。固定抽取指令与 `source_material` 分开，原文和 `visual_description` 按用户资料发送。参数和鉴权错误不会自动重试。embedding 每批默认 64，严格校验索引、条数、维度及有限数值。
 
 Source／用户整组清理仍由 PostgreSQL 外键在原事务内完成。0016 在所属 Source 已消失时跳过无意义的延迟逐消息扫描；来源仍在时保留证据及 Blob 成员约束，并使用现有归属和消息成员索引。移除重复旧单列 Fact→Blob 外键，保留复合归属外键；不新增清理任务、不延长超时、不改删除 API 语义。
 
@@ -189,3 +189,7 @@ SDK 0.10.0 新增 `queryFacts`、`queryEvents`、`queryProfiles`，分别对应 
 旧数据沿既有迁移维护。执行顺序、数据保护与验证见 [TypeScript 迁移与恢复](guide/typescript-worker-migration.md)。公开响应及 SDK 以 [OpenAPI](../openapi.json) 为准。
 
 用量按模型调用实时累加。项目日用量查询最多返回最近 30 天（含当天），每天清理已过期的计数。当月额度使用独立的月汇总。
+
+`GET /api/project/usage/events?date=2026-11-16&user_id=<uuid>&limit=100` 读取当前项目的逐次用量。可按项目内用户过滤，每页最多 100 条，按原查询传回 `next_cursor` 续读。首页的 `first_recorded_date` 是项目或所选用户的首个记录日，与该页明细来自同一快照；请求日期无明细时仍返回首日。TypeScript SDK 使用 `listUsageEvents`。
+
+`date` 按明细写入时的 UTC 日过滤，`occurred_at` 用于按发生时间归账。使用明细 ID 去重。明细包括实际 Fact 抽取、派生维护和 embedding 的供应商、模型、服务层级及可用的 Token 数据。暂存、封批登记和回执查询不记模型用量。缺少供应商计量时数值为 `null`，账号删除时清除该账号的明细。

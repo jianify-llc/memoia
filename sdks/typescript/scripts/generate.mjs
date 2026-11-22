@@ -35,6 +35,8 @@ const targets = {
   validateConfig: ["get", "/api/project/config", "response"],
   validateUsage: ["get", "/api/project/usage", "response"],
   validateUsageQuery: ["get", "/api/project/usage", "query"],
+  validateUsageEvents: ["get", "/api/project/usage/events", "response"],
+  validateUsageEventsQuery: ["get", "/api/project/usage/events", "query"],
   validateForgetUserPath: ["delete", route, "path"],
   validateForgottenUser: ["delete", route, "response"],
   validateOperation: ["post", `${route}/blobs`, "response"],

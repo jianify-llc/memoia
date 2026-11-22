@@ -203,9 +203,6 @@ export class MaintenanceModel extends OpenAIResponsesModel {
     // This SDK lacks Python's automatic parent continuation. Only the last call's native results are sent.
     body.instructions = instructions;
     delete body.prompt_cache_key;
-    body.input = (body.input ?? []).map((item: Record<string, unknown>) =>
-      item.role === "system" ? { ...item, role: "developer" } : item,
-    );
     const cacheEnabled = supportsPromptCache(
       this.context.runtime,
       this.context.config.llm_model,
@@ -316,6 +313,8 @@ export class MaintenanceModel extends OpenAIResponsesModel {
             model: response.model,
             service_tier: response.service_tier,
             requested_service_tier: tier,
+            userId: this.context.claim.userId,
+            requestedModel: this.context.config.llm_model,
           },
         );
         if (
@@ -373,19 +372,24 @@ export class MaintenanceModel extends OpenAIResponsesModel {
         );
         return response;
       } catch (error) {
-        budget?.assertActive();
-        next.signal?.throwIfAborted();
-        const requestTimedOut =
-          requestTimeout?.aborted === true &&
-          error instanceof OpenAI.APIUserAbortError;
-        const retryAt = Date.now() + retryAfterMs(error);
         if (error instanceof OpenAI.APIError)
           await recordUsage(
             this.context.runtime,
             this.context.claim.projectId,
             errorUsage(error),
             "agent_loop",
+            {
+              userId: this.context.claim.userId,
+              requestedModel: this.context.config.llm_model,
+              requested_service_tier: tier,
+            },
           );
+        budget?.assertActive();
+        next.signal?.throwIfAborted();
+        const requestTimedOut =
+          requestTimeout?.aborted === true &&
+          error instanceof OpenAI.APIUserAbortError;
+        const retryAt = Date.now() + retryAfterMs(error);
         if (
           error instanceof OpenAI.APIError &&
           [400, 404].includes(error.status ?? 0) &&
@@ -762,7 +766,7 @@ export async function runMaintenance(
   };
   const input = continuation?.resume?.input ?? [
     {
-      role: "system" as const,
+      role: "user" as const,
       content: xml("project_context", {
         profile_topics: context.config.profile_topics,
         event_tag_definitions: context.config.event_tag_definitions,
@@ -771,7 +775,7 @@ export async function runMaintenance(
       }),
     },
     {
-      role: "system" as const,
+      role: "user" as const,
       content: xml("maintenance_batch", {
         change_count: context.claim.changes.length,
         ...first,
