@@ -1,4 +1,4 @@
-import type { Database } from "./db.js";
+import { purgeExpiredUsage, type Database } from "./db.js";
 import { purgeExpiredInputs } from "./facts.js";
 import { consume, pollMaintenance } from "./maintenance.js";
 import { createRuntime, type RuntimeEnv, type Wakeup } from "./runtime.js";
@@ -19,6 +19,7 @@ export function startMaintenanceWorker(
   let stopping = false;
   let wake: (() => void) | undefined;
   let nextCleanup = 0;
+  let nextUsageCleanup = 0;
   const execute = async (message: Wakeup) => {
     try {
       await consume(createRuntime(env, undefined, database), message);
@@ -41,12 +42,16 @@ export function startMaintenanceWorker(
           env.MEMOIA_WRITES_ENABLED !== "false" &&
           Date.now() >= nextCleanup
         ) {
-          nextCleanup = Date.now() + 60_000;
+          nextCleanup = Date.now() + 5 * 60_000;
           try {
             await purgeExpiredInputs(runtime);
+            if (Date.now() >= nextUsageCleanup) {
+              await purgeExpiredUsage(database);
+              nextUsageCleanup = Date.now() + 24 * 60 * 60_000;
+            }
           } catch {
             console.warn(
-              JSON.stringify({ event: "maintenance_input_cleanup_failed" }),
+              JSON.stringify({ event: "maintenance_cleanup_failed" }),
             );
           }
         }

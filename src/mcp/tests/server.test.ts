@@ -13,7 +13,7 @@ async function connect(api: object) {
   await server.connect(a); await client.connect(b);
   return { client, close: async () => { await client.close(); await server.close(); } };
 }
-test("MCP advertises the three existing memory tools and fixes the target user", async () => {
+test("MCP advertises source import and memory tools for the fixed target user", async () => {
   const seen: unknown[] = [];
   const api = {
     async getUser(id: string) { assert.equal(id, user); return { id }; },
@@ -23,7 +23,7 @@ test("MCP advertises the three existing memory tools and fixes the target user",
   };
   const session = await connect(api);
   try {
-    assert.deepEqual((await session.client.listTools()).tools.map(t => t.name).sort(), ["get_user_profiles", "save_memory", "search_memories"]);
+    assert.deepEqual((await session.client.listTools()).tools.map(t => t.name).sort(), ["get_import_result", "get_user_profiles", "save_memory", "search_memories"]);
     const args = { text: "I like tea.", idempotency_key: "same-operation", occurred_at: "2026-11-01T10:00:00Z" };
     await session.client.callTool({ name: "save_memory", arguments: args });
     await session.client.callTool({ name: "save_memory", arguments: args });
@@ -34,6 +34,30 @@ test("MCP advertises the three existing memory tools and fixes the target user",
     assert.equal((await session.client.callTool({ name: "get_user_profiles", arguments: {} })).isError, undefined);
   } finally { await session.close(); }
 });
+test("MCP seals a staged Blob and reads the original flush receipt", async () => {
+  const blobId = "55555555-5555-4555-8555-555555555555";
+  const flushId = "44444444-4444-4444-8444-444444444444";
+  const receipt = { operation_id: flushId, kind: "fact_flush", status: "processing" };
+  const session = await connect({
+    async getUser() { return { id: user }; },
+    async importBlob() { return { status: "staged", blob_id: blobId, operation_id: blobId }; },
+    async flushBlob(id: string, source: string, input: unknown) {
+      assert.deepEqual([id, source, input], [user, "mcp", { idempotency_key: "mcp-flush:fixed", append_operation_ids: [blobId] }]);
+      return receipt;
+    },
+    async getOperation(id: string, operationId: string) {
+      assert.deepEqual([id, operationId], [user, flushId]);
+      return receipt;
+    },
+  });
+  try {
+    const started = await session.client.callTool({ name: "save_memory", arguments: { text: "Tea", idempotency_key: "fixed", occurred_at: "2026-11-01T10:00:00Z" } });
+    assert.match(JSON.stringify(started), /processing/);
+    const observed = await session.client.callTool({ name: "get_import_result", arguments: { operation_id: flushId } });
+    assert.match(JSON.stringify(observed), /processing/);
+  } finally { await session.close(); }
+});
+
 test("MCP returns an uncertain write as an error without retry, flush or secret disclosure", async () => {
   let writes = 0;
   const session = await connect({

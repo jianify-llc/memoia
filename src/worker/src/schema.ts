@@ -134,6 +134,7 @@ export const memoryOperationsInMemoia = memoia.table(
     requestHash: varchar("request_hash", { length: 64 }).notNull(),
     request: jsonb().notNull(),
     blobId: uuid("blob_id"),
+    factFlushId: uuid("fact_flush_id"),
     status: varchar({ length: 16 }).notNull(),
     result: jsonb(),
     error: jsonb(),
@@ -164,6 +165,7 @@ export const memoryOperationsInMemoia = memoia.table(
     }),
   },
   (table): PgTableExtraConfigValue[] => [
+    index("idx_fact_import_flush").on(table.factFlushId).where(sql`fact_flush_id IS NOT NULL`),
     index("idx_memory_flush_ready")
       .using("btree", table.availableAt.asc().nullsLast())
       .where(
@@ -245,7 +247,7 @@ export const memoryOperationsInMemoia = memoia.table(
     ),
     check(
       "ck_memory_flush_lease",
-      sql`((lease_owner IS NULL) = (lease_until IS NULL)) AND ((attempts >= 0) AND (attempts <= 4)) AND (((kind)::text = 'flush'::text) OR ((lease_owner IS NULL) AND (attempts = 0) AND (available_at IS NULL)))`,
+      sql`((lease_owner IS NULL) = (lease_until IS NULL)) AND (attempts BETWEEN 0 AND 4) AND (kind = 'flush' OR (lease_owner IS NULL AND ((kind = 'append' AND fact_flush_id IS NOT NULL) OR (attempts = 0 AND available_at IS NULL))))`,
     ),
     check(
       "ck_memory_operation_scope",
@@ -257,7 +259,7 @@ export const memoryOperationsInMemoia = memoia.table(
     ),
     check(
       "memory_operations_kind_check",
-      sql`(kind)::text = ANY (ARRAY[('import'::character varying)::text, ('retract'::character varying)::text, ('correct'::character varying)::text, ('legacy_import'::character varying)::text, ('flush'::character varying)::text])`,
+      sql`(kind)::text = ANY (ARRAY[('import'::character varying)::text, ('retract'::character varying)::text, ('correct'::character varying)::text, ('legacy_import'::character varying)::text, ('flush'::character varying)::text, ('fact_flush'::character varying)::text, ('append'::character varying)::text])`,
     ),
     check(
       "memory_operations_legacy_receipt_check",
@@ -265,7 +267,7 @@ export const memoryOperationsInMemoia = memoia.table(
     ),
     check(
       "memory_operations_status_check",
-      sql`(status)::text = ANY (ARRAY[('processing'::character varying)::text, ('completed'::character varying)::text, ('failed'::character varying)::text])`,
+      sql`(status)::text = ANY (ARRAY[('processing'::character varying)::text, ('completed'::character varying)::text, ('failed'::character varying)::text, ('staged'::character varying)::text])`,
     ),
   ],
 );
@@ -275,6 +277,12 @@ export const queueTasksInMemoia = memoia.table(
   taskColumns({ id: "uuid" }),
   (table): PgTableExtraConfigValue[] => [
     ...taskConstraints(table),
+    uniqueIndex("uq_memoia_running_task_scope")
+      .on(table.userId, sql`(${table.bizParams}->>'project_id')`, table.type)
+      .where(sql`status='running' AND type IN ('fact_flush','maintenance_flush')`),
+    uniqueIndex("uq_memoia_active_fact_blob")
+      .on(sql`(${table.bizParams}->>'blob_id')`)
+      .where(sql`type='fact_flush' AND status IN ('pending','queued','running','retry_wait')`),
     foreignKey({
       columns: [table.id],
       foreignColumns: [memoryOperationsInMemoia.id],
@@ -421,6 +429,7 @@ export const memoryBlobsInMemoia = memoia.table(
     id: uuid().primaryKey().notNull(),
     userId: uuid("user_id").notNull(),
     projectId: varchar("project_id", { length: 64 }).notNull(),
+    externalId: varchar("external_id", { length: 255 }),
     status: varchar({ length: 16 }).notNull(),
     eventId: uuid("event_id"),
     eventDeleted: boolean("event_deleted").default(false).notNull(),
@@ -438,6 +447,8 @@ export const memoryBlobsInMemoia = memoia.table(
     flushOperationId: uuid("flush_operation_id"),
   },
   (table): PgTableExtraConfigValue[] => [
+    uniqueIndex("uq_memory_blob_external_id").on(table.userId, table.projectId, table.externalId)
+      .where(sql`external_id IS NOT NULL`),
     index("idx_memory_blob_unflushed")
       .using(
         "btree",
@@ -873,7 +884,7 @@ export const userEventsInMemoia = memoia.table(
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
-    revision: bigint({ mode: "bigint" })
+    version: bigint({ mode: "bigint" })
       .default(sql`1`)
       .notNull(),
   },
@@ -922,7 +933,7 @@ export const userProfilesInMemoia = memoia.table(
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
-    revision: bigint({ mode: "bigint" })
+    version: bigint({ mode: "bigint" })
       .default(sql`1`)
       .notNull(),
   },

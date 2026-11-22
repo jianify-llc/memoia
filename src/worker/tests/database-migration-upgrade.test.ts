@@ -36,10 +36,41 @@ test(
       const db = new pg.Client({ connectionString: urls[0] });
       await db.connect();
       try {
+        const projectId = "version-upgrade", userId = randomUUID();
+        const profileId = randomUUID(), eventId = randomUUID();
         // Reconstruct the actual prefix after migration 0002.
-        await db.query(`BEGIN; ALTER TABLE memoia.queue_tasks DROP CONSTRAINT queue_task_terminal;
+        await db.query(`BEGIN;
+        ALTER TABLE memoia.user_profiles RENAME COLUMN version TO revision;
+        ALTER TABLE memoia.user_events RENAME COLUMN version TO revision;
+        DROP INDEX memoia.uq_memoia_running_task_scope, memoia.uq_memoia_active_fact_blob;
+        DROP TRIGGER reject_forgotten_user ON memoia.users;
+        DROP FUNCTION memoia.reject_forgotten_user();
+        ALTER TABLE memoia.queue_tasks DROP CONSTRAINT queue_task_terminal;
         ALTER TABLE memoia.queue_tasks ADD CONSTRAINT queue_task_terminal CHECK ((status IN ('succeeded','failed'))=(finished_at IS NOT NULL));
-        DELETE FROM memoia.__drizzle_migrations WHERE id=(SELECT max(id) FROM memoia.__drizzle_migrations); COMMIT`);
+        ALTER TABLE memoia.memory_blobs DROP COLUMN external_id;
+        ALTER TABLE memoia.memory_operations DROP CONSTRAINT ck_memory_flush_lease;
+        ALTER TABLE memoia.memory_operations DROP COLUMN fact_flush_id;
+        ALTER TABLE memoia.memory_operations ADD CONSTRAINT ck_memory_flush_lease CHECK (
+          (lease_owner IS NULL)=(lease_until IS NULL) AND attempts BETWEEN 0 AND 4
+          AND (kind='flush' OR (lease_owner IS NULL AND attempts=0 AND available_at IS NULL)));
+        ALTER TABLE memoia.memory_operations DROP CONSTRAINT memory_operations_kind_check, DROP CONSTRAINT memory_operations_status_check;
+        ALTER TABLE memoia.memory_operations
+          ADD CONSTRAINT memory_operations_kind_check CHECK (kind IN ('import','retract','correct','legacy_import','flush')),
+          ADD CONSTRAINT memory_operations_status_check CHECK (status IN ('processing','completed','failed'));
+        DELETE FROM memoia.__drizzle_migrations WHERE id IN (SELECT id FROM memoia.__drizzle_migrations ORDER BY id OFFSET 3); COMMIT`);
+        await db.query(
+          "INSERT INTO memoia.projects(id,project_id,project_secret,status) VALUES($1,$2,'local','active')",
+          [randomUUID(), projectId],
+        );
+        await db.query("INSERT INTO memoia.users(id,project_id) VALUES($1,$2)", [userId, projectId]);
+        await db.query(
+          "INSERT INTO memoia.user_profiles(id,user_id,project_id,content,revision) VALUES($1,$2,$3,'sample profile',17)",
+          [profileId, userId, projectId],
+        );
+        await db.query(
+          "INSERT INTO memoia.user_events(id,user_id,project_id,event_data,revision) VALUES($1,$2,$3,'{}',29)",
+          [eventId, userId, projectId],
+        );
         const before = (
           await db.query(
             "SELECT id,hash,created_at FROM memoia.__drizzle_migrations ORDER BY id",
@@ -92,7 +123,9 @@ test(
             "SELECT hash,created_at FROM memoia.__drizzle_migrations ORDER BY id",
           )
         ).rows;
-        assert.equal(after.length, 4);
+        assert.equal(after.length, 9);
+        assert.equal((await db.query("SELECT version FROM memoia.user_profiles WHERE id=$1", [profileId])).rows[0].version, "17");
+        assert.equal((await db.query("SELECT version FROM memoia.user_events WHERE id=$1", [eventId])).rows[0].version, "29");
         assert.match(
           (
             await db.query(

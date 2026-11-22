@@ -55,6 +55,8 @@ Test 的资源清单、首次注册、停写迁移顺序、命令及完整链路
 
 `src/worker/wrangler.jsonc` 的环境配置是发布输入，需明确环境 Worker 名称和现有 Hyperdrive ID，关闭 workers.dev 与 preview URLs；Hyperdrive 必须禁用缓存。环境必须声明并预先配置 `ACCESS_TOKEN` 和 `OPENAI_API_KEY`；发布仅读取密钥名称及类型，不读取或创建密钥。域名及 Queue consumer 的实际连接由人员维护。配置中的 consumer 和 Cron 声明用于与云端只读比对，缺失或漂移阻断发布。Test 候选在新库、专属 Hyperdrive 和 Queue 核对后将写入与维护开关均设为 `true`，实际启用须在正常 Actions 发布后读回确认；Online 配置尚未完成。绑定存在不表示密钥、数据迁移或业务验收已完成，负责人仍需逐项核实。不要以部署脚本创建或重绑资源。环境配置和 Cloudflare 权限、Secrets、数据库兼容性需在真实部署前单独核验。
 
+新增五分钟输入清理和每日用量清理触发器时，资源负责人先按 [Test 切换清单](../docs/guide/typescript-worker-migration.md#test-cutover-checklist) 登记，Actions 会核对实际配置。
+
 发布由 `deploy/release.ts` 调用锁定的 Wrangler 4.155.0，使用 `versions upload --no-x-provision` 上传，读取该版本的 Hyperdrive、Queue 和开关绑定，确认后切换 100% 流量，再读回活动版本与绑定；不会更新 consumer 或 Cron。Online 使用审批前生成、绑定源码和配置的制品以及单独传递的 manifest SHA256，审批后校验全部文件并通过 `--no-bundle` 上传，不再构建源码。失败后先核对平台实际状态，不假定已回滚。部署凭据只注入发布步骤，入口使用本批空 env 文件，不读取业务 `.env`。实际发布、平台资源、业务和模型验收与本地检查分别记录。
 
 Memoia Test 的 HTTP Placement 为 `aws:ap-northeast-1`，不指定 Queue 或 Cron 的执行地点。Fact 抽取和维护模型请求通过 `OPENAI_RELAY` 绑定复用 `test-nginx-relay` 的 `POST /v1/responses`。使用官方 OpenAI 地址的 Embedding 通过同一绑定的 `POST /v1/embeddings` 发送，继续使用自身的凭据、模型和维度。发布在切流前和切流后核对版本中的区域、传输模式与绑定，CI 身份需要能绑定现有 VPC Service。参考 [Cloudflare VPC 绑定权限](https://developers.cloudflare.com/workers-vpc/configuration/vpc-services/#required-roles)。

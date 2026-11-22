@@ -54,6 +54,8 @@ const targets = {
   validateHistoryQuery: ["get", `${route}/history`, "query"],
   validateOperationsQuery: ["get", `${route}/operations`, "query"],
   validateMaintenance: ["get", `${route}/maintenance`, "response"],
+  validateFactFlushConflict: ["post", `${route}/blobs/{blob_id}/flush`, 409],
+  validateFactFlushInput: ["post", `${route}/blobs/{blob_id}/flush`, "request"],
   validateFlushInput: ["post", `${route}/flush`, "request"],
   validateProjects: ["get", "/api/projects", "response"],
   validateProject: ["post", "/api/projects", "response"],
@@ -74,7 +76,7 @@ const refs = {};
 for (const [name, [method, path, kind]] of Object.entries(targets)) {
   const operation = api.paths[path]?.[method];
   const success = Object.entries(operation?.responses ?? {}).find(([status, response]) => /^2\d\d$/.test(status) && response.content?.["application/json"]);
-  const body = kind === "request" ? operation?.requestBody : success?.[1];
+  const body = kind === "request" ? operation?.requestBody : typeof kind === "number" ? operation?.responses?.[kind] : success?.[1];
   const parameters = operation?.parameters?.filter((parameter) => parameter.in === kind);
   const schema = kind === "query" || kind === "path" ? {
     type: "object", additionalProperties: false,

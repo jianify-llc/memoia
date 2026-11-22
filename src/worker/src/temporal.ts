@@ -1,4 +1,3 @@
-import type { JsonNumber } from "./canonical";
 import { SourceError } from "./errors";
 export interface FactTime {
   start: string | null;
@@ -94,18 +93,12 @@ export function sourceObservations(
 }
 
 export interface SourceMessage {
+  visual_description?: string;
   message_id: string;
   role: "user" | "assistant" | "system" | "tool";
   content: string;
   occurred_at: string;
   time_zone?: string | null;
-  images?: {
-    url: string;
-    mimeType: string;
-    width: number | JsonNumber;
-    height: number | JsonNumber;
-    byteSize: number | JsonNumber;
-  }[];
 }
 export interface Fact {
   content: string;
@@ -192,11 +185,6 @@ export function validateFacts(raw: unknown, messages: SourceMessage[]): Fact[] {
   if (!hasKeys(raw, ["facts"]) || !Array.isArray(facts) || facts.length > 200)
     invalid("Fact count is invalid");
   const byId = new Map(messages.map((m) => [m.message_id, m]));
-  const urls = messages.flatMap((m) =>
-    (m.images ?? []).map((i) => i.url.split("?")[0]),
-  );
-  if (urls.some((url) => JSON.stringify(raw).includes(url)))
-    invalid("Fact output contains a temporary image URL");
   for (const fact of facts) {
     if (
       !hasKeys(fact, [
@@ -256,6 +244,8 @@ export function validateFacts(raw: unknown, messages: SourceMessage[]): Fact[] {
 export function normalizeExtraction(
   raw: any,
   messages: SourceMessage[],
+  requireFullCoverage = true,
+  evidence = messages,
 ): Fact[] {
   const userIds = messages
     .filter((m) => m.role === "user")
@@ -263,9 +253,9 @@ export function normalizeExtraction(
   if (
     !hasKeys(raw, ["messages"]) ||
     !Array.isArray(raw.messages) ||
-    raw.messages.length !== userIds.length ||
+    (requireFullCoverage && raw.messages.length !== userIds.length) ||
     new Set(raw.messages.map((b: any) => b.message_id)).size !==
-      userIds.length ||
+      raw.messages.length ||
     raw.messages.some(
       (b: any) =>
         !hasKeys(b, ["message_id", "facts"]) ||
@@ -278,7 +268,7 @@ export function normalizeExtraction(
   const facts: Fact[] = [];
   for (const id of userIds)
     for (const fact of raw.messages.find((b: any) => b.message_id === id)
-      .facts) {
+      ?.facts ?? []) {
       if (
         !hasKeys(fact, [
           "content",
@@ -298,5 +288,5 @@ export function normalizeExtraction(
       const { any_of, ...rest } = fact;
       facts.push({ ...rest, support_groups: any_of.map((g: any) => g.all_of) });
     }
-  return validateFacts({ facts }, messages);
+  return validateFacts({ facts }, evidence);
 }

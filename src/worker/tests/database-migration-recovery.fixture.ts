@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import pg from "pg";
 import { Database } from "../src/db";
 import { createUser } from "../src/management";
-import { retryOperation } from "../src/facts";
+import { getOperation, retryOperation } from "../src/facts";
 import { consume } from "../src/maintenance";
 
 const adminUrl = process.env.MEMOIA_TEST_ADMIN_DATABASE_URL;
@@ -19,6 +19,8 @@ const fixture = fileURLToPath(
 );
 const project = "migration-fixture";
 const oldUser = "00000000-0000-4000-8000-000000000002";
+const profileId = "00000000-0000-4000-8000-000000000011";
+const eventId = "00000000-0000-4000-8000-000000000012";
 const tombstone = "00000000-0000-4000-8000-000000000005";
 const operation = "00000000-0000-4000-8000-000000000006";
 const flushOperation = "00000000-0000-4000-8000-000000000007";
@@ -84,6 +86,14 @@ test(
             new URL("./database-migration-0015.sql", import.meta.url),
             "utf8",
           ),
+        );
+        await src.query(
+          "INSERT INTO memoia.user_profiles(id,user_id,project_id,content,revision) VALUES($1,$2,$3,'legacy profile',19)",
+          [profileId, oldUser, project],
+        );
+        await src.query(
+          "INSERT INTO memoia.user_events(id,user_id,project_id,event_data,revision) VALUES($1,$2,$3,'{}',31)",
+          [eventId, oldUser, project],
         );
         await src.query(
           "INSERT INTO memoia.memory_user_states(user_id,project_id,generation,version) VALUES($1,$2,17,8)",
@@ -305,6 +315,8 @@ test(
           id: newUser,
           data: { origin: "typescript" },
         });
+        assert.equal((await worker.query("SELECT version FROM memoia.user_profiles WHERE id=$1", [profileId])).rows[0].version, "19");
+        assert.equal((await worker.query("SELECT version FROM memoia.user_events WHERE id=$1", [eventId])).rows[0].version, "31");
         const persisted = (
           await worker.query(
             `SELECT id,status,input_expires_at::text AS expires,request,generation FROM memoia.memory_operations WHERE id=$1`,
@@ -352,42 +364,23 @@ test(
         let calls = 0;
         globalThis.fetch = async () => {
           calls++;
-          return Response.json({
-            status: "completed",
-            output: [
-              {
-                type: "message",
-                status: "completed",
-                content: [
-                  {
-                    type: "output_text",
-                    text: JSON.stringify({
-                      messages: [{ message_id: "m2", facts: [] }],
-                    }),
-                  },
-                ],
-              },
-            ],
-          });
+          throw new Error("Migrated receipts must not replay an extraction");
         };
         try {
-          const result = await retryOperation(runtime, scope, pendingId);
+          const result = await getOperation(runtime, scope, { operationId: pendingId });
           assert.equal(result.operation_id, pendingId);
-          assert.equal(result.status, "completed");
-          await retryOperation(runtime, scope, pendingId);
-          assert.equal(calls, 1);
+          assert.equal(result.status, "processing");
+          await assert.rejects(retryOperation(runtime, scope, pendingId),
+            (error: any) => error.code === "operation_kind_unsupported");
           const saved = (
             await worker.query(
-              "SELECT status,request,input_expires_at FROM memoia.memory_operations WHERE id=$1",
+              "SELECT status,request,input_expires_at::text AS expiry FROM memoia.memory_operations WHERE id=$1",
               [pendingId],
             )
           ).rows[0];
-          assert.equal(saved.status, "completed");
-          assert.equal(saved.input_expires_at, null);
-          assert.deepEqual(saved.request, {
-            source_id: "dialog",
-            idempotency_key: "resume-original",
-          });
+          assert.equal(saved.status, "processing");
+          assert.equal(saved.expiry, beforeExpiry);
+          assert.equal(saved.request.messages[0].message_id, "m2");
           await consume(runtime, {
             kind: "flush",
             user_id: oldUser,
@@ -396,8 +389,8 @@ test(
           });
           assert.equal(
             calls,
-            1,
-            "completed import is not extracted again during flush",
+            0,
+            "the historical import and unrelated flush do not call the model",
           );
           assert.equal(
             (

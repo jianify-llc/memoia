@@ -17,40 +17,29 @@ Fact 是有消息支持的历史陈述，不维护唯一正确的当前真相；
 ```text
 Project → User → Source（调用方 source_id）
                     ├→ Message（调用方 message_id，无正文）
-                    └→ Blob（服务端批次 UUID）→ Fact
+                    └→ 会话 Blob（公开 ID 为 source_id）→ Fact
                                               ├→ 独立检索索引
                                               ├→ Profile（Fact 支撑）
                                               └↔ Event（多对多）
-User → flush Operation（固定 Blob 集合）→ 一个 AgentLoop → Profile + Event 原子提交
+User → flush Operation（固定 Blob 集合）→ 一个 AgentLoop → 写入 Profile / Event → 完成回执
 ```
 
-Source 的自然键为 (project_id, user_id, source_id)，Message 再加 message_id；消息属于 Source，不属于 Blob。幂等键映射唯一导入 Blob，正文 hash 只验证同键同请求，不将两次真实发生去重。重叠消息不能成为第二份独立证据；同消息 ID 的正文、角色或发生时间冲突明确报错。复合外键约束用户、项目、来源、批次与派生关联，不能只靠代码填对字段。
+Source 的自然键为 (project_id, user_id, source_id)，Message 再加 message_id；消息属于 Source，不属于 Blob。幂等键映射一次追加、封批或修正操作，正文 hash 只验证同键同请求，不将两次真实发生去重。重叠消息不能成为第二份独立证据；同消息 ID 的正文、角色或发生时间冲突明确报错。复合外键约束用户、项目、来源、批次与派生关联，不能只靠代码填对字段。
 
 唯一公开协议为无版本的 /api，根目录 openapi.json 是公开契约真相源，由 TypeScript Worker 实现；SDK 由该契约生成类型及校验器。历史内部 buffer 清理原语不构成旧版本 HTTP 兼容承诺，切换不清空在途数据。
 
 ## 写入、回执与原文生命周期
 
-导入路径：
-1. 登记可查询的 processing 操作，获取 Redis renewable UserLease。
-2. 短 SQL 事务取得 generation/version、本批消息身份和项目配置，不读取历史 Fact，不持有连接等待模型。
-3. 只从本批有效消息一次输出完整陈述、证据和时间；统一校验结构、来源引用及时间覆盖后保存临时恢复结果，再生成检索向量。非法结果整批拒绝，不增加模型复查。全为已处理／已删除消息时直接完成 noop，不调用模型或 embedding。
-4. 同事务保存 Fact、直接索引、消息关联、completed 回执及固定 Blob 变更引用，并清除原文。
+1. 追加消息返回 `202 staged`。每个 Session 对应一个 Blob，公开 `blob_id` 等于 `source_id`。追加 Operation 的幂等键固定本次消息输入；Source、Blob 和消息记录只保存身份、成员关系与元数据。文字和调用方提供的图片描述仅暂存于 Operation。
+2. 调用方用 `POST /api/users/{user_id}/blobs/{blob_id}/flush` 提交追加 Operation ID 清单，固定本次范围并创建 Fact Task。封批后收到的消息留给下一次。调用方通过原 Operation 查询或恢复任务。
+3. Fact Task 逐段处理仍有效、未处理的消息。Fact Agent 校验陈述、证据和时间；先保存临时候选，再生成向量。分片续跑复用仍有效的候选和向量。删除使受影响范围的候选失效。在模型和向量等待期间不持有数据库事务。
+4. 同事务保存 Fact、向量、消息处理标记、Blob 变更和完成回执，并清除临时原文、图片描述及候选。只在提交后发出 Profile/Event 唤醒。Cloudflare 可把通知交给 `waitUntil`；通知未送达时由 Cron 从 PostgreSQL 补投。Docker 通过轮询发现原任务和待封批数据。
 
-completed **只表示 Fact 操作已提交**。回执中的 memory_version 固定，不因后台维护推进而变化；fact_ids 是该次结果，event_ids/profile_ids 不再是等待条件。响应丢失先查询原回执，不重新导入。空事实和重复消息也完成固定 Blob；只有 noop 的 flush 无需模型。
+`completed` 表示该次 Fact 操作已提交，`fact_ids` 和 `memory_version` 仍用原回执。消息导入统一走追加和封批。历史同步导入回执仍可查询，未完成的历史同步操作不再执行。消息删除与人工 Fact 编辑同步返回各自的回执，派生变化由后台执行。
 
-长计算由 compare-and-expire 原子续租、compare-and-delete 释放的 Redis lease 协调；所有正式写入仍比较 SQL generation/version。短事务共用用户级 pg_advisory_xact_lock，与永久遗忘线性化，不跨模型 await。失锁、冲突或提交未知不能写入失败假回执，也不能只重试 INSERT。
+Legato Task 租约决定执行权。永久遗忘保留用户墓碑，消息撤回直接移除消息及受影响的暂存内容，删除历史从原撤回回执读取。调用方须排除已撤回消息，用新幂等键重新提交会作为新输入受理。响应丢失时先查原回执，以原键确认或恢复。默认七天的临时输入期限不随重试延长，到期后原范围返回 `input_required`。
 
-原文只临时保存在未完成 import 的 memory_operations.request，Source 和 Blob 不保存正文副本。完成结果、回执和清理同事务提交；完成后 request 只保留操作身份。旧 chat GeneralBlob 同事务清除，不受 persistent_blob 影响。旧 summary Blob 是摘要输入，保留原有独立语义，不把它宣称为完整聊天存档。
-
-Fact 由一次 Standard 请求同时输出正文、主体、报告者、确定性、证据和事件时间，使用 fact_extraction.md 与内部 MessageExtraction：每条用户消息一项，可含零条或多条 Fact，any_of 中的 all_of 表示独立或联合支持。入口检查消息覆盖与所属消息支撑，再无损转为现有 Extraction.support_groups；完整候选、数据库和公开 API 仍使用原格式，不保存两套表示。不同消息的独立确认允许产生相同陈述，不用后文的细节替代前文可独立成立的内容；结构检查不能证明模型没有语义漏抽。保持项目模型/思考等级、text.verbosity=low、store:false、完整固定规则和转义的 source_material；只缓存固定规则，不给动态原文打断点，不使用历史续接、Session 或 previous_response_id。正常非空输入最多一次模型调用，返回空事实同样有效；全部消息已处理/删除的 noop 不调用模型。
-
-Fact 正文、主体和报告者跟随所属用户消息的主要语言；仅有简短确认或表情、无法判断语言时，沿用其确认内容的语言。抽取资料只有 `source_material.messages`，不传项目语言或主题配置；原名和证据引文保持原文，JSON 字段名及枚举值不翻译。项目 `language` 仍用于 Profile/Event 正文和主题配置。既有 Fact 及已保存的恢复候选不重新翻译。
-
-已有 Operation.request 保留历史 fact_review_candidate 存储键，现只保存通过结构、引用和时间校验的完整 Extraction 与输入指纹，不新增持久状态或迁移。embedding 失败恢复时，完整候选重新校验后复用，不重复模型调用；有效输入集合变化则失效。旧四字段正文草稿缺少证据，只能从仍有效的原消息重新执行一次完整抽取，不能提交旧草稿或编造关联；其它不合法候选明确失败。不保存第二份原文或 reasoning，候选不提前推进正式版本，原七天期限及 generation/version/租约保护不变，完成或过期随原文清除。正式结果仍只有原提交事务一个 writer。
-
-未完成输入默认保留七天（服务配置 source_input_retention_seconds，正整数秒），未过期重试不延长期限；每分钟 Cron 清理过期输入，到期后 retry 返回 input_required。调用方先确认原回执，确未完成时以原键、原完整批次显式补交，才重新计算临时保存期限。没有原文和可恢复事实时，不承诺服务端可以独立重新抽取。事实是精简结论，不得变相复制完整聊天。日志、调试和 SQL 参数不保存正文或凭据。
-
-非法结构、消息引用或时间关联返回 invalid_model_output，整批不提交 Fact/索引/完成回执，不静默删掉错误条目或增加修复调用。允许独立消息分别产生含义重复的 Fact，各自保留充分支持；不要求合并成一条并枚举所有替代证据组合，不改变既有 AND/OR 删除规则。同一消息的批次重放仍由消息身份和幂等约束处理，不能伪装成新独立证据。代码验证不是语义证明；真实验收同时检查信息保留、证据错误及失败率。
+flush 的状态和结果来自同 ID 的 Legato Task。封批提交即确认受理；派发预约、发送或确认失败由 Cron 补投原任务。回执查询在同一数据库快照读请求身份和执行摘要，临时输入及检查点由执行和恢复路径读取。
 
 ## Fact、时间与历史陈述
 
@@ -76,7 +65,7 @@ Fact.created_at 是首次数据库插入时间，updated_at 是最近修改时�
 
 人工编辑保留原 Fact ID、原 Blob 和来源归属；支持组只能使用原 Blob 内未删除的消息，每组至少包含一条用户消息，助手消息可提供必要上下文。新幂等 Operation／固定 Blob 使用 kind=correct，内部 Fact 变更为 updated 或 deleted；它是定点修正，不是新增历史陈述或证据迁移，也不建立纠正图。任何实际编辑均推进 Fact revision 和 updated_at，同事务更新直接索引、清理旧画像历史并登记维护。Loop 只整理 Profile/Event，必须读取当前 Fact；编辑前的读集不能提交旧版本结果。
 
-失败的人工纠错不能靠重复 PUT／DELETE 执行：同键请求只返回原回执。临时载荷过期时，遗留 processing 收敛为 failed/input_required；定时清理和请求登记使用相同规则，已完成回执和既有失败原因保留。以原键补交相同完整请求只恢复载荷，重复补交也不执行；真正再次执行必须显式 retry 原 Operation，并重新校验 expected_revision。请求未知结果同样先查原回执，不换键重放。
+删除消息及人工修改、删除 Fact 都是同步请求。改动、派生维护登记及完成回执在一次短事务提交。提交前失败时，调用方保留原请求和原幂等键重试。请求结果未知时，先按键查询完成回执，查不到可重交原请求。同键不同请求返回冲突。人工 Fact 请求每次实际写入仍核对 expected_revision。
 
 请求最大 2 MiB、每批最多 1,000 完整消息、正文默认 16,384 tokens，另校验提示词和输出预留，不能截断成功。旧容量失败回执不改写或自动重放，只能显式恢复原操作／幂等键。对于这些旧容量失败，原文过期后按原键补交原批次只补回七天临时输入，不改变原错误或启动模型；随后再次显式 retry。正文不匹配仍报冲突，重复补交不续期。参数/鉴权错误不自动重试。embedding 每批默认 64，严格校验索引、条数、维度及有限数值。
 
@@ -84,13 +73,13 @@ Source／用户整组清理仍由 PostgreSQL 外键在原事务内完成。0016 
 
 ## 固定 Blob、flush 与统一 AgentLoop
 
-消息导入、删除或人工 Fact 编辑各有一个固定 Blob；幂等键定位原 Operation/Blob，重试不能扩大消息范围。Fact、索引、回执和 Blob 的 fact_changes（新增、人工编辑、删除、证据及时间变化引用）同事务提交。Blob 不保存聊天原文。人工 Profile 编辑、Event 删除和 Agent 写入不生产 Blob。
+同一 Session 的消息追加到同一 Blob；删除和人工 Fact 编辑另记变更 Blob。幂等键定位原 Operation，重试不能扩大处理范围。Fact、索引、回执和 Blob 的 fact_changes（新增、人工编辑、删除、证据及时间变化引用）同事务提交。Blob 不保存聊天原文。人工 Profile 编辑、Event 删除和 Agent 写入不生产 Blob。
 
-主动 POST flush 或 Worker 定时 flush，在短事务按完成顺序选取完整 Blob；可跨 Source，不跨项目/用户。每次扫描最多 100 个，变更引用与当前有效 Fact 的 JSON 总预算为 256 KiB，不能拆开 Blob。剩余、在途及随后完成的 Blob 留给下一次，pending_blob_count 可见；同键重试不扩大集合。单个 Blob 已超限时固定原集合并明确报 maintenance_capacity，不无限调用模型；恢复仍受容量校验。查询不改变计时，自动静默 30 秒、最长等待 120 秒。空 flush 直接 completed，不调用模型。
+主动 POST flush 或 Worker 定时 flush，在短事务按完成顺序选取待处理的 Blob 变更；可跨 Source，不跨项目/用户。每次扫描最多 100 个，变更引用与当前有效 Fact 的 JSON 总预算为 256 KiB，长会话 Blob 可以按变更前缀分批处理。剩余、在途及随后完成的 Blob 留给下一次，pending_blob_count 可见；同键重试不扩大集合。单个 Blob 已超限时固定原集合并明确报 maintenance_capacity，不无限调用模型；恢复仍受容量校验。查询不改变计时，自动静默 30 秒、最长等待 120 秒。显式空 flush 保留 completed 回执。自动唤醒发现已没有待处理 Blob 时直接返回。
 
-Operation(kind=flush) 是唯一调度和恢复身份，source_id/blob_id 为 null；保存固定 Blob 集合、执行租约、generation、尝试次数和下次执行时间，不新增任务 ID 或维护 Task 表。每个项目/用户最多一个有效执行者；短事务领取后释放连接，模型等待不占 Fact 写入锁。失败/退避释放执行权，新批次可继续。首次加三次恢复，间隔 5/15/60 分钟；耗尽保留原失败，显式 retry 原 operation_id 才重开预算，新批次不重置旧次数。
+Operation（`kind=flush`）是公开身份，保存固定范围；同 ID 的 `queue_tasks` 保存执行状态、租约及恢复进度。每个项目和用户最多一个派生执行者。首次失败后按 5／15／60 分钟退避，耗尽后沿原 Operation 显式恢复。退避期间后续批次可以运行。
 
-Operation.status 是终态真相源：待领取、执行及自动退避均为 processing，退避可携带 retryable 的末次错误；不可恢复或四次耗尽才为 failed，提交回执后才为 completed。flush.status 对应 pending/running、failed、completed，不独立猜终态。Worker 每轮独立回收过期租约，第四次崩溃也收敛到 failed；重复恢复 processing 不重置预算。
+公开回执将待领取、运行及退避映射为 `processing`，将任务终态映射为 `failed` 或 `completed`。重复查询或领取不会重置原任务的预算。
 
 维护校验使用具体安全错误码。已知但正文未读或已不存在的 Fact 支撑返回 `staged=false`、整批目标 `ids` 和 `error.unread_fact_ids/invalid_fact_ids`，不暂存该批任何修改，也不自动查询或替换支撑；模型可在同一 Loop 和原时间预算内补读、修正。返回引用与输入顺序一致，新建目标仅预留本轮身份，修正必须复用。未解决目标仅在成功暂存或显式移除后解除；其它目标成功不能解除，未解决时以 `maintenance_unresolved_staging` 拒绝完成。同目标重复相同错误提案且相关支撑读取状态未变，以 `maintenance_staging_repeated` 终止；无关读取和引用重排不重置保护。未知／类型错误引用仍以 `MAINTENANCE_REFERENCE_INVALID` 终止；格式、归属、配置、失租、读冲突和数据库错误不交给模型纠正。日志只记录操作身份、错误码、计数及有界内部 ID，不记录正文、凭据或完整工具参数。结构合法仍不证明语义完整；验收保留首次失败。
 
@@ -102,29 +91,29 @@ Loop 工具用本轮短引用：Fact 为 f1/f2，Profile 为 p1/p2，Event 为 e
 不改变上述维护配置；省略模型／effort 时分别沿用共享设置。温度仅在实际 effort 为 `none`
 时发送，省略则使用供应商默认值。已有候选／原操作恢复仍复用保存的结果，不因选模变化重新抽取。
 
-Fact 与维护 Loop 均使用 text.verbosity=low，与思考档位、正文和支撑完整性要求独立。Fact 使用默认服务等级（service_tier=default），与固定的 reasoning.mode=standard 独立；Loop 每次模型调用先 Flex，临时供应商失败/超时后仅本次调用降级 Standard，下次调用重新先 Flex。同一次调用的 SDK 重试保留当前服务等级，只有通过校验的成功响应才复位。只重试未执行工具的模型请求，Flex fallback 延续原分片预算、parent/input 和缓存组装，不重启会话或重置限制；跨等级缓存收益须实际观测。鉴权、输入、拒绝/过滤、失锁和预算错误不能借 fallback 绕过。单次生成最多 32768 tokens；维护 Task 由 Legato 分片执行，12 分钟软边界前预留收尾时间并在安全点保存检查点，14 分钟硬边界后撤销普通提交权。主动让出不算业务失败，下一分片沿原 Task／Operation 继续，不把它重建为新导入；硬超时按原失败恢复规则处理。单次维护模型调用最多 10 分钟，并受当前分片剩余预算约束；不再使用旧的 Loop 整体 900 秒上限，不设模型请求次数或累计 64K 上限，用量仍记录。Responses 使用 store=true、previous_response_id 增量续接，原生 context_management.compact_threshold=256000（十进制）；不增加摘要模型调用，数据库读集和暂存修改不压缩。模型/入口真实兼容性单独验收。
+Fact 与维护 Loop 均使用 text.verbosity=low，与思考档位、正文和支撑完整性要求独立。Fact 和维护 Loop 每次模型调用先 Flex，临时供应商失败/超时后仅本次调用降级 Standard，下次调用重新先 Flex。同一次调用的 SDK 重试保留当前服务等级，只有通过校验的成功响应才复位。只重试未执行工具的模型请求，Flex fallback 延续原分片预算、parent/input 和缓存组装，不重启会话或重置限制；跨等级缓存收益须实际观测。鉴权、输入、拒绝/过滤、失锁和预算错误不能借 fallback 绕过。单次生成最多 32768 tokens；维护 Task 由 Legato 分片执行，12 分钟软边界前预留收尾时间并在安全点保存检查点，14 分钟硬边界后撤销普通提交权。主动让出不算业务失败，下一分片沿原 Task／Operation 继续，不把它重建为新导入；硬超时按原失败恢复规则处理。单次维护模型调用最多 10 分钟，并受当前分片剩余预算约束；不再使用旧的 Loop 整体 900 秒上限，不设模型请求次数或累计 64K 上限，用量仍记录。Responses 使用 store=true、previous_response_id 增量续接，原生 context_management.compact_threshold=256000（十进制）；不增加摘要模型调用，数据库读集和暂存修改不压缩。模型/入口真实兼容性单独验收。
 
 首轮 maintenance_batch 只提供变化数量 change_count 及第一页变更（items/next_cursor），不传后台水位 through_version 或批次数 blob_count，复用 read_changes 的有界读取、读集和覆盖登记。每项含当前有效 Fact（不存在时为 null）；初始输入与后续工具共用本轮短引用。超出单页才由 read_changes 续读，遗漏任一非 noop 变更不能完成，全部检查后不生成派生修改可合法完成。read_memory 用于已知 ID、分页和单字段内不区分大小写的连续文本片段过滤，不拆分关键词；search_memory 用于语义/关键词探索，复用同用户混合搜索。已有完整结果直接使用，不要求两个工具互相确认；stage_profile/stage_event 批量暂存。读取/修改工具以完整条目分页，单页/批最多 64 KiB、200 条，首轮加载最多 200 条、工具读取默认 100 条，混合搜索最多 20 条；超限不截断正文。取消全局 100 个暂存目标限制。工具读当前数据并登记版本，不按旧 flush 水位过滤，不接受 project/user，不加载全部历史。覆盖校验不能证明模型语义判断正确，真实样例仍需验收。
 
 直接使用首轮变化，按需补页和查找相关已有记忆，不固定预查两类派生条目。新增陈述缺少相关旧记忆时用 search_memory 发现；同一人物／故事的相关变化优先合并搜索，不按 Profile/Event 拆查询；不同主题或结果不足时仍可独立并行搜索，不设固定搜索次数。人工编辑、删除、证据或时间变化使用完整关联分页，不能以有排名上限的搜索替代受影响条目的覆盖。混合批次兼顾两者并复用已得结果。read_memory 的 ids/query 均为空时，仅返回关联本批变更 Fact 的条目；空页不代表用户没有其它相关记忆。创建前须发现相关已有条目，已返回完整候选时直接复用，不重复确认。旧 flush 恢复按当前数据发现已有条目，不能因旧 added 标记跳过发现；当前 Fact 已不存在时，仍按关联定位失效派生条目。
 
-每轮模型请求串行；同轮独立工具通过 SDK 原生配置最多并发 4 个，其余在本轮排队；相同集合、相同目标 ID 的暂存写入仍按序执行。工具上限不等于 Worker 的用户 Loop 并发数（现有默认每进程 2 个，其余用户等待数据库领取）。SQL 线程使用私有读集/暂存快照，返回后由事件循环先校验再合并读集；并发读取版本不一致或返回项的暂存内容已变化，整轮失败而非覆盖检查。read_changes/search 已返回完整条目，不强制再次读取；仅补查缺少的相关历史，批量查询和暂存，预留最终完成请求。工具 schema 分开表达 upsert/remove：前者必填正文和非空 Fact 支撑，画像还必填分类；后者只接受现有 ID。运行日志仅记录 Operation、请求轮次、服务等级、工具名称、数量、状态及耗时，不记录参数/正文，不启用外部 tracing。脚本化模型测试证明执行边界，真实模型验收另证规划效率与语义效果。
+每轮模型请求串行；同轮独立工具通过 SDK 原生配置最多并发 4 个，其余在本轮排队；相同集合、相同目标 ID 的暂存写入仍按序执行。工具上限不等于 Worker 的用户 Loop 并发数（部署配置与数据库领取决定用户间并发）。SQL 线程使用私有读集/暂存快照，返回后由事件循环先校验再合并读集；并发读取版本不一致或返回项的暂存内容已变化，整轮失败而非覆盖检查。read_changes/search 已返回完整条目，不强制再次读取；仅补查缺少的相关历史，批量查询和暂存，预留最终完成请求。工具 schema 分开表达 upsert/remove：前者必填正文和非空 Fact 支撑，画像还必填分类；后者只接受现有 ID。运行日志仅记录 Operation、请求轮次、服务等级、工具名称、数量、状态及耗时，不记录参数/正文，不启用外部 tracing。脚本化模型测试证明执行边界，真实模型验收另证规划效率与语义效果。
 
-代码先暂存失去全部有效 Fact 支持的受影响 Profile/Event 删除，模型无需逐条发删除命令；有独立有效支持、无事实关联的人工/legacy 条目不机械删除。该清理与模型修改一起原子提交，读集阻止途中支持恢复或目标被人工修改后误删。
+代码先暂存失去全部有效 Fact 支持的受影响 Profile/Event 删除，模型无需逐条发删除命令；有独立有效支持、无事实关联的人工/legacy 条目不机械删除。发布前用读集校验支持和目标版本，防止误删并发编辑后仍有效的条目。
 
 模型给出的 `fact_ids` 只表示实际支撑；代码另在既有 JSON 中保存内部 `_impact_fact_ids`，用于删除和纠错定位，不返回给模型或公开 API。每轮输出使用最终 Fact 读集和已读 Profile/Event 继承的影响范围，在版本校验后、两类写入前统一计算。只剔除本批明确处理且已不存在的删除 ID；属于其他待完成 flush 的删除 ID 继续传递，避免旧正文经新条目逃过后续清理。影响范围是保守上界，不宣称每条 Fact 都支持每项内容，也不改变检索的支撑关联。
 
-非新增 Fact 变化同事务增加受影响派生条目的内部 revision；旧 Loop 即使只读过派生文本，也不能绕过并发检查。影响范围只产生需复核候选，不是删除依据；每项必须依据当前有效 Fact 重写（upsert）或移除，不能 keep 旧正文；遗漏则原 flush 失败，不提交半成品或默认删除。无关条目仍可 keep，但必须实际读过完整目标，且原有非空支撑全部有效并已读；提交继续校验版本，不重写正文、向量、时间、影响范围或历史。只有已知支撑全部消失才自动暂存 remove，缺少关联不等于支撑全部失效。执行中新出现的受影响条目仍由完成检查阻断。旧条目缺失/null 影响范围视为未知，在同用户删除、纠错或证据变化时保守纳入复核；普通新增不扩大到全部旧条目。读取受影响条目的定位与支撑也保守继承原影响范围；keep 保留原范围，不能靠现有 `fact_ids` 将未知洗成完整。新建纯人工画像的影响范围为空，人工更新不能清除或伪造此字段。
+非新增 Fact 变化同事务递增受影响 Profile 和 Event 的 version；旧 Loop 即使只读过派生文本，也不能绕过并发检查。影响范围只产生需复核候选，不是删除依据；每项必须依据当前有效 Fact 重写（upsert）或移除，不能 keep 旧正文；发布前发现遗漏时原 flush 失败，不能默认删除。无关条目仍可 keep，但必须实际读过完整目标，且原有非空支撑全部有效并已读；提交继续校验版本，不重写正文、向量、时间、影响范围或历史。只有已知支撑全部消失才自动暂存 remove，缺少关联不等于支撑全部失效。执行中新出现的受影响条目仍由完成检查阻断。旧条目缺失/null 影响范围视为未知，在同用户删除、纠错或证据变化时保守纳入复核；普通新增不扩大到全部旧条目。读取受影响条目的定位与支撑也保守继承原影响范围；keep 保留原范围，不能靠现有 `fact_ids` 将未知洗成完整。新建纯人工画像的影响范围为空，人工更新不能清除或伪造此字段。
 
 画像历史的三类快照同样保存内部影响范围，删除/纠错时过滤受影响条目。旧快照范围未知的不作为可恢复历史返回，也不从当前同 ID 画像补猜。原历史记录及旧派生正文不作发布时批量删除；当前正文仍遵循待 flush 语义。这项改动不新增表、迁移或外部版本协议；保守范围可能使更多条目需要整理，不能据此承诺模型不会漏记或错误概括。
 
-可变 Fact/Profile/Event 集合使用稳定 ID 游标，与本轮暂存修改按同一 ID 顺序合并；不建立快照表。游标停在最后实际返回的完整条目，字节预算不足不截断或跳过未消费项。普通条目返回完整正文；必处理条目的旧正文、标题、子主题等自由文本不返回给模型，保留 ID、revision、顶级 topic 和完整支撑 ID，以当前有效 Fact 重建原 ID。自己的暂存新正文仍可读。缺少旧关联标记 support_unknown，需搜索当前 Fact，不自动删除；支撑正文超预算通过现有 Fact 分页补读，不截断支撑 ID。单条超出字节预算明确失败。固定 read_changes 列表仍用 offset。待删除派生条目保留 pending_delete 导航信息；旧文本不是证据。关联按页批量读取，提交按集合批量锁定并比较内部 revision。
+可变 Fact/Profile/Event 集合使用稳定 ID 游标，与本轮暂存修改按同一 ID 顺序合并；不建立快照表。游标停在最后实际返回的完整条目，字节预算不足不截断或跳过未消费项。普通条目返回完整正文；必处理条目的旧正文、标题、子主题等自由文本不返回给模型，保留 ID、version、顶级 topic 和完整支撑 ID，以当前有效 Fact 重建原 ID。自己的暂存新正文仍可读。缺少旧关联标记 support_unknown，需搜索当前 Fact，不自动删除；支撑正文超预算通过现有 Fact 分页补读，不截断支撑 ID。单条超出字节预算明确失败。固定 read_changes 列表仍用 offset。待删除派生条目保留 pending_delete 导航信息；旧文本不是证据。关联按页批量读取，发布前按集合核对 Fact 的 revision 与 Profile/Event 的 version。
 
-同步 SQLAlchemy 保留；每个完整 SQL 工作单元在线程内创建、使用和关闭 Session，不跨线程传 ORM 对象。公开记忆读取的短 SQL 单元使用 REPEATABLE READ，让正文、支撑和待处理状态来自同一快照，避免并发 flush 完成后给旧正文配上新证据；不跨模型或网络等待持有事务。异步层负责模型与 Redis 等待。请求取消时等待 SQL 结果后才释放写租约，不将响应取消解释成事务失败；鉴权仍逐请求读数据库，不缓存权限。
+鉴权、排名、正文与证据使用普通 SELECT，空排名直接返回。相关读取限定项目和用户，并过滤已失效依据。维护和抽取都在事务外等待模型或 Queue。
 
-所有修改先保存在本轮内存，最终短事务验证执行权、项目配置、读过的 Fact revision 和目标条目 revision，用既有 Redis renewable lease + SQL generation/version 写入保护。Profile、Event 与 flush completed 回执一起提交；失败两类全部回滚。相关删除、证据变化或人工编辑使旧计划失败，无关新增不废弃本轮；旧 flush 恢复重新读取当前事实，不能按历史快照覆盖新结果。永久遗忘立即阻断工具读取及最终提交。常规日志仅状态、轮数、Token、耗时和安全错误码；未读支撑错误的有限 ID 诊断遵循上文边界。
+维护阶段用 watchdog 检查运行权。发布前校验项目配置、Fact 和目标版本，写入语句继续限定当前用户与有效租约。Profile 和 Event 各按条目的 version 条件写入。画像历史只登记实际生效的修改，每条 Event 的正文和证据同一条 SQL 写入。已成功的写入保留，全部处理完成后由 Legato 用一次条件更新确认任务成功。原任务恢复时使用既有检查点，按版本和内容识别已经生效的修改，相关证据或目标发生其他变化时重新整理。永久遗忘阻断迟到写入。
 
-必处理集合复用本轮准备时查到的保守影响范围，不因普通搜索或额外读取扩大。工具条目的 `review_required` 标明该范围；首轮变化页、后续读取和暂存回执中的 `remaining_review` 按 Profile/Event 返回剩余 count 和至多 20 个 ID，接受决定后列表推进，无需额外游标或任务状态。短引用仍由同一映射生成；清单只有身份，不代表正文或支撑已读，模型对已有条目做决定前必须读取目标（必处理项为定位与支撑）及所需有效 Fact。已接受的重写或移除（包括已知全部失去支撑的自动删除）退出剩余清单，被拒绝的重提仍保持未完成。结束时先检查本轮剩余项，提交事务再检查当前数据库范围与版本；并发新增影响不能被旧清单掩盖。
+必处理集合复用本轮准备时查到的保守影响范围，不因普通搜索或额外读取扩大。工具条目的 `review_required` 标明该范围；首轮变化页、后续读取和暂存回执中的 `remaining_review` 按 Profile/Event 返回剩余 count 和至多 20 个 ID，接受决定后列表推进，无需额外游标或任务状态。短引用仍由同一映射生成；清单只有身份，不代表正文或支撑已读，模型对已有条目做决定前必须读取目标（必处理项为定位与支撑）及所需有效 Fact。已接受的重写或移除（包括已知全部失去支撑的自动删除）退出剩余清单，被拒绝的重提仍保持未完成。结束时先检查本轮剩余项，发布前再检查当前数据库范围与版本；并发新增影响不能被旧清单掩盖。
 
 ## 默认画像目录与三类初始背景
 
@@ -142,32 +131,33 @@ Luvel 默认分别调用既有 `queryProfiles`，读取 `user_profile`、`intere
 
 ## 删除与派生中间状态
 
-DELETE sources/{source_id}/messages 接收用户定位、message_ids 与稳定幂等键，不需要正文、event_id 或 blob_id。同步处理所有相关 Blob 的支持组、Fact、直接索引、消息墓碑及完成回执，登记该次删除 Blob。重复删除稳定成功；未知消息也写无正文墓碑，迟到导入不能恢复贡献。
+DELETE sources/{source_id}/messages 接收用户定位、message_ids 与稳定幂等键，不需要正文、event_id 或 blob_id。同步处理相关支持组、Fact、索引、消息行及完成回执，并登记本次删除 Blob。只有 Fact 或其证据实际变化时才通知后台维护。同键重试返回原回执；来源中的已删除消息 ID 从撤回回执读取。调用方负责避免用新键重新上传已撤回内容。
 
 **旧 Profile/Event 文本可暂时读取，直到统一 Loop 成功。** 接口/Inspector 显示待更新或失败；失效关联不得作为有效 Fact 证据返回。公开读取按尚未完成的 Blob/flush 变更排除被修改、删除或证据变化的 Fact 关联，不能用修正后的 Fact 为旧正文作证；无关的有效支撑保留。原数据库关联仍供 Loop 定位待修条目，当前 Fact 也仍可独立读取，不新建证据快照。删除后的旧文本可能暂时进入聊天上下文，维护失败不保证固定时间内消失。历史读取过滤失效证据，不提供恢复已撤回内容的接口。
 
-删除 Event 只删除该事件及派生索引，不改变 Fact 或画像；保存被删除事件 ID 墓碑，后台不能复活该 ID。人工修改增加 revision、保留证据关联，后台旧版本提交失败，不承诺人工文本永远不被后续正常整理替换。
+删除 Event 只删除该事件及派生索引，不改变 Fact 或画像；保存被删除事件 ID 墓碑，后台不能复活该 ID。人工修改递增 version 并保留证据关联，后台旧版本提交失败，不承诺人工文本永远不被后续正常整理替换。
 
 Profile/Event 鼓励基于当前有效 Fact 作有用的推断，而非仅摘抄。Profile 可归纳特点和关系模式，在现有正文中用“可能／倾向于”等表达区分推断与明确描述，不新增字段。Event 的 title/summary/keywords/event_time/location/content 保留有依据的经历，未知为空；可能的原因、动机、影响或意义放入 interpretation。两者都须直接关联作为判断依据的 Fact；派生解释不能回写 Fact 或成为另一条记忆的独立证据，依据修改或删除后须重新判断推断是否成立。同人物/关键词不自动合并故事，Fact 与 Event 多对多。原文已清除，遗漏的具体经历不能靠推断补造。
 
-Fact 抽取只产生事实，不重复生成 Event 标签或画像分类。Fact-first search 使用 Fact 向量；独立 events/query 使用 Event 向量。Loop 完成修改集后，在写锁和 SQL 事务外批量计算新增／文本变化 Event 的向量；Profile、Event、向量、关联及 flush 回执仍一次提交。索引失败不提交半成品，复用原 flush 恢复；提交前继续检查事实及目标版本。未变的索引文本复用向量。Loop 与人工 Event 路径共用 factual title/summary/keywords/event_time/location/content 的索引文本，旧 event_tip/profile_delta/tag 保留兼容，不把 interpretation 当成事实索引正文。显式关闭 embedding 时仅词法查询。
+Fact 抽取只产生事实，不重复生成 Event 标签或画像分类。Fact-first search 使用 Fact 向量；独立 events/query 使用 Event 向量。Loop 完成修改集后，在写锁和 SQL 事务外批量计算新增／文本变化 Event 的向量；每条 Event 将向量、正文和关联一起写入。向量生成失败时沿原 flush 恢复；发布前校验事实和目标版本。未变的索引文本复用向量。Loop 与人工 Event 路径共用 factual title/summary/keywords/event_time/location/content 的索引文本，旧 event_tip/profile_delta/tag 保留兼容，不把 interpretation 当成事实索引正文。显式关闭 embedding 时仅词法查询。
 
 Profile/Event 的 created_at 由数据库在创建时生成，更新不改变；不再用支撑消息的 occurred_at 覆盖。Event.event_time 是故事发生时间的文字描述，Fact.fact_time 是事实的结构化日期及证据；两者都不同于入库时间。旧记录曾将来源时间写进 created_at，不能可靠还原的保持 legacy，不以当前时间或 updated_at 猜补；历史 created_* 筛选因此不能保证精确。
 
 Fact 人工编辑、删除或时间证据变化时同步清理相关历史画像；AgentLoop 不能把旧文本、后续未处理 Blob 或迁移 flush 所涉及的失效文本重新记入历史。新旧 flush 恢复都读取当前 Fact，并过滤其它未完成变更涉及的旧画像。当前派生文本允许延迟更新的契约不变。
 
-永久遗忘 DELETE users/{uid} 仍立即阻断读取及后续提交，不采用派生延迟语义。短 SQL 事务写项目/UUID 墓碑并级联清理；不等待长 Redis/model lease。旧执行者提交遇到墓碑返回 410 user_forgotten。重复调用返回同 UUID forgotten=true；墓碑不含正文，不能随 User 清理消失，也没有恢复身份参数。
+永久遗忘 DELETE users/{uid} 仍立即阻断读取及后续提交，不采用派生延迟语义。短 SQL 事务写项目/UUID 墓碑并级联清理；不等待长模型执行。旧执行者提交遇到墓碑返回 410 user_forgotten。重复调用返回同 UUID forgotten=true；墓碑不含正文，不能随 User 清理消失，也没有恢复身份参数。
 
 ## 接口、检索与消费者
 
 主要接口（均在 /api 下）：
-- POST users/{uid}/blobs：source_id、idempotency_key、带 message_id/role/content/occurred_at 的消息。
+- POST users/{uid}/blobs：source_id、idempotency_key、带 message_id/role/content/occurred_at 的文字消息并返回 staged。
+- POST users/{uid}/blobs/{blob_id}/flush：以同一 Session Blob ID 提交 1–32 个已暂存的追加 Operation，固定本次 Fact 范围。处理中新增消息属于后续范围。提交前已有段过期时返回 409 expired_append_inputs 和 append_operation_ids，整份请求未受理，有效段可使用原追加回执另行封批。
 - GET users/{uid}/blobs/{blob_id}、sources/{source_id}：有界来源/批次及当前证据。
 - POST users/{uid}/flush：稳定 idempotency_key，返回固定集合及 kind=flush 的 Operation。
-- GET users/{uid}/operations/by-key/{key}、operations/{id}、POST operations/{id}/retry：查询/恢复原 Fact 或 flush 操作；恢复 flush 不重发正文。
+- GET users/{uid}/operations/by-key/{key}、operations/{id}、POST operations/{id}/retry：查询或恢复原操作。Fact flush 可恢复失败复用原范围及仍有效的检查点；输入过期后，原回执持续返回 input_required。
 - GET users/{uid}/maintenance：未封闭 Blob 数量及最近 flush 状态、错误、尝试次数和固定 Blob ID。
 - DELETE sources/{source_id}/messages：删除消息贡献；DELETE events/{id} 与 DELETE users/{uid} 独立。
-- PUT users/{uid}/facts/{fact_id}、DELETE users/{uid}/facts/{fact_id}：write scope；稳定 idempotency_key、expected_revision 和人工 reason，返回 kind=correct 的 Operation。编辑提交完整 content/subject/reporter/certainty/support_groups/fact_time，证据遵循上文的原 Blob 支持组约束；原文已清除，身份和结构校验不能证明编辑内容语义为真。版本冲突先读当前 Fact，不自动覆盖；恢复沿原 Operation。
+- PUT users/{uid}/facts/{fact_id}、DELETE users/{uid}/facts/{fact_id}：write scope；稳定 idempotency_key、expected_revision 和人工 reason，成功后返回 kind=correct 的完成 Operation。编辑提交完整 content/subject/reporter/certainty/support_groups/fact_time，证据遵循上文的原 Blob 支持组约束；原文已清除，身份和结构校验不能证明编辑内容语义为真。版本冲突先读当前 Fact，再确认修改。
 - POST search、POST context：私密查询留在 JSON body，使用 read scope。
 
 POST search 的 `query` 保留在请求正文：并行计算查询向量和文本候选，以 pgvector、PostgreSQL FTS/字面匹配融合排序。先按顺序选择完整 Fact，再读取这些 Fact 关联的 Event/Profile；返回 `facts`、`events`、`profiles` 三个独立字段，不把 Fact 包装成 Event，也不新增查询分类模型。相同关联条目去重；三类完整对象及证据共同计入 `max_token_size`（默认 8,192，上限 10,000），放不下整条就跳过，不截断正文或证据。无 Event 的有效 Fact 立即可搜，删除 Event 不影响 Fact 召回。
@@ -196,40 +186,6 @@ SDK 0.10.0 新增 `queryFacts`、`queryEvents`、`queryProfiles`，分别对应 
 
 独立 Event/Profile 查询按排序候选每页 20 条批量读取关联／当前有效证据，预算容纳足够完整条目即停止；超大条目整条跳过，继续下一页。身份和筛选在读取时再次应用，不逐条查询证据，也不添加记忆缓存。
 
-历史缺失 Event 向量使用 `python -m memoia_server.event_index_backfill --project-id … --user-id … --limit 100` 只读预览；另行授权后添加 `--apply` 才调用 embedding 并写入。每次最多 500 条，输出 last_id 可传 `--after` 继续；并发编辑／删除的行跳过，下次不带游标重新扫描缺失项。只补空向量，不改正文、时间、revision，不重新抽取或运行 Agent。共享库执行与真实模型调用不是本地验证的一部分。
+旧数据沿既有迁移维护。执行顺序、数据保护与验证见 [TypeScript 迁移与恢复](guide/typescript-worker-migration.md)。公开响应及 SDK 以 [OpenAPI](../openapi.json) 为准。
 
-Alembic 0008 建立：维护任务、Fact revision/纠正关系、直接索引、派生多对多及版本约束。旧 Fact active=true，不从 included=false 猜失效；机械迁移已有同归属索引/关联，缺失主体/报告者保持 legacy。0009_blob_flush 前向迁移将旧任务进度/变更/失败转为 Blob 引用和可恢复 flush Operation，随后移除旧维护表；旧在途 owner 不延续，原身份及次数保留，重新读当前 Fact，不重新抽取原文。旧删除操作补固定 Blob，未知消息补无正文墓碑。0006 已清除的聊天不能恢复，不用模型猜补；历史备份/WAL 中正文需独立保留策略。
-
-0010_historical_facts 只删除旧 active=false Fact，不复活隐藏内容；保留其他 Fact、来源、消息、固定 Blob 和原回执。删除前机械保留受影响 Event 的关联导航、定点清理引用这些 Fact 的历史条目，再用已有 flush legacy_changes 承载有界删除变更，不改已封闭 Blob。未完成迁移 flush 也参与历史失效过滤。退出纠正表、触发器和 active，补反向关联索引；迁移不可逆，不在迁移中运行模型。退役配置另行核对，不由迁移静默修改。
-
-0011_retire_gists 删除旧 Gist 索引表及全部运行分支，保留 Event 正文、Fact、消息和回执；
-仅存在于旧 Gist 的细节退出检索，不伪造 Fact 证据。Blob message_ids 使用 jsonb_ops GIN
-索引支持删除的精确成员查询，不新增关系表。flush 候选事实批量读取一次。
-
-应用 import 不做 DDL，启动检查 head/向量维度。运行连接默认连接 5s、锁等待 5s、单 SQL 30s 截止（可配置正数），断连启用 TCP keepalive/user timeout；超时回滚后才释放写租约，未知提交仍查询原回执。Alembic 独立维护连接不继承这些 SQL 上限。数据库池默认每进程 8+4，多 Worker 必须核对总连接预算。同镜像运行独立 maintenance_worker，Compose/健康/发布/备份均覆盖 API 与 Worker；新 schema 不允许普通 prepare 或旧 API 镜像回退。迁移、提交、共享库和 Test 部署需另行确认，不操作 Online 或云配置。
-
-验证分层报告：纯函数/MockTransport → 隔离真实 PostgreSQL/Redis（迁移、归属反例、事务、接管、新变更、原 flush 恢复、永久遗忘）→ 当前模型真实工具调用/固定语义样例 → Test API → Inspector UI。静态代码、MockTransport 和本地容器不等同真实模型或远端发布验收。
-
-source_quality --list 不加载业务配置/模型；执行从受保护 stdin 收模型 JSON，禁用 .env/config 自动发现、计费及数据库连接，只计算公开合成夹具。每次调用正常单次抽取，不重跑到通过，输出标记 human_review_required=true。extract_system override 只替换这次抽取规则，报告记录实际 Prompt/schema hash。机械概念／支持组检查不等于语义证明；模型失败原样保留，凭据使用另行授权。
-
-
-来源消息可通过 images 传一张原图：url、mimeType、width、height、byteSize。
-正文 content 仍须提供，纯图时可为空；支持 JPEG、PNG、WebP 和非动画 GIF，声明大小最多 10 MiB。
-Memoia 只在本次 Fact 抽取时通过原生 input_image 传 URL；Developer 资料只包含 image_count，不复制链接。
-图片与原消息共用 message_id 和角色，文字 Fact 继续向量化。source_messages／support_groups 只返回既有
-消息 ID 和时间，调用方用自己的原消息补图。Fact、来源表、消息表、索引和日志不保存可下载图片 URL；
-URL 与附件元信息参与不可逆消息哈希，同消息 ID 更换附件明确冲突。URL 只在本次进程及模型请求中
-使用，连临时 Operation.request 也不保存；持久消息输入只留 image_count 标记及原文字，哈希保留原
-批次身份。图片输入的 retryOperation 返回 input_required，不能以缺图输入再次抽取；调用方先查询
-原回执，确认需要恢复后，向原 /blobs 用原键和完整原消息补交。可恢复失败继续原操作，已完成只返回
-原回执，永久失败不重放；并发补交仍由用户租约和 SQL 提交保护协调。补交后可复用已验证候选，
-无需再次看图；不为此增加回调、任务或公开接口。其他临时文字输入／候选仍沿七天清理规则。
-不增加图片表、消息列或 schema 迁移。保存候选／生成向量前拒绝模型原样回显输入图片链接。
-容量仅在组装有效抽取资料后校验一次；已删除消息、附件 URL 和未发送给模型的调用方 metadata
-不计入模型上下文，全部消息已处理或删除时直接完成 noop，不调用模型或 embedding。
-原文字配额仍为 16,384 tokens；物理上下文另按本次有效图片每张预留 16,384 tokens，加上提示词、
-固定规则及输出预留后与 131,072 默认窗口比较。此项是保守容量估算，不是计费或实际视觉用量；
-超限在模型调用前明确拒绝，不保存新 Fact，也不能把 URL 的文字 token 数当作图片容量。
-Memoia 不下载、归档或验证原图字节；实际格式、大小、非动画及 URL 所有权由调用方校验，模型服务
-负责抓取，DNS／重定向和链接可用性不由本 API 保证。图片内日期可保留在 Fact 正文；结构化 fact_time
-仍只接受原消息 content 中可核验的时间表达，不把 OCR 猜测伪装成文字证据。
+用量按模型调用实时累加。项目日用量查询最多返回最近 30 天（含当天），每天清理已过期的计数。当月额度使用独立的月汇总。

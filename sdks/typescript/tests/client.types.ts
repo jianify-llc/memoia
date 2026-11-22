@@ -5,12 +5,10 @@ const boundOptions: ClientOptions = { binding: serviceBinding, apiKey: "fixture"
 // @ts-expect-error A bound client cannot be given a second destination.
 const ambiguousOptions: ClientOptions = { ...boundOptions, baseUrl: "https://memoia.example" };
 
-declare const importWithImage: BlobImport;
-const attachment: NonNullable<BlobImport["messages"][number]["images"]>[number] = {
-  url: "https://images.example/original.webp", mimeType: "image/webp", width: 600, height: 400, byteSize: 4096,
-};
-const imageOnly: BlobImport = { ...importWithImage, messages: [{ message_id: "image-1", role: "user",
-  content: "", occurred_at: "2026-11-01T00:00:00Z", images: [attachment] }] };
+declare const sourceMessage: BlobImport["messages"][number];
+const describedImage: BlobImport["messages"][number] = { ...sourceMessage, content: "", visual_description: "A blue bicycle." };
+// @ts-expect-error The stage contract accepts an image description, not an attachment.
+sourceMessage.images;
 declare const sourceObservation: NonNullable<Evidence["source_messages"]>[number];
 // @ts-expect-error Durable provenance returns message identity, not transient image URLs.
 sourceObservation.images;
@@ -25,6 +23,7 @@ const input: BlobImport = {
   messages: [{ message_id: "1", role: "user", content: "Tokyo", occurred_at: "2026-10-22T00:00:00Z" }],
 };
 client.importBlob(user, input);
+client.flushBlob(user, input.source_id, { idempotency_key: "extract:1", append_operation_ids: [user] });
 // @ts-expect-error Fact imports no longer expose reasoning mode.
 client.importBlob(user, { ...input, reasoning_mode: "standard" });
 // @ts-expect-error Pro is not part of the import contract.

@@ -112,7 +112,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Import Source */
+        /** Stage an import Blob */
         post: operations["importBlob"];
         delete?: never;
         options?: never;
@@ -568,16 +568,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/users/{user_id}/blobs/{blob_id}/flush": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Flush a fixed range of a session Blob
+         * @description Freeze the supplied append receipts and enqueue Fact extraction for one Blob.
+         */
+        post: operations["flushBlob"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /** Blob */
         Blob: {
-            /**
-             * Blob Id
-             * Format: uuid
-             */
+            /** Blob Id */
             blob_id: string;
             /** Source Id */
             source_id: string;
@@ -783,10 +800,7 @@ export interface components {
              * Format: uuid
              */
             fact_id: string;
-            /**
-             * Blob Id
-             * Format: uuid
-             */
+            /** Blob Id */
             blob_id: string;
             /** Content */
             content: string;
@@ -1009,6 +1023,11 @@ export interface components {
             metadata?: {
                 [key: string]: unknown;
             };
+            /**
+             * @description Optional maintenance-only effort. The first accepted import fixes its value. When no selected Blob supplies an override, the project setting applies.
+             * @enum {string}
+             */
+            maintenance_reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
         };
         /** IssuedKey */
         IssuedKey: {
@@ -1104,12 +1123,12 @@ export interface components {
              * @default import
              * @enum {string}
              */
-            kind?: "import" | "retract" | "correct" | "legacy_import" | "flush";
+            kind?: "import" | "retract" | "correct" | "legacy_import" | "flush" | "fact_flush" | "append";
             /**
              * Status
              * @enum {string}
              */
-            status: "processing" | "completed" | "failed";
+            status: "processing" | "completed" | "failed" | "staged";
             /** Source Id */
             source_id: string | null;
             /** Blob Id */
@@ -1395,10 +1414,7 @@ export interface components {
             content: string;
             /** Source Id */
             source_id: string;
-            /**
-             * Blob Id
-             * Format: uuid
-             */
+            /** Blob Id */
             blob_id: string;
             /** Score */
             score: number;
@@ -1519,8 +1535,6 @@ export interface components {
             role: "user" | "assistant" | "system" | "tool";
             /** Content */
             content: string;
-            /** Images */
-            images?: components["schemas"]["ImageAttachment"][];
             /**
              * Occurred At
              * Format: date-time
@@ -1528,6 +1542,7 @@ export interface components {
             occurred_at: string;
             /** Time Zone */
             time_zone?: string | null;
+            visual_description?: string;
         };
         /** SourceObservation */
         SourceObservation: {
@@ -1644,6 +1659,20 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        ExpiredAppendInputsError: {
+            detail: {
+                /** @constant */
+                code: "expired_append_inputs";
+                message: string;
+                /** @constant */
+                retryable: false;
+                append_operation_ids: string[];
+            };
+        };
+        FactFlushInput: {
+            idempotency_key: string;
+            append_operation_ids: string[];
         };
     };
     responses: never;
@@ -1948,6 +1977,15 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Operation"];
+                };
+            };
+            /** @description Successful Response */
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2684,6 +2722,21 @@ export interface operations {
                     "application/json": components["schemas"]["Health"];
                 };
             };
+            /** @description Service temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        detail: {
+                            code: string;
+                            message: string;
+                            retryable: boolean;
+                        };
+                    };
+                };
+            };
         };
     };
     listUsers: {
@@ -2986,6 +3039,66 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Usage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    flushBlob: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+                blob_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FactFlushInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Operation"];
+                };
+            };
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Operation"];
+                };
+            };
+            /** @description The range was rejected. If an append expired, its Operation ID is identified. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ExpiredAppendInputsError"] | {
+                        detail: {
+                            code: string;
+                            message: string;
+                            retryable: boolean;
+                        };
+                    };
                 };
             };
             /** @description Validation Error */

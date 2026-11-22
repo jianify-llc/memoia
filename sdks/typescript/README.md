@@ -9,10 +9,7 @@ const memoia = new MemoiaClient({ binding: env.MEMOIA, apiKey: projectToken });
 The binding selects the Worker. For a reachable HTTP deployment, pass `baseUrl`
 instead. Both transports use the same authenticated API and operation receipts.
 
-`importBlob(userId, input)` does not accept `reasoning_mode`. Fact extraction and
-Profile/Event maintenance always use Standard, including retries, tool turns and
-Flex recovery. The SDK rejects the retired field locally before transport; models,
-reasoning effort and service tiers remain independent server settings.
+`importBlob(userId, input)` appends text to the Blob identified by `source_id`. For an image message, the caller can include `visual_description`. Call `flushBlob(userId, blobId, { idempotency_key, append_operation_ids })` to extract from those accepted appends. Poll the original `fact_flush` Operation for the final Fact IDs. Later appends use the same Blob ID and a new flush. The optional `maintenance_reasoning_effort` selects reasoning for derived maintenance.
 
 `updateFact(userId, factId, input)` and `deleteFact(userId, factId, input)` correct an existing extraction using a caller-owned idempotency key, `expected_revision` and a short `reason`. Updates replace the complete editable content, subject, reporter, certainty, support groups and event time; identity and original Blob remain unchanged. Support must reference undeleted messages from that original Blob. These are human-reviewed repairs, not a new source of facts: Memoia no longer has the original chat body to verify semantics. A `kind: "correct"` Operation confirms the Fact/index change, while its new correction Blob enters normal timed flush. Old Profile/Event text can remain readable until that flush succeeds. A stale revision requires a fresh read and deliberate proposal, not an automatic merge or retry. Deleting a Fact does not delete messages or other Facts.
 
@@ -30,7 +27,13 @@ const operation = await memoia.importBlob(userId, {
   messages: [{ message_id: "123", role: "user", content: "I live in Tokyo.", occurred_at: "2026-10-02T00:00:00Z" }],
 }, { deadline: Date.now() + 90_000 });
 
-await memoia.getBlob(userId, operation.blob_id!);
+if (operation.status === "staged" && operation.blob_id) {
+  const flush = await memoia.flushBlob(userId, String(dialogId), {
+    idempotency_key: `extract:${batchKey}`, append_operation_ids: [operation.operation_id],
+  });
+  // Read this Operation later to confirm each Blob's result.
+  await memoia.getOperation(userId, flush.operation_id);
+}
 await memoia.deleteMessages(userId, String(dialogId), {
   idempotency_key: deletionKey,
   message_ids: ["123"],
@@ -39,7 +42,7 @@ await memoia.deleteMessages(userId, String(dialogId), {
 
 A Source is unique within the authenticated project and user. Every import or message deletion creates one server-owned Blob tied to its fixed idempotency key. Messages belong to the Source, not the Blob: overlapping batches reuse their identity and cannot create independent evidence from the same message. Changed body, role or occurrence time for an existing message ID returns a conflict. `deleteMessages()` deletes contributions across all Blobs in that Source; it does not require message bodies or event IDs. Event deletion and permanent account forgetting remain distinct operations.
 
-Completed imports atomically erase raw input and retain their receipt, facts and message associations. Incomplete raw input defaults to seven days of temporary retention; retry does not extend it. After expiry, `retryOperation()` returns `input_required`. First query the original receipt, then explicitly resupply the identical batch using its original key if still incomplete. Failed correction requests return the original receipt: resupplying the identical proposal restores its expired payload but does not execute it; use `retryOperation()` explicitly after rechecking the target. The SDK never reconstructs or resends expired input automatically. Legacy groups (`legacy:` / `v1-flush:`) are not inferred external conversation identities.
+Completed imports atomically erase the temporary messages and candidates. Unfinished input defaults to seven days and an identical stage replay does not extend it. An expired staged Blob returns a terminal `input_required` result. For a lost acknowledgement, look up the original key before sending anything. Corrections retain their existing recovery protocol and require the same revision and original proposal.
 
 The base URL is an origin, without `/api`. `deadline` is an absolute Unix timestamp in milliseconds; `signal` may also cancel a request. The SDK sends `X-Memoia-Deadline-Ms` as the positive remaining duration in milliseconds, calculated for each attempt; the server applies it from receipt time and also enforces its own execution limit. Reads retain a 5-second per-attempt limit, writes a 90-second limit, both bounded by the caller's remaining deadline. The client never generates or replaces an idempotency key.
 

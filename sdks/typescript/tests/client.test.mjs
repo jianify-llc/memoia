@@ -17,30 +17,51 @@ it("requires exactly one destination for a bound client", () => {
   assert.throws(() => new MemoiaClient({ apiKey, binding, baseUrl: "https://elsewhere.invalid" }), TypeError);
 });
 
-describe("transient image import", () => {
-  const image = { url: "https://images.example/original.png", mimeType: "image/png", width: 600, height: 400, byteSize: 4096 };
-  const input = { ...source, messages: [{ ...source.messages[0], content: "", images: [image] }] };
-  it("sends image-only input once and preserves the original receipt", async () => {
-    let count = 0;
-    const api = client(async (_url, init) => {
-      count++;
-      assert.deepEqual(JSON.parse(init.body), input);
-      return json(complete);
+describe("staging and Fact flush", () => {
+  const input = { ...source, messages: [{ ...source.messages[0], content: "", visual_description: "A blue bicycle." }] };
+  const staged = { ...complete, kind: "append", blob_id: sourceId, status: "staged", result: null };
+  const flush = { ...complete, kind: "fact_flush", blob_id: sourceId };
+  it("stages text-only input then submits the exact Blob list", async () => {
+    const requests = [];
+    const api = client(async (url, init) => {
+      requests.push({ url, body: JSON.parse(init.body) });
+      return requests.length === 1 ? json(staged, 202) : json(flush);
     });
-    assert.deepEqual(await api.importBlob(user, input), complete);
-    assert.equal(count, 1);
+    assert.deepEqual(await api.importBlob(user, input), staged);
+    const batch = { idempotency_key: "extract:1", append_operation_ids: [staged.operation_id] };
+    assert.deepEqual(await api.flushBlob(user, sourceId, batch), flush);
+    assert.deepEqual(requests, [
+      { url: `https://memoia.example/api/users/${user}/blobs`, body: input },
+      { url: `https://memoia.example/api/users/${user}/blobs/${sourceId}/flush`, body: batch },
+    ]);
   });
-  it("rejects oversized, unsupported or multiple image declarations before transport", () => {
+  it("preserves only validated expiry receipts for a 409 rejection", async () => {
+    const batch = { idempotency_key: "extract:expiry", append_operation_ids: [staged.operation_id] };
+    const detail = { code: "expired_append_inputs", message: "Inputs expired", retryable: false };
+    const api = client(async () => json({
+      detail: { ...detail, append_operation_ids: [staged.operation_id] },
+    }, 409));
+    await assert.rejects(api.flushBlob(user, sourceId, batch), error => {
+      assert.equal(error.outcome, "rejected");
+      assert.deepEqual(error.expiredAppendOperationIds, batch.append_operation_ids);
+      return true;
+    });
+    const malformed = client(async () => json({ detail: { ...detail, append_operation_ids: ["not an id"] } }, 409));
+    await assert.rejects(malformed.flushBlob(user, sourceId, batch), error =>
+      error instanceof MemoiaError && error.expiredAppendOperationIds === undefined);
+  });
+  it("rejects raw image attachments before transport", () => {
     const api = client(() => { throw new Error("must not fetch"); });
-    for (const images of [[], [{ ...image, byteSize: 10 * 1024 * 1024 + 1 }],
-      [{ ...image, mimeType: "image/svg+xml" }], [image, image]]) {
-      assert.throws(() => api.importBlob(user, { ...input, messages: [{ ...input.messages[0], images }] }),
-        error => error.code === "INVALID_INPUT");
-    }
+    assert.throws(() => api.importBlob(user, { ...input, messages: [{ ...input.messages[0], images: [] }] }),
+      error => error.code === "INVALID_INPUT");
+  });
+  it("reads retrying original Blob without pretending it completed", async () => {
+    const retrying = { ...staged, status: "processing", error: { code: "invalid_model_output", retryable: true } };
+    assert.deepEqual(await client(async () => json(retrying)).getOperation(user, retrying.operation_id), retrying);
   });
 });
 
-describe("Standard-only Fact imports", () => {
+describe("Fact import request contract", () => {
   it("accepts the current import shape without a mode field", async () => {
     const api = client(async (url, init) => {
       assert.equal(url, `https://memoia.example/api/users/${user}/blobs`);

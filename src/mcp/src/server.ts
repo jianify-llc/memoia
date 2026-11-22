@@ -18,7 +18,7 @@ export function createMemoryServer(client: MemoiaClient, userId: string) {
     }
   }
   server.registerTool("save_memory", {
-    description: "Save user-provided information. A completed receipt confirms Facts; Profile/Event maintenance remains asynchronous. Retain the idempotency key to query an uncertain result.",
+    description: "Queue Fact extraction from user-provided information. Read the original receipt to confirm the Blob result.",
     inputSchema: { text: z.string().min(1), idempotency_key: z.string().min(1).max(200), occurred_at: z.iso.datetime({ offset: true }), source_id: z.string().min(1).max(200).default("mcp") },
   }, async ({ text, idempotency_key, occurred_at, source_id }) => {
     try {
@@ -27,6 +27,22 @@ export function createMemoryServer(client: MemoiaClient, userId: string) {
         idempotency_key, source_id,
         messages: [{ message_id: idempotency_key, role: "user", content: text, occurred_at }],
       });
+      if (operation.status === "completed" || operation.status === "failed" || !operation.blob_id)
+        return result(operation);
+      return result(await client.flushBlob(userId, source_id, {
+        idempotency_key: `mcp-flush:${idempotency_key}`,
+        append_operation_ids: [operation.operation_id],
+      }));
+    } catch (error) { return failure(error); }
+  });
+  server.registerTool("get_import_result", {
+    description: "Read a Fact import or flush receipt for the configured user.",
+    inputSchema: { operation_id: z.uuid() },
+  }, async ({ operation_id }) => {
+    try {
+      const operation = await client.getOperation(userId, operation_id);
+      if (operation.kind !== "append" && operation.kind !== "import" && operation.kind !== "fact_flush")
+        return failure(new MemoiaError("invalid_operation", 404, false));
       return result(operation);
     } catch (error) { return failure(error); }
   });

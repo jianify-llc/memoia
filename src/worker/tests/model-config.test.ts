@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { completion, getConfig } from "../src/models";
+import { getConfig, provider } from "../src/models";
 import type { Runtime } from "../src/runtime";
 function runtime(
   base: Record<string, unknown> = {},
@@ -135,7 +135,7 @@ test("English and Chinese defaults follow project language and remain isolated",
     false,
   );
 });
-test("Fact final SDK HTTP applies configured default headers and query", async () => {
+test("shared SDK HTTP applies configured default headers and query", async () => {
   const rt = runtime({
     llm_openai_default_header: { "X-Provider-Custom": "local-value" },
     llm_openai_default_query: { deployment: "test-deployment" },
@@ -164,15 +164,7 @@ test("Fact final SDK HTTP applies configured default headers and query", async (
     });
   };
   try {
-    assert.deepEqual(
-      await completion(rt, {
-        projectId: "p",
-        prompt: "private",
-        system: "instruction",
-        schema: { type: "object" },
-      }),
-      { facts: [] },
-    );
+    await provider(rt).responses.create({ model: "fake", input: "input" });
     assert.equal(calls, 1);
     assert.equal(correctHeader, true);
     assert.equal(correctQuery, true);

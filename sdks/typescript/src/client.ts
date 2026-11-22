@@ -74,11 +74,14 @@ const operationValidator: Validator = (value) => {
     if (operation.status === "completed" && progress !== "completed") return false;
     if (operation.status === "failed" && progress !== "failed") return false;
     if (operation.status === "processing" && progress !== "pending" && progress !== "running") return false;
-  } else if (operation.source_id === null || (operation.result && "blob_ids" in operation.result)) return false;
+  } else if (operation.source_id === null ||
+      (operation.result && "blob_ids" in operation.result) ||
+      (["append", "fact_flush"].includes(operation.kind ?? "") && operation.blob_id !== operation.source_id)) return false;
   if (operation.status === "completed") return operation.result !== null && operation.error === null;
-  if (operation.status === "failed") return operation.result === null && operation.error !== null;
-  return operation.status === "processing" && operation.result === null &&
-    (operation.error === null || (operation.kind === "flush" && operation.error.retryable));
+  if (operation.status === "failed") return (operation.result === null || operation.kind === "fact_flush") && operation.error !== null;
+  return (operation.status === "processing" || (operation.status === "staged" && operation.kind === "append")) && operation.result === null &&
+    (operation.error === null || (operation.status === "processing" && operation.error.retryable &&
+      ["flush", "fact_flush", "import", "append"].includes(operation.kind ?? "")));
 };
 const operationsValidator: Validator = (value) => validators.validateOperations(value) && (value as Operations).operations.every(operationValidator);
 
@@ -106,6 +109,7 @@ export class MemoiaError extends Error {
     readonly status: number | null,
     readonly retryable: boolean,
     readonly outcome: "rejected" | "unknown" = "rejected",
+    readonly expiredAppendOperationIds?: readonly string[],
   ) {
     super(`Memoia request failed: ${code}`);
     this.name = "MemoiaError";
@@ -159,6 +163,13 @@ export class MemoiaClient {
     return this.request("POST", `${this.userPath(userId)}/blobs`,
       (value) => operationValidator(value) && (value as Operation).blob_id !== null &&
         (value as Operation).source_id === input.source_id, options, input);
+  }
+
+  flushBlob(userId: string, blobId: string, input: components["schemas"]["FactFlushInput"], options?: RequestOptions): Promise<Operation> {
+    if (!validators.validateFactFlushInput(input)) throw new MemoiaError("INVALID_INPUT", null, false);
+    return this.request("POST", `${this.userPath(userId)}/blobs/${segment(blobId)}/flush`,
+      (value) => operationValidator(value) && (value as Operation).kind === "fact_flush" &&
+        (value as Operation).blob_id === blobId, options, input);
   }
 
   getOperation(userId: string, operationId: string, options?: RequestOptions): Promise<Operation> {
@@ -427,7 +438,10 @@ export class MemoiaClient {
         const unknownWriteFailure = !readOnly && response.status >= 500;
         const recoverableConflict = response.status === 409 && ["write_conflict", "lease_lost"].includes(detail.code);
         const retryable = detail.retryable && (recoverableConflict || [429, 500, 502, 503, 504].includes(response.status));
-        error = new MemoiaError(detail.code, response.status, retryable, unknownWriteFailure ? "unknown" : "rejected");
+        const expiredAppendOperationIds = response.status === 409 && detail.code === "expired_append_inputs" && validators.validateFactFlushConflict(payload)
+          ? (payload as components["schemas"]["ExpiredAppendInputsError"]).detail.append_operation_ids
+          : undefined;
+        error = new MemoiaError(detail.code, response.status, retryable, unknownWriteFailure ? "unknown" : "rejected", expiredAppendOperationIds);
       } catch (cause) {
         error = cause instanceof MemoiaError ? cause : new MemoiaError("TRANSPORT_ERROR", null, readOnly, readOnly ? "rejected" : "unknown");
       } finally {

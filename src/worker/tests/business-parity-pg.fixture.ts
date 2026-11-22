@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { QueryResultRow } from "pg";
 import { randomUUID } from "node:crypto";
 import { Database } from "../src/db";
 import {
@@ -10,7 +11,9 @@ import {
   context,
 } from "../src/retrieval";
 import { countTokens } from "../src/models";
-import { forgetUser, getHistory, importSource } from "../src/facts";
+import { forgetUser, getHistory, stageImport } from "../src/facts";
+import { createUser } from "../src/management";
+import { flushBlob } from "../src/fact-flush";
 import { flush, consume } from "../src/maintenance";
 import worker from "../src/index";
 
@@ -190,39 +193,21 @@ try {
       started();
       await gate;
       return Response.json({
-        status: "completed",
-        output: [
-          {
-            type: "message",
-            status: "completed",
-            content: [
-              {
-                type: "output_text",
-                text: JSON.stringify({
-                  messages: [
-                    {
-                      message_id: "m",
-                      facts: [
-                        {
-                          content: "private fact",
-                          subject: "user",
-                          reporter: "user",
-                          certainty: "asserted",
-                          fact_time: null,
-                          any_of: [{ all_of: ["m"] }],
-                        },
-                      ],
-                    },
-                  ],
-                }),
-              },
-            ],
-          },
-        ],
+        id: "resp_forget", status: "completed", model: "gpt-6-luna",
+        output: [{
+          id: "fc_forget", call_id: "call_forget", type: "function_call",
+          status: "completed", name: "finish_facts",
+          arguments: JSON.stringify({ candidate: { messages: [{
+            message_id: "m", facts: [{
+              content: "private fact", subject: "user", reporter: "user",
+              certainty: "asserted", fact_time: null, any_of: [{ all_of: ["m"] }],
+            }],
+          }] } }),
+        }],
       });
     };
     try {
-      const pending = importSource(runtime, concurrent, {
+      const staged = await stageImport(runtime, concurrent, {
         idempotency_key: "race",
         source_id: "race",
         messages: [
@@ -234,14 +219,23 @@ try {
           },
         ],
       });
-      const result = pending.then(
-        () => "completed",
-        () => "rejected",
-      );
+      const sealed = await flushBlob(runtime, concurrent, "race", {
+        idempotency_key: "seal",
+        append_operation_ids: [staged.operation_id],
+      });
+      const pending = consume(runtime, {
+        kind: "fact_flush",
+        user_id: concurrent.userId,
+        project_id: projectId,
+        operation_id: sealed.operation_id,
+      });
       await entered;
       await forgetUser(runtime, concurrent);
       release();
-      assert.equal(await result, "rejected");
+      await pending;
+      assert.equal((await db.query(
+        "SELECT 1 FROM memoia.queue_tasks WHERE id=$1", [sealed.operation_id],
+      )).rowCount, 0);
       for (const table of [
         "memory_facts",
         "memory_blobs",
@@ -382,19 +376,59 @@ try {
       globalThis.fetch = previousFetch;
     }
   });
+  await test("forgetting reserves an absent user identity before a concurrent create", async () => {
+    const absent = { projectId, userId: randomUUID() };
+    let reserved!: () => void, release!: () => void;
+    const reached = new Promise<void>((resolve) => { reserved = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tx = db.transaction.bind(db);
+    db.transaction = (fn, options) => tx((sql) => fn({
+      query: async <T extends QueryResultRow>(statement: string, args?: unknown[]) => {
+        const result = await sql.query<T>(statement, args);
+        if (statement.startsWith("INSERT INTO memoia.users")) {
+          reserved();
+          await gate;
+        }
+        return result;
+      },
+    }), options);
+    const forgotten = forgetUser(runtime, absent);
+    try {
+      await reached;
+      const late = createUser(db, projectId, { id: absent.userId }).catch((error) => error);
+      try {
+        let pending = false;
+        for (let attempt = 0; attempt < 40 && !pending; attempt++) {
+          pending = !!(await db.query(
+            `SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+             AND wait_event_type='Lock' AND query LIKE 'INSERT INTO memoia.users (id,project_id,additional_fields)%'`,
+          )).rowCount;
+          if (!pending) await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        assert.ok(pending, "create must be waiting on the same identity key");
+      } finally {
+        release();
+      }
+      await forgotten;
+      assert.equal((await late).code, "user_forgotten");
+      assert.equal((await db.query(
+        "SELECT id FROM memoia.users WHERE id=$1 AND project_id=$2",
+        [absent.userId, absent.projectId],
+      )).rowCount, 0);
+    } finally {
+      release();
+      await forgotten;
+      db.transaction = tx;
+    }
+  });
   await test("forgotten identity cannot be recreated by delayed flush or later import", async () => {
     const op = await flush(runtime, scope, "before-forget");
     await forgetUser(runtime, scope);
+    await assert.rejects(consume(runtime, {
+      kind: "flush", user_id: userId, project_id: projectId, operation_id: op.operation_id,
+    }));
     await assert.rejects(
-      consume(runtime, {
-        kind: "flush",
-        user_id: userId,
-        project_id: projectId,
-        operation_id: op.operation_id,
-      }),
-    );
-    await assert.rejects(
-      importSource(runtime, scope, {
+      stageImport(runtime, scope, {
         idempotency_key: "late",
         source_id: "late",
         messages: [
@@ -412,7 +446,7 @@ try {
       retries = 0;
     const queueEnv = {
       ...runtime.env,
-      DATABASE_URL: process.env.MEMOIA_TEST_DATABASE_URL!,
+      HYPERDRIVE: { connectionString: process.env.MEMOIA_TEST_DATABASE_URL! },
     };
     const wakeup = {
       kind: "flush" as const,

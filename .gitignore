@@ -21,4 +21,4 @@ coverage/
 /src/server/
 # The fixed Legato dependency is source-controlled.
 *.tgz
-!src/worker/vendor/jianify-legato-0.1.0.tgz
+!src/worker/vendor/jianify-legato-0.1.0-renew.4.tgz

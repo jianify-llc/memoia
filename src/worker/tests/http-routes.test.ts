@@ -167,7 +167,7 @@ test("request schema rejects unknown project fields before database writes", asy
   assert.equal(response.status, 422);
   assert.equal(calls, 0);
 });
-test("oversized body is rejected before the handler", async () => {
+test("oversized chunked body is cancelled before the handler", async () => {
   let calls = 0;
   const runtime = {
     env: { ACCESS_TOKEN: "root" },
@@ -179,18 +179,22 @@ test("oversized body is rejected before the handler", async () => {
       close: async () => {},
     },
   } as unknown as Runtime;
-  const response = await createApp(() => runtime).request(
-    "/api/projects",
-    {
-      method: "POST",
-      headers: {
-        Authorization: "Bearer root",
-        "Content-Type": "application/json",
+  let cancelled = false;
+  let first = true;
+  const init: RequestInit & { duplex: "half" } = {
+    method: "POST",
+    headers: { Authorization: "Bearer root", "Content-Type": "application/json" },
+    duplex: "half",
+    body: new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(first ? 2 * 1024 * 1024 : 1));
+        first = false;
       },
-      body: "x".repeat(2 * 1024 * 1024 + 1),
-    },
-    runtime.env,
-  );
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 }),
+  };
+  const response = await createApp(() => runtime).request("/api/projects", init, runtime.env);
   assert.equal(response.status, 413);
+  assert.equal(cancelled, true);
   assert.equal(calls, 0);
 });

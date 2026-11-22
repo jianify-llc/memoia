@@ -27,7 +27,7 @@ test("the localhost SSE server accepts a real initialize POST and rejects foreig
     assert.ok(ready, stderr);
     const transport = new SSEClientTransport(new URL(`http://127.0.0.1:${port}/sse`));
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 3);
+    assert.ok((await client.listTools()).tools.some(({ name }) => name === "get_import_result"));
     const status = await new Promise<number | undefined>((resolve, reject) => {
       const req = request({ host: "127.0.0.1", port, path: "/sse", headers: { Host: "foreign.invalid" } }, response => {
         response.resume(); resolve(response.statusCode);

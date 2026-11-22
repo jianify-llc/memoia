@@ -10,6 +10,12 @@ export type Wakeup =
       operation_id: string;
       user_id: string;
       project_id: string;
+    }
+  | {
+      kind: "fact_flush";
+      operation_id: string;
+      user_id: string;
+      project_id: string;
     };
 export interface MaintenanceWakeup {
   send(message: Wakeup, delaySeconds: number): Promise<void>;
@@ -28,12 +34,14 @@ export interface RuntimeEnv
   ADMIN_URL?: string;
   ADMIN_TOKEN?: string;
   MEMOIA_CONFIG?: string;
+  MEMOIA_HEALTHCHECK_DB_TRACE?: string;
   tracing?: Tracing;
 }
 export interface Runtime {
   db: Database;
   ownsDatabase?: boolean;
   maintenanceWakeup?: MaintenanceWakeup;
+  waitUntil?: (work: Promise<void>) => void;
   modelFetch?: typeof fetch;
   env: RuntimeEnv;
   deadline: number;
@@ -66,7 +74,7 @@ export function createRuntime(
         503,
         true,
       );
-    db = new Database(connection);
+    db = new Database(connection, { tracing: env.tracing });
   }
   return {
     db,

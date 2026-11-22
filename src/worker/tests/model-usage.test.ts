@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  completion,
   provider,
   errorUsage,
   recordUsage,
@@ -55,50 +54,50 @@ const failingFetch: typeof fetch = async () =>
 function counters(calls: Array<{ sql: string; values: unknown[] }>) {
   return calls
     .filter((c) => c.sql.includes("INSERT INTO memoia.usage_counters"))
-    .map((c) => [c.values[1], c.values[2]]);
+    .flatMap((c) =>
+      (c.values[1] as string[]).map((name, index) => [
+        name,
+        (c.values[2] as number[])[index],
+      ]),
+    );
 }
 
-test("real SDK 503 preserves top-level numeric usage for Fact completion and billing", async () => {
+test("numeric SDK error usage is recorded and billed without provider text", async () => {
   const { runtime, calls } = fixture();
-  const oldFetch = globalThis.fetch,
-    oldInfo = console.info;
+  const oldInfo = console.info;
   const logs: string[] = [];
-  globalThis.fetch = failingFetch;
   console.info = (value?: unknown) => {
     logs.push(String(value));
   };
   try {
-    await assert.rejects(
-      completion(runtime, {
-        projectId: "p",
-        prompt: "input",
-        system: "instruction",
-        schema: { type: "object" },
-      }),
-      (e: any) =>
-        e.code === "model_unavailable" &&
-        e.retryable &&
-        !e.message.includes("private"),
-    );
+    const client = provider(runtime, failingFetch);
+    let rejection: unknown;
+    try {
+      await client.responses.create({ model: "test", input: "query" });
+    } catch (error) {
+      rejection = error;
+    }
+    assert.ok(rejection);
+    await recordUsage(runtime, "p", errorUsage(rejection), "fact_extraction");
     assert.deepEqual(counters(calls), [
       ["llm_input_tokens", 17],
       ["llm_output_tokens", 3],
     ]);
-    const debit = calls.find((c) => c.sql.includes("UPDATE memoia.billings"));
-    assert.deepEqual(debit?.values, ["p", 20]);
+    assert.deepEqual(
+      calls.find((call) => call.sql.includes("UPDATE memoia.billings"))?.values,
+      ["p", 20],
+    );
     const usage = JSON.parse(logs[0]);
-    assert.equal(usage.input_tokens, 17);
-    assert.equal(usage.output_tokens, 3);
     assert.equal(usage.total_tokens, 20);
     assert.equal(usage.cache_write_30m_tokens, 2);
     assert.equal(usage.cache_write_12h_tokens, 3);
     assert.equal(logs.join("").includes("private-provider-text"), false);
     assert.equal(logs.join("").includes("never-log"), false);
   } finally {
-    globalThis.fetch = oldFetch;
     console.info = oldInfo;
   }
 });
+
 test("shared maintenance SDK client and OpenAI embedding expose only numeric error usage", async () => {
   const { runtime } = fixture();
   let apiError: unknown;
@@ -166,8 +165,7 @@ test("external billing uses ADMIN_TOKEN and never replays model or counters on r
       const { runtime, calls } = fixture();
       runtime.env.ADMIN_URL = "https://billing.invalid";
       runtime.env.ADMIN_TOKEN = "synthetic-local-token";
-      let modelCalls = 0,
-        billingCalls = 0,
+      let billingCalls = 0,
         authCorrect = false;
       const warnings: string[] = [];
       console.warn = (value?: unknown) => {
@@ -195,31 +193,10 @@ test("external billing uses ADMIN_TOKEN and never replays model or counters on r
             return new Response("private admin response", { status: 200 });
           return Response.json({ errno: 0, data: null });
         }
-        modelCalls++;
-        return Response.json({
-          status: "completed",
-          model: "fake",
-          output: [
-            {
-              type: "message",
-              status: "completed",
-              content: [{ type: "output_text", text: '{"facts":[]}' }],
-            },
-          ],
-          usage: { input_tokens: 17, output_tokens: 3, total_tokens: 20 },
-        });
+        throw new Error("Unexpected request outside external billing");
       };
-      assert.deepEqual(
-        await completion(runtime, {
-          projectId: "p",
-          prompt: "input",
-          system: "instruction",
-          schema: { type: "object" },
-        }),
-        { facts: [] },
-      );
+      await recordUsage(runtime, "p", body.usage, "fact_extraction");
       assert.equal(authCorrect, true);
-      assert.equal(modelCalls, 1);
       assert.equal(billingCalls, 1);
       assert.deepEqual(counters(calls), [
         ["llm_input_tokens", 17],

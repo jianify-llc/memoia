@@ -1,7 +1,8 @@
-import { createRuntime, usesOpenAIBaseUrl, type RuntimeEnv } from "./runtime.js";
+import { createRuntime, usesOpenAIBaseUrl, type Runtime, type RuntimeEnv } from "./runtime.js";
 import { SourceError } from "./errors.js";
 
 export interface CloudflareRuntimeEnv extends RuntimeEnv {
+  waitUntil?: Runtime["waitUntil"];
   HYPERDRIVE?: { connectionString: string };
   MAINTENANCE_QUEUE?: Pick<CloudflareBindings["MAINTENANCE_QUEUE"], "send">;
   OPENAI_TRANSPORT?: string;
@@ -29,7 +30,8 @@ export function createCloudflareRuntime(
     );
   const runtime = createRuntime(
     Object.assign(Object.create(env), {
-      DATABASE_URL: env.HYPERDRIVE?.connectionString ?? env.DATABASE_URL,
+      // Shadow a Node URL on the inherited environment. Workers require Hyperdrive.
+      DATABASE_URL: env.HYPERDRIVE?.connectionString,
     }),
     signal,
   );
@@ -70,5 +72,6 @@ export function createCloudflareRuntime(
         await queue.send(message, { delaySeconds });
       },
     };
+  runtime.waitUntil = env.waitUntil;
   return runtime;
 }

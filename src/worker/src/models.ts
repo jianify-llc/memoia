@@ -39,8 +39,16 @@ export async function getConfig(
   projectId: string,
   sql: Sql = runtime.db,
 ): Promise<ModelConfig> {
+  return (await getConfigSnapshot(runtime, projectId, sql)).config;
+}
+
+export async function getConfigSnapshot(
+  runtime: Runtime,
+  projectId: string,
+  sql: Sql = runtime.db,
+): Promise<{ config: ModelConfig; stored: string | null }> {
   const base = readServiceConfig(runtime.env.MEMOIA_CONFIG);
-  const row = await sql.query(
+  const row = await sql.query<{ profile_config: string | null }>(
     "SELECT profile_config FROM memoia.projects WHERE project_id=$1",
     [projectId],
   );
@@ -55,7 +63,7 @@ export async function getConfig(
       : null) ??
     base.language ??
     "en";
-  return {
+  const effective: ModelConfig = {
     llm_model: config.llm_model ?? base.best_llm_model ?? "gpt-6-luna",
     reasoning_effort:
       config.reasoning_effort ?? base.llm_reasoning_effort ?? "high",
@@ -76,6 +84,7 @@ export async function getConfig(
     source_context_window_tokens: base.source_context_window_tokens ?? 131072,
     source_output_reserve_tokens: base.source_output_reserve_tokens ?? 32768,
   };
+  return { config: effective, stored };
 }
 function resolveTopics(
   base: Record<string, any>,
@@ -257,21 +266,15 @@ export async function recordUsage(
   );
   try {
     if (!complete) {
-      await runtime.db.transaction((tx) =>
-        addUsage(tx, projectId, { llm_usage_unknown: 1 }),
-      );
+      await addUsage(runtime.db, projectId, { llm_usage_unknown: 1 });
     } else {
-      await runtime.db.transaction(async (tx) => {
-        await addUsage(tx, projectId, {
-          llm_input_tokens: Number(input),
-          llm_output_tokens: Number(output),
-        });
+      await addUsage(runtime.db, projectId, {
+        llm_input_tokens: Number(input),
+        llm_output_tokens: Number(output),
       });
       if (!runtime.env.ADMIN_URL) {
         try {
-          await runtime.db.transaction((tx) =>
-            debitBilling(tx, projectId, Number(input), Number(output)),
-          );
+          await debitBilling(runtime.db, projectId, Number(input), Number(output));
         } catch {
           console.warn(
             JSON.stringify({
@@ -333,166 +336,6 @@ export async function recordUsage(
       "Provider exceeded the single-response output budget",
       502,
     );
-}
-export async function completion(
-  runtime: Runtime,
-  options: {
-    projectId: string;
-    prompt: string;
-    system: string;
-    schema: unknown;
-    model?: string;
-    effort?: string;
-    temperature?: number;
-    images?: Array<{ message_id: string; url: string }>;
-  },
-): Promise<unknown> {
-  assertRunning(runtime, 1000);
-  const config = await getConfig(runtime, options.projectId);
-  const effort =
-    options.effort ?? config.fact_reasoning_effort ?? config.reasoning_effort;
-  const cacheEnabled = supportsPromptCache(
-    runtime,
-    options.model ?? config.fact_llm_model ?? config.llm_model,
-  );
-  const content: Record<string, unknown>[] = [
-    {
-      role: "developer",
-      content: [
-        {
-          type: "input_text",
-          text: options.system,
-          ...(cacheEnabled
-            ? { prompt_cache_breakpoint: { mode: "explicit", ttl: "12h" } }
-            : {}),
-        },
-      ],
-    },
-    {
-      role: "developer",
-      content: [{ type: "input_text", text: options.prompt }],
-    },
-  ];
-  for (const image of options.images ?? [])
-    content.push({
-      role: "user",
-      content: [
-        {
-          type: "input_text",
-          text: `Source image: ${JSON.stringify({ message_id: image.message_id })}`,
-        },
-        { type: "input_image", image_url: image.url, detail: "auto" },
-      ],
-    });
-  const body = {
-    model: options.model ?? config.fact_llm_model ?? config.llm_model,
-    input: content,
-    store: false,
-    truncation: "disabled",
-    reasoning: { effort, mode: "standard" },
-    service_tier: "default",
-    max_output_tokens: config.source_output_reserve_tokens,
-    ...(effort === "none" &&
-    (options.temperature ?? config.fact_temperature) !== undefined
-      ? { temperature: options.temperature ?? config.fact_temperature }
-      : {}),
-    text: {
-      verbosity: "low",
-      format: {
-        type: "json_schema",
-        name: "MessageExtraction",
-        strict: true,
-        schema: options.schema,
-      },
-    },
-    ...(cacheEnabled
-      ? { prompt_cache_options: { mode: "explicit", ttl: "30m" } }
-      : {}),
-  };
-  const client = provider(runtime);
-  let response: OpenAI.Responses.Response;
-  try {
-    response = await inSpan(
-      runtime.tracing,
-      "memoia.model",
-      { kind: "fact_extraction", operation_id: runtime.operationId },
-      () =>
-        client.post<OpenAI.Responses.Response>("/responses", {
-          body,
-          signal: runtime.signal,
-        }),
-    );
-  } catch (error) {
-    await recordUsage(
-      runtime,
-      options.projectId,
-      errorUsage(error),
-      "fact_extraction",
-    );
-    const permanent =
-      error instanceof OpenAI.APIError &&
-      [400, 401, 403, 404, 422].includes(error.status ?? 0);
-    throw new SourceError(
-      permanent ? "model_configuration_rejected" : "model_unavailable",
-      permanent
-        ? "Model configuration was rejected"
-        : "Model request did not complete",
-      503,
-      !permanent,
-    );
-  }
-  await recordUsage(
-    runtime,
-    options.projectId,
-    response.usage,
-    "fact_extraction",
-    {
-      model: response.model,
-      service_tier: response.service_tier,
-      requested_service_tier: "default",
-    },
-  );
-  if (
-    response.status !== "completed" ||
-    response.error ||
-    response.incomplete_details
-  )
-    throw new SourceError(
-      "model_unavailable",
-      "Model did not complete",
-      503,
-      true,
-    );
-  const parts: string[] = [];
-  for (const item of response.output) {
-    if (item.type === "reasoning") continue;
-    if (item.type !== "message" || item.status !== "completed")
-      throw new SourceError(
-        "invalid_model_output",
-        "Unexpected model output",
-        502,
-        true,
-      );
-    for (const part of item.content) {
-      if (part.type !== "output_text")
-        throw new SourceError(
-          "invalid_model_output",
-          "Model refused extraction",
-          502,
-        );
-      parts.push(part.text);
-    }
-  }
-  try {
-    return JSON.parse(parts.join(""));
-  } catch {
-    throw new SourceError(
-      "invalid_model_output",
-      "Model output is not structured data",
-      502,
-      true,
-    );
-  }
 }
 type EmbeddingPhase = "query" | "document";
 function embeddingError(status?: number): SourceError {
@@ -557,12 +400,15 @@ export async function embeddings(
   projectId: string,
   texts: string[],
   phase: EmbeddingPhase = "document",
+  config?: ModelConfig,
 ): Promise<number[][]> {
   return inSpan(
     runtime.tracing,
     "memoia.model",
     { kind: "embedding", phase, operation_id: runtime.operationId },
-    () => embed(runtime, projectId, texts, phase),
+    async () => texts.length
+      ? embed(runtime, projectId, texts, phase, config ?? await getConfig(runtime, projectId))
+      : [],
   );
 }
 
@@ -571,9 +417,8 @@ async function embed(
   projectId: string,
   texts: string[],
   phase: EmbeddingPhase,
+  config: ModelConfig,
 ): Promise<number[][]> {
-  if (!texts.length) return [];
-  const config = await getConfig(runtime, projectId);
   if (
     !["openai", "jina", "ollama"].includes(config.embedding_provider) ||
     !Number.isSafeInteger(config.embedding_batch_size) ||
@@ -720,11 +565,9 @@ async function embed(
     }
   }
   try {
-    await runtime.db.transaction((tx) =>
-      addUsage(tx, projectId, {
-        embedding_tokens: countTokens(texts.join("\n")),
-      }),
-    );
+    await addUsage(runtime.db, projectId, {
+      embedding_tokens: countTokens(texts.join("\n")),
+    });
   } catch {
     console.warn(
       JSON.stringify({

@@ -15,8 +15,8 @@ importers:
         specifier: 2.1.6
         version: 2.1.6(hono@4.13.16)
       '@jianify/legato':
-        specifier: file:vendor/jianify-legato-0.1.0.tgz
-        version: file:vendor/jianify-legato-0.1.0.tgz(drizzle-orm@0.45.4(@cloudflare/workers-types@5.20261029.1)(@types/pg@8.15.6)(pg@8.23.1))
+        specifier: file:vendor/jianify-legato-0.1.0-renew.4.tgz
+        version: file:vendor/jianify-legato-0.1.0-renew.4.tgz(drizzle-orm@0.45.4(@cloudflare/workers-types@5.20261029.1)(@types/pg@8.15.6)(pg@8.23.1))
       '@openai/agents-core':
         specifier: 0.21.0
         version: 0.21.0(undici@7.30.1)(ws@8.21.0)(zod@4.6.7)
@@ -609,9 +609,9 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@jianify/legato@file:vendor/jianify-legato-0.1.0.tgz':
-    resolution: {integrity: sha512-IdGRqlR8tU2mwWlsRoR/UsIGX1hBbEWqNrwmVSiHsRXkRQWlS8Fc3Ky+bpdI+NzICY800VMIWNDXWzLnyBzYVg==, tarball: file:vendor/jianify-legato-0.1.0.tgz}
-    version: 0.1.0
+  '@jianify/legato@file:vendor/jianify-legato-0.1.0-renew.4.tgz':
+    resolution: {integrity: sha512-Qtns/C3RkLNZJ5XYGLpFvG4lNFbiaC8ul3UMPg6hzA5/+Xn1fEK7bVHvBIfimciHBOTJ7sR+cfPGfG89VV4TaA==, tarball: file:vendor/jianify-legato-0.1.0-renew.4.tgz}
+    version: 0.1.0-renew.4
     peerDependencies:
       drizzle-orm: '>=0.45.4 <0.46'
 
@@ -1409,7 +1409,7 @@ snapshots:
   '@img/sharp-win32-x64@0.35.5':
     optional: true
 
-  '@jianify/legato@file:vendor/jianify-legato-0.1.0.tgz(drizzle-orm@0.45.4(@cloudflare/workers-types@5.20261029.1)(@types/pg@8.15.6)(pg@8.23.1))':
+  '@jianify/legato@file:vendor/jianify-legato-0.1.0-renew.4.tgz(drizzle-orm@0.45.4(@cloudflare/workers-types@5.20261029.1)(@types/pg@8.15.6)(pg@8.23.1))':
     dependencies:
       drizzle-orm: 0.45.4(@cloudflare/workers-types@5.20261029.1)(@types/pg@8.15.6)(pg@8.23.1)
 

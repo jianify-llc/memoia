@@ -7,6 +7,7 @@ import {
   retryPolicies,
   tool,
   type ModelRequest,
+  type ModelSettings,
 } from "@openai/agents-core";
 import { OpenAIResponsesModel } from "@openai/agents-openai";
 import OpenAI from "openai";
@@ -237,7 +238,7 @@ export class MaintenanceModel extends OpenAIResponsesModel {
     request: ModelRequest,
     stream: false,
   ): Promise<OpenAI.Responses.Response> {
-    await this.context.active();
+    this.context.active();
     let next = request;
     if (this.previous) {
       const calls = this.previous.output.filter(
@@ -275,7 +276,7 @@ export class MaintenanceModel extends OpenAIResponsesModel {
     }
     const budget = this.continuation?.budget;
     for (const tier of ["flex", "default"] as const) {
-      await this.context.active();
+      this.context.active();
       const timeout = budget?.requestTimeout(600_000, 0);
       const requestTimeout =
         timeout === undefined ? undefined : AbortSignal.timeout(timeout);
@@ -357,7 +358,7 @@ export class MaintenanceModel extends OpenAIResponsesModel {
               502,
             );
         }
-        await this.context.active();
+        this.context.active();
         this.previous = response;
         console.info(
           JSON.stringify({
@@ -651,7 +652,7 @@ export async function runMaintenance(
   function stage(kind: "profiles" | "events") {
     return tool({
       name: kind === "profiles" ? "stage_profile" : "stage_event",
-      description: `Save proposed ${kind} in this execution. Use upsert with complete current supporting Fact references; keep requires the full target and valid original support read; remove deletes the target at final atomic commit. Errors must be resolved before completion.`,
+      description: `Save proposed ${kind} in this execution. Use upsert with complete current supporting Fact references; keep requires the full target and valid original support read; remove marks the target for deletion when the plan is published. Errors must be resolved before completion.`,
       parameters: z.object({
         changes: z
           .array(
@@ -719,7 +720,11 @@ export async function runMaintenance(
       store: true,
       truncation: "disabled",
       reasoning: {
-        effort: context.config.reasoning_effort as "high",
+        effort:
+          context.effortOverride ??
+          (context.config.reasoning_effort as NonNullable<
+            ModelSettings["reasoning"]
+          >["effort"]),
         mode: "standard",
       },
       text: { verbosity: "low" },

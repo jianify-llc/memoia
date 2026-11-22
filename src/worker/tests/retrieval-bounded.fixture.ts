@@ -2,12 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Database } from "../src/db";
-import { search } from "../src/retrieval";
+import { context, search } from "../src/retrieval";
 
 const id = (n: number) =>
   `00000000-0000-0000-0000-${n.toString(16).padStart(12, "0")}`;
 
-test("search ranks and bounds associated candidates before loading evidence", async () => {
+test("search ranks and bounds associated candidates before loading evidence", async (t) => {
   const db = new Database(process.env.MEMOIA_TEST_DATABASE_URL!);
   const projectId = `bounded_${randomUUID()}`,
     userId = randomUUID(),
@@ -27,9 +27,8 @@ test("search ranks and bounds associated candidates before loading evidence", as
   });
   const runtime = {
     db: {
-      query: db.query.bind(db),
-      transaction: (fn: any, options: any) =>
-        db.transaction((tx) => fn(tracked(tx)), options),
+      ...tracked(db),
+      transaction: () => assert.fail("retrieval must use standalone SQL"),
     },
     env: { MEMOIA_CONFIG: '{"enable_event_embedding":false}' },
   } as any;
@@ -42,21 +41,22 @@ test("search ranks and bounds associated candidates before loading evidence", as
       userId,
       projectId,
     ]);
+    const otherBlob = randomUUID();
     await db.query(
-      "INSERT INTO memoia.memory_sources(user_id,project_id,source_id) VALUES($1,$2,'s')",
+      "INSERT INTO memoia.memory_sources(user_id,project_id,source_id) VALUES($1,$2,'s'),($1,$2,'other')",
       [userId, projectId],
     );
     await db.query(
-      "INSERT INTO memoia.memory_messages(user_id,project_id,source_id,message_id,content_hash,role,occurred_at) VALUES($1,$2,'s','m',repeat('a',64),'user',now())",
+      "INSERT INTO memoia.memory_messages(user_id,project_id,source_id,message_id,content_hash,role,occurred_at) VALUES($1,$2,'s','m',repeat('a',64),'user','2026-01-01'),($1,$2,'other','m',repeat('a',64),'user','2026-02-01')",
       [userId, projectId],
     );
     await db.query(
-      "INSERT INTO memoia.memory_blobs(id,user_id,project_id,source_id,message_ids,status) VALUES($3,$1,$2,'s','[\"m\"]','active')",
-      [userId, projectId, blob],
+      "INSERT INTO memoia.memory_blobs(id,user_id,project_id,source_id,message_ids,status) VALUES($3,$1,$2,'s','[\"m\"]','active'),($4,$1,$2,'other','[\"m\"]','active')",
+      [userId, projectId, blob, otherBlob],
     );
     await db.query(
-      "INSERT INTO memoia.memory_facts(id,user_id,project_id,blob_id,content,support_groups,occurred_at) SELECT x,$1,$2,$3,'hiking','[[\"m\"]]',now() FROM unnest($4::uuid[]) x",
-      [userId, projectId, blob, [strong, weak]],
+      "INSERT INTO memoia.memory_facts(id,user_id,project_id,blob_id,content,support_groups,occurred_at) VALUES($3,$1,$2,$4,'hiking','[[\"m\"]]',now()),($5,$1,$2,$6,'hiking','[[\"m\"]]',now())",
+      [userId, projectId, strong, blob, weak, otherBlob],
     );
     await db.query(
       "INSERT INTO memoia.user_events(id,user_id,project_id,event_data) SELECT ('00000000-0000-0000-0000-' || lpad(to_hex(n),12,'0'))::uuid,$1,$2,'{\"title\":\"event\",\"memoia_v2\":true}'::jsonb FROM generate_series(100,1099) n",
@@ -91,6 +91,9 @@ test("search ranks and bounds associated candidates before loading evidence", as
       },
     );
     assert.equal(result.facts.length, 2);
+    assert.deepEqual(result.facts.map((entry) => entry.evidence.source_messages[0].recorded_at.slice(0, 10)), ["2026-01-01", "2026-02-01"]);
+    const evidenceReads = reads.filter(({ sql }) => sql.includes("JOIN memoia.memory_messages"));
+    assert.ok(evidenceReads.some(({ count }) => count === 2), "one evidence read covers both Sources");
     assert.equal(result.events.length, 10);
     assert.equal(result.profiles.length, 10);
     assert.equal(result.events[0].id, late);
@@ -117,6 +120,37 @@ test("search ranks and bounds associated candidates before loading evidence", as
       x.sql.startsWith("SELECT event_id,fact_id"),
     )!;
     assert.equal((edges.values[2] as string[]).length, 50);
+
+    const coordinates = Array(1536).fill(0.01);
+    const vector = JSON.stringify(coordinates);
+    const legacy = randomUUID();
+    await db.query("UPDATE memoia.memory_facts SET embedding=$1 WHERE id=$2 AND project_id=$3", [vector, strong, projectId]);
+    await db.query(
+      "INSERT INTO memoia.user_events(id,user_id,project_id,event_data,embedding) VALUES($1,$2,$3,$4,$5)",
+      [legacy, userId, projectId, { event_tip: "A legacy outing" }, vector],
+    );
+    const embeddingCall = t.mock.method(globalThis, "fetch", async () => Response.json({
+      data: [{ index: 0, embedding: coordinates }],
+    }));
+    const vectorRuntime = {
+      ...runtime,
+      env: { OPENAI_API_KEY: "fixture-only" },
+      deadline: Date.now() + 30_000,
+      db: {
+        query: db.query.bind(db),
+        vectorSchema: db.vectorSchema.bind(db),
+        transaction: () => assert.fail("semantic retrieval must use standalone SQL"),
+      },
+    };
+    const scope = { userId, projectId };
+    const query = "no lexical matches for this query";
+    const semantic = await search(vectorRuntime, scope, { query });
+    assert.equal(semantic.facts[0]?.id, strong);
+    assert.ok(semantic.events.some((event) => event.id === legacy));
+    const recalled = await context(vectorRuntime, scope, { query });
+    assert.ok(recalled.entries.some((entry) => entry.includes("hiking")));
+    assert.ok(recalled.entries.includes("A legacy outing"));
+    assert.equal(embeddingCall.mock.callCount(), 2);
   } finally {
     await db.query("DELETE FROM memoia.projects WHERE project_id=$1", [
       projectId,

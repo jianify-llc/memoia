@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@hono/node-server": "2.1.6",
-    "@jianify/legato": "file:vendor/jianify-legato-0.1.0.tgz",
+    "@jianify/legato": "file:vendor/jianify-legato-0.1.0-renew.4.tgz",
     "@openai/agents-core": "0.21.0",
     "@openai/agents-openai": "0.21.0",
     "drizzle-orm": "0.45.4",

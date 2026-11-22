@@ -50,9 +50,9 @@ test(
         data: content ? JSON.parse(content) : null,
       };
     };
+    const project = `p${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    const other = `p${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
     try {
-      const project = `p${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
-      const other = `p${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
       assert.equal(
         (
           await api("POST", "/api/projects", "local-root", {
@@ -122,6 +122,10 @@ test(
           )
         ).status,
         204,
+      );
+      assert.equal(
+        (await db.query("SELECT version FROM memoia.user_profiles WHERE id=$1", [profile.data.id])).rows[0].version,
+        "2",
       );
       const blob = crypto.randomUUID(),
         fact = crypto.randomUUID(),
@@ -260,11 +264,11 @@ test(
       ]);
       const vector = [1, ...Array(1535).fill(0)];
       await db.query(
-        `UPDATE memoia.memory_facts SET embedding=$2::memoia.vector WHERE id=$1`,
+        `UPDATE memoia.memory_facts SET embedding=$2 WHERE id=$1`,
         [fact, `[${vector.join(",")}]`],
       );
       await db.query(
-        `UPDATE memoia.user_events SET embedding=$2::memoia.vector WHERE id=$1`,
+        `UPDATE memoia.user_events SET embedding=$2 WHERE id=$1`,
         [event, `[${vector.join(",")}]`],
       );
       let embeddingCalls = 0;
@@ -365,6 +369,13 @@ test(
       assert.equal(usage.status, 200);
       assert.ok(validators.validateUsage(usage.data));
       assert.equal(usage.data.usages.length, 7);
+      const extendedUsage = await api(
+        "GET",
+        "/api/project/usage?last_days=365",
+        reader,
+      );
+      assert.equal(extendedUsage.status, 200);
+      assert.equal(extendedUsage.data.usages.length, 30);
       assert.equal(
         (
           await api("PATCH", "/api/project/config", reader, {
@@ -417,7 +428,89 @@ test(
         401,
       );
     } finally {
-      await db.end();
+      try {
+        await db.query("DELETE FROM memoia.projects WHERE project_id=ANY($1::text[])", [[project, other]]);
+      } finally {
+        await db.end();
+      }
+    }
+  },
+);
+
+test(
+  "healthcheck reports real role connection exhaustion and traces the recovered backend",
+  { skip: !connection },
+  async () => {
+    const admin = new pg.Client({ connectionString: connection });
+    const role = "probe_" + crypto.randomUUID().replaceAll("-", "");
+    const password = crypto.randomUUID().replaceAll("-", "");
+    const url = new URL(connection!);
+    url.username = role;
+    url.password = password;
+    const holder = new pg.Client({ connectionString: url.href });
+    const attributes: Record<string, unknown> = {};
+    const tracing = {
+      enterSpan(_name: string, callback: (span: unknown) => unknown) {
+        return callback({
+          setAttributes() {},
+          setStatus() {},
+          setAttribute(key: string, value: unknown) {
+            attributes[key] = value;
+          },
+        });
+      },
+      getActiveSpan() {
+        return {
+          setAttributes(values: object) {
+            Object.assign(attributes, values);
+          },
+        };
+      },
+    } as unknown as Tracing;
+    const env = {
+      DATABASE_URL: url.href,
+      OPENAI_API_KEY: "unused",
+      MEMOIA_HEALTHCHECK_DB_TRACE: "true",
+      tracing,
+    };
+    const app = createApp(createRuntime);
+    let created = false;
+    let occupied = false;
+    await admin.connect();
+    try {
+      await admin.query(
+        `CREATE ROLE ${role} LOGIN CONNECTION LIMIT 1 PASSWORD '${password}'`,
+      );
+      created = true;
+      await holder.connect();
+      occupied = true;
+      const rejected = await app.request("/api/healthcheck", {}, env);
+      assert.equal(rejected.status, 503);
+      assert.deepEqual(await rejected.json(), {
+        detail: {
+          code: "database_unavailable",
+          message: "Database temporarily unavailable",
+          retryable: true,
+        },
+      });
+      assert.equal(attributes["db.response.status_code"], "53300");
+
+      await holder.end();
+      occupied = false;
+      const healthy = await app.request("/api/healthcheck", {}, env);
+      assert.equal(healthy.status, 200);
+      assert.deepEqual(await healthy.json(), { status: "ok" });
+      assert.ok(Number.isSafeInteger(attributes["memoia.db.backend_pid"]));
+      assert.ok(
+        Number.isSafeInteger(attributes["memoia.db.backend_started_at_ms"]),
+      );
+    } finally {
+      if (occupied) await holder.end();
+      try {
+        if (created) await admin.query(`DROP ROLE ${role}`);
+      } finally {
+        await admin.end();
+      }
     }
   },
 );

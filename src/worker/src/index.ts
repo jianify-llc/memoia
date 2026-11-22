@@ -8,13 +8,14 @@ import {
 import { consume, reconcile } from "./maintenance.js";
 import { purgeExpiredInputs } from "./facts.js";
 import { inSpan } from "./observability.js";
-import { InactiveUserError } from "./db.js";
+import { InactiveUserError, purgeExpiredUsage } from "./db.js";
 
 const app = createApp(createCloudflareRuntime);
 export default {
   fetch(request: Request, env: CloudflareRuntimeEnv, ctx: ExecutionContext) {
     const scopedEnv = Object.assign(Object.create(env), {
       tracing: ctx.tracing,
+      waitUntil: (work: Promise<void>) => ctx.waitUntil(work),
     });
     const method = ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(
       request.method,
@@ -33,11 +34,14 @@ export default {
   ) {
     for (const message of batch.messages) {
       const runtime = createCloudflareRuntime(
-        Object.assign(Object.create(env), { tracing: ctx?.tracing }),
+        Object.assign(Object.create(env), {
+          tracing: ctx?.tracing,
+          waitUntil: ctx ? (work: Promise<void>) => ctx.waitUntil(work) : undefined,
+        }),
       );
       try {
         const kind =
-          message.body.kind === "user" || message.body.kind === "flush"
+          ["user", "flush", "fact_flush"].includes(message.body.kind)
             ? message.body.kind
             : "unknown";
         await inSpan(runtime.tracing, "memoia.queue", { kind }, () =>
@@ -77,7 +81,7 @@ export default {
     }
   },
   async scheduled(
-    _event: ScheduledController,
+    event: ScheduledController,
     env: CloudflareRuntimeEnv,
     ctx?: ExecutionContext,
   ) {
@@ -86,10 +90,25 @@ export default {
       Object.assign(Object.create(env), { tracing: ctx?.tracing }),
     );
     try {
-      await inSpan(runtime.tracing, "memoia.cron", {}, async () => {
-        await purgeExpiredInputs(runtime);
-        await reconcile(runtime);
-      });
+      if (event.cron === "0 0 * * *") {
+        await inSpan(
+          runtime.tracing,
+          "memoia.cron",
+          { job: "usage_cleanup" },
+          () => purgeExpiredUsage(runtime.db),
+        );
+      } else if (event.cron === "*/5 * * * *") {
+        await inSpan(
+          runtime.tracing,
+          "memoia.cron",
+          { job: "input_cleanup" },
+          () => purgeExpiredInputs(runtime),
+        );
+      } else {
+        await inSpan(runtime.tracing, "memoia.cron", { job: "reconcile" }, () =>
+          reconcile(runtime),
+        );
+      }
     } finally {
       await closeRuntime(runtime);
     }
