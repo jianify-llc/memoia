@@ -42,8 +42,7 @@ staged draft. Each user message in the initial source material needs a decision,
 Messages read from other parts of this Blob can support those decisions.
 Use read_messages, stage_facts and check_facts only when useful. A successful
 finish ends this extraction. Tool calls cannot change source messages or past Facts.
-If a user corrects a past statement, record the correction with current evidence.
-The optional visual_description field contains observed image details, not a quotation or a user assertion. This workflow receives no native images.`;
+If a user corrects a past statement, record the correction with current evidence.`;
 
 class FactSoftYield extends TaskYield {}
 
