@@ -6,11 +6,11 @@ This guide describes the Cloudflare TypeScript runtime and coordinated Test data
 
 Memoia remains an independent Apache-2.0 repository. The Luvel instance is `luvel-memoia-test`; Memoia alone owns the `memoia` schema and `memoia.__drizzle_migrations`. Luvel migrations do not manage this schema. User UUID values are shared, without cross-schema foreign keys or automatic account cascades.
 
-Luvel's existing memory Task calls the same SDK synchronously through Service Binding. Its remaining deadline is sent as `X-Memoia-Deadline-Ms`; the service clamps it to its own budget. Lost acknowledgements are resolved through the original Operation. Fact imports have no second Queue.
+Luvel appends messages through the SDK and Service Binding. The Session ID identifies its Blob. After the Session ends, a flush fixes the unprocessed range and registers a Fact task. Luvel follows the original receipt, polling every five minutes while it is pending. A committed append acknowledges staging only. It does not acknowledge Fact extraction.
 
-Only unified maintenance uses `luvel-memoia-maintenance-test`. Queue messages carry a user wakeup or original flush identity; `memoia.queue_tasks` owns execution, while Operation and Blob retain domain identity and receipts. Delayed wakes preserve the 30-second quiet/120-second sealing rule, with a one-minute reconciliation fallback. One user has one effective Loop; consumer concurrency and tool concurrency start at four. A slice yields at a safe boundary after twelve minutes and loses ordinary write rights at fourteen; a yield does not consume the four-failure budget. Provider call timeout remains ten minutes for maintenance and two minutes for Fact, bounded by the applicable deadline. Compaction retains the frozen 256000-token threshold.
+Fact extraction and unified Profile/Event maintenance share the `luvel-memoia-maintenance-test` queue. Queue messages carry a wakeup or original flush identity. Legato owns execution in `memoia.queue_tasks`; Operations and Blobs retain domain receipts and batch membership. Delayed maintenance wakes preserve the 30-second quiet and 120-second maximum sealing rules, with a one-minute reconciliation fallback. The model wait runs outside SQL transactions.
 
-Tool proposals are committed together. The task checkpoint retains the last complete native tool round, short references and bounded decision state; it does not serialize the SDK session or conversation history. A completed Agent checkpoint resumes at embedding and commit. Resume validates the fixed batch, configuration, prompt, current read revisions and active user. Redis writing coordination is replaced by `memory_user_states.generation/version/writer_lease_until`: this user lease protects concurrent memory writes, while the task lease fences ownership of a maintenance slice. SQL uses short transactions, including local search-path configuration for Hyperdrive transaction pooling. No transaction waits for a model.
+A task slice yields at a safe boundary after twelve minutes and must settle before fourteen. The checkpoint retains completed work and the native response ID used for continuation. Resumption checks the fixed range and current evidence. Profile/Event writes commit independently with version checks, and successful writes are retained when a later step fails. Legato confirms final task ownership. Fact publication commits its facts, index and receipt together.
 
 ## Configuration and readiness
 
@@ -24,7 +24,7 @@ Tool proposals are committed together. The task checkpoint retains the last comp
 | `ACCESS_TOKEN` | Existing root administration credential; not a public frontend value. Project keys remain in PostgreSQL. |
 | `ADMIN_URL`, `ADMIN_TOKEN` | Optional existing external billing endpoint and its Bearer secret; preserve their Python names during migration. Store the token as a secret. |
 | `MEMOIA_CONFIG` | Model, reasoning, embedding, budget and topic settings as JSON, including supported gateway headers/query. Use a secret binding if a gateway header is sensitive; provider keys and database credentials retain their separate bindings. |
-| `MAINTENANCE_QUEUE` | The dedicated maintenance notification Queue. |
+| `MAINTENANCE_QUEUE` | The notification queue for Fact extraction and unified maintenance. |
 
 Project model, reasoning, Fact overrides, language, topics and tags remain in project configuration. Prompt files are imported from the Worker prompt source; fixed instructions are sent every round. Public 12h and implicit 30m boundaries use the existing model/endpoint capability gate. Native `previous_response_id` carries tool continuations; no Session or persistent local model-history table is added.
 

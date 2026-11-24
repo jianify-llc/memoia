@@ -65,7 +65,7 @@ Fact.created_at 是首次数据库插入时间，updated_at 是最近修改时�
 
 人工编辑保留原 Fact ID、原 Blob 和来源归属；支持组只能使用原 Blob 内未删除的消息，每组至少包含一条用户消息，助手消息可提供必要上下文。新幂等 Operation／固定 Blob 使用 kind=correct，内部 Fact 变更为 updated 或 deleted；它是定点修正，不是新增历史陈述或证据迁移，也不建立纠正图。任何实际编辑均推进 Fact revision 和 updated_at，同事务更新直接索引、清理旧画像历史并登记维护。Loop 只整理 Profile/Event，必须读取当前 Fact；编辑前的读集不能提交旧版本结果。
 
-删除消息及人工修改、删除 Fact 都是同步请求。改动、派生维护登记及完成回执在一次短事务提交。提交前失败时，调用方保留原请求和原幂等键重试。请求结果未知时，先按键查询完成回执，查不到可重交原请求。同键不同请求返回冲突。人工 Fact 请求每次实际写入仍核对 expected_revision。
+删除消息及人工修改、删除 Fact 都是同步请求。改动、派生维护登记及完成回执在一次短事务提交。请求结果未知时，先按原幂等键查询。已完成就确认，回执缺失或未完成时按原键重交原请求。同键不同请求返回冲突。人工 Fact 请求每次实际写入仍核对 expected_revision。
 
 请求最大 2 MiB，每批最多 1,000 条完整消息。模型拒绝超出上下文容量的抽取请求时，原 Fact flush 回执记录 `fact_model_input_rejected`。旧配置 `source_max_input_tokens` 和 `source_context_window_tokens` 仍可读取，抽取输出由 `source_output_reserve_tokens` 限制。固定抽取指令与 `source_material` 分开，原文和 `visual_description` 按用户资料发送。参数和鉴权错误不会自动重试。embedding 每批默认 64，严格校验索引、条数、维度及有限数值。
 
@@ -154,7 +154,7 @@ Fact 人工编辑、删除或时间证据变化时同步清理相关历史画像
 - POST users/{uid}/blobs/{blob_id}/flush：以同一 Session Blob ID 提交 1–32 个已暂存的追加 Operation，固定本次 Fact 范围。处理中新增消息属于后续范围。提交前已有段过期时返回 409 expired_append_inputs 和 append_operation_ids，整份请求未受理，有效段可使用原追加回执另行封批。
 - GET users/{uid}/blobs/{blob_id}、sources/{source_id}：有界来源/批次及当前证据。
 - POST users/{uid}/flush：稳定 idempotency_key，返回固定集合及 kind=flush 的 Operation。
-- GET users/{uid}/operations/by-key/{key}、operations/{id}、POST operations/{id}/retry：查询或恢复原操作。Fact flush 可恢复失败复用原范围及仍有效的检查点；输入过期后，原回执持续返回 input_required。
+- GET users/{uid}/operations/by-key/{key}、operations/{id}：查询原回执。POST operations/{id}/retry 仅恢复 Fact flush 和维护 flush。Fact flush 复用原范围及仍有效的检查点；输入过期后，原回执持续返回 input_required。
 - GET users/{uid}/maintenance：未封闭 Blob 数量及最近 flush 状态、错误、尝试次数和固定 Blob ID。
 - DELETE sources/{source_id}/messages：删除消息贡献；DELETE events/{id} 与 DELETE users/{uid} 独立。
 - PUT users/{uid}/facts/{fact_id}、DELETE users/{uid}/facts/{fact_id}：write scope；稳定 idempotency_key、expected_revision 和人工 reason，成功后返回 kind=correct 的完成 Operation。编辑提交完整 content/subject/reporter/certainty/support_groups/fact_time，证据遵循上文的原 Blob 支持组约束；原文已清除，身份和结构校验不能证明编辑内容语义为真。版本冲突先读当前 Fact，再确认修改。

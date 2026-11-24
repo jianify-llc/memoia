@@ -432,6 +432,9 @@ test("fixed imports, evidence retraction, corrections and forgetting commit atom
     );
     const retract = await getOperation(runtime, scope, { key: deleteInput.idempotency_key });
     assert.equal(retract.status, "completed");
+    await assert.rejects(retryOperation(runtime, scope, retract.operation_id), {
+      code: "operation_kind_unsupported",
+    });
     assert.deepEqual(await deleteMessages(runtime, scope, sourceId, deleteInput), retract);
     await assert.rejects(
       deleteMessages(runtime, scope, sourceId, { ...deleteInput, message_ids: ["b"] }),
@@ -693,8 +696,6 @@ test("old receipts remain readable and only staged imports accept new input", as
     const receipt = await getOperation(runtime, scope, { operationId: opId });
     assert.equal(receipt.status, "completed");
     assert.deepEqual(receipt.result, output);
-    assert.equal((await retryOperation(runtime, scope, opId)).operation_id, opId);
-    await db.query("UPDATE memoia.memory_operations SET status='processing' WHERE id=$1", [opId]);
     await assert.rejects(retryOperation(runtime, scope, opId),
       (err: any) => err.code === "operation_kind_unsupported");
     await assert.rejects(stageImport(runtime, scope, request),

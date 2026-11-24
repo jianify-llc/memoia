@@ -1272,7 +1272,7 @@ export async function retryOperation(
 ) {
   const op = (
     await runtime.db.query(
-      "SELECT o.*,b.external_id FROM memoia.memory_operations o LEFT JOIN memoia.memory_blobs b ON b.id=o.blob_id WHERE o.id=$1 AND o.user_id=$2 AND o.project_id=$3",
+      "SELECT kind FROM memoia.memory_operations WHERE id=$1 AND user_id=$2 AND project_id=$3",
       [operationId, scope.userId, scope.projectId],
     )
   ).rows[0];
@@ -1282,27 +1282,13 @@ export async function retryOperation(
     const { retryFactFlush } = await import("./fact-flush");
     return retryFactFlush(runtime, scope, operationId);
   }
-  if (op.kind === "append" || op.fact_flush_id || op.status === "staged")
-    return publicOperation(op);
   if (op.kind === "flush") {
     const { retryFlush } = await import("./maintenance");
     return retryFlush(runtime, scope, operationId);
   }
-  if (op.kind === "import") {
-    if (op.status === "completed") return publicOperation(op);
-    throw new SourceError(
-      "operation_kind_unsupported",
-      "Synchronous imports are retired",
-      409,
-      false,
-    );
-  }
-  if (op.status === "completed") return publicOperation(op);
-  if (op.kind === "retract" || op.kind === "correct")
-    throw new SourceError("operation_kind_unsupported", "Retry the original request with the same idempotency key", 409);
   throw new SourceError(
     "operation_kind_unsupported",
-    "Operation kind cannot be retried",
+    "Only Fact and maintenance flush tasks can be retried",
     409,
   );
 }
