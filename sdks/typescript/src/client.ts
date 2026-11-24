@@ -357,8 +357,11 @@ export class MemoiaClient {
   }
 
   updateEvent(userId: string, eventId: string, input: EventPatch, options?: RequestOptions): Promise<void> {
-    if (!validators.validateEventPatch(input)) throw new MemoiaError("INVALID_INPUT", null, false);
-    return this.request("PATCH", `${this.userPath(userId)}/events/${segment(eventId)}`, (value) => value === undefined, options, input);
+    const patch = input && typeof input === "object" && !Array.isArray(input)
+      ? Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined))
+      : input;
+    if (!validators.validateEventPatch(patch)) throw new MemoiaError("INVALID_INPUT", null, false);
+    return this.request("PATCH", `${this.userPath(userId)}/events/${segment(eventId)}`, (value) => value === undefined, options, patch);
   }
 
   getConfig(options?: RequestOptions): Promise<ProfileConfig> {

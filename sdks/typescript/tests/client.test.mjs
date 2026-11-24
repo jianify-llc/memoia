@@ -32,11 +32,12 @@ it("writes editable Event fields and reads a single Event or Profile", async () 
   const input = { content: "Visited the park.", title: null };
   assert.deepEqual(await api.addEvent(user, input), { id: eventId });
   const patch = { title: null };
-  await api.updateEvent(user, eventId, patch);
+  await api.updateEvent(user, eventId, { ...patch, summary: undefined });
   assert.deepEqual(await api.getEvent(user, eventId), event);
   assert.deepEqual(await api.getProfile(user, eventId), profile);
   assert.throws(() => api.addEvent(user, { ...input, fact_ids: [eventId] }), { code: "INVALID_INPUT" });
   assert.throws(() => api.updateEvent(user, eventId, {}), { code: "INVALID_INPUT" });
+  assert.throws(() => api.updateEvent(user, eventId, { title: undefined }), { code: "INVALID_INPUT" });
   assert.throws(() => api.updateEvent(user, eventId, { content: null }), { code: "INVALID_INPUT" });
   assert.deepEqual(calls, [
     ["POST", `/api/users/${user}/events`, input],
