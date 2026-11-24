@@ -23,6 +23,61 @@ const fact = {
   occurred_at: date,
 };
 
+test("direct queries reject an impossible response budget before reading candidates", async () => {
+  let reads = 0;
+  const runtime = {
+    db: {
+      query: async () => {
+        reads++;
+        return { rows: [] };
+      },
+    },
+  } as unknown as Runtime;
+  for (const query of [queryFacts, queryEvents, queryProfiles]) {
+    await assert.rejects(query(runtime, scope, { max_token_size: 1 }), {
+      code: "query_budget_too_small",
+      status: 422,
+    });
+  }
+  assert.equal(reads, 0);
+});
+
+test("facts sharing a Source index its message observations once", async () => {
+  const page = ids.slice(0, 20);
+  let observationsRead = 0;
+  const query = async (sql: string) => {
+    if (sql.startsWith("SELECT f.id")) return { rows: page.map((id) => ({ id })) };
+    if (sql.startsWith("SELECT f.*")) {
+      return {
+        rows: page.map((id, i) => ({ ...fact, id, support_groups: [[`m${i}`]] })),
+      };
+    }
+    if (sql.includes("JOIN memoia.memory_messages")) {
+      return {
+        rows: page.map((_, i) => ({
+          source_id: "source",
+          get message_id() {
+            observationsRead++;
+            return `m${i}`;
+          },
+          occurred_at: date,
+        })),
+      };
+    }
+    throw new Error(sql);
+  };
+  const runtime = { db: { query } } as unknown as Runtime;
+  const result = await queryFacts(runtime, scope, {
+    limit: page.length,
+    max_token_size: 10_000,
+  });
+  assert.deepEqual(
+    result.facts.map(({ evidence }) => evidence.source_messages),
+    page.map((_, i) => [{ message_id: `m${i}`, recorded_at: date, time_zone: null }]),
+  );
+  assert.equal(observationsRead, page.length);
+});
+
 test("event pages skip filtered and oversized entries, preserve evidence, and stop at limit", async () => {
   const loaded: string[][] = [];
   const query = async (sql: string, values: any[] = []) => {

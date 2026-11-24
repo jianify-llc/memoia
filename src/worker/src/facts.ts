@@ -21,6 +21,7 @@ import {
   evidenceTime,
   validateFactTime,
   type SourceMessage,
+  type SourceObservation,
   type ExtractedFact,
   validateFacts,
   retainedGroups,
@@ -192,12 +193,15 @@ export async function getSource(
   const ids = [...new Set(selected.flatMap((f) => f.support_groups.flat()))];
   const observations = ids.length
     ? (
-        await runtime.db.query(
+        await runtime.db.query<SourceObservation>(
           `SELECT message_id,to_char(occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US') || 'Z' AS occurred_at,time_zone FROM memoia.memory_messages WHERE user_id=$1 AND project_id=$2 AND source_id=$3 AND message_id=ANY($4::text[])`,
           [...params, ids],
         )
       ).rows
     : [];
+  const observationsById = new Map(
+    observations.map((message) => [message.message_id, message]),
+  );
   return {
     ...source.rows[0],
     message_ids: messages.rows.slice(0, limit).map((m) => m.message_id),
@@ -222,7 +226,7 @@ export async function getSource(
       fact_time: f.fact_time,
       source_messages: sourceObservations(
         f.support_groups,
-        observations as any,
+        observationsById,
       ),
     })),
     next_message_offset:

@@ -70,26 +70,33 @@ export function renderSearchFact(
   return `${content}\n[Event time: ${label}; precision: ${time.precision}]`;
 }
 
+export type SourceObservation = {
+  message_id: string;
+  occurred_at: string | Date | null;
+  time_zone?: string | null;
+};
+
 export function sourceObservations(
   groups: string[][],
-  messages: {
-    message_id: string;
-    occurred_at: string | Date | null;
-    time_zone?: string | null;
-  }[],
+  messages: ReadonlyMap<string, SourceObservation> | undefined,
 ) {
-  const ids = new Set(groups.flat());
-  return messages
-    .filter((m) => ids.has(m.message_id) && m.occurred_at != null)
-    .sort((a, b) => a.message_id.localeCompare(b.message_id))
-    .map((m) => ({
-      message_id: m.message_id,
-      recorded_at:
-        m.occurred_at instanceof Date
-          ? m.occurred_at.toISOString()
-          : m.occurred_at,
-      time_zone: m.time_zone ?? null,
-    }));
+  if (!messages?.size) return [];
+  return [...new Set(groups.flat())]
+    .sort((a, b) => a.localeCompare(b))
+    .flatMap((id) => {
+      const message = messages.get(id);
+      if (message?.occurred_at == null) return [];
+      return [
+        {
+          message_id: id,
+          recorded_at:
+            message.occurred_at instanceof Date
+              ? message.occurred_at.toISOString()
+              : message.occurred_at,
+          time_zone: message.time_zone ?? null,
+        },
+      ];
+    });
 }
 
 export interface SourceMessage {

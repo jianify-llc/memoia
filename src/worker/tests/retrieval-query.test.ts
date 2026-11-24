@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { queryFacts } from "../src/retrieval";
+import { queryFacts, search } from "../src/retrieval";
 import type { Runtime } from "../src/runtime";
 
 const userId = "00000000-0000-0000-0000-000000000001";
@@ -68,7 +68,6 @@ test("fact query scopes both ranking and evidence to one project and honors excl
 });
 
 test("search without events never reads legacy stories or event associations", async () => {
-  const { search } = await import("../src/retrieval");
   const calls: Array<{ sql: string; values: unknown[] }> = [];
   const query = async (sql: string, values: unknown[] = []) => {
     calls.push({ sql, values });
@@ -130,6 +129,16 @@ test("search without events never reads legacy stories or event associations", a
   assert.equal(
     calls.some((c) => c.sql.includes("memoia.memory_event_facts")),
     false,
+  );
+});
+
+test("search rejects an impossible token budget before reads or embedding", async () => {
+  const runtime = {
+    db: { query: () => assert.fail("search started database work") },
+  } as unknown as Runtime;
+  await assert.rejects(
+    search(runtime, { userId, projectId: "alpha" }, { query: "fact", max_token_size: 1 }),
+    { code: "search_rejected", status: 422 },
   );
 });
 

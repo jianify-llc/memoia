@@ -35,7 +35,10 @@ test("recording time and observations derive only from surviving support", () =>
     { message_id: "z", occurred_at: "2026-01-01T00:00:00Z" },
   ];
   assert.equal(evidenceTime([["x", "y"]], messages), "2025-03-02T00:00:00Z");
-  assert.deepEqual(sourceObservations([["x"]], messages), [
+  const byMessageId = new Map(
+    messages.map((message) => [message.message_id, message]),
+  );
+  assert.deepEqual(sourceObservations([["x"]], byMessageId), [
     { message_id: "x", recorded_at: "2025-01-02T00:00:00Z", time_zone: "UTC" },
   ]);
   assert.throws(() => evidenceTime([["absent"]], messages));

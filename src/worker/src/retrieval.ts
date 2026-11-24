@@ -1,7 +1,7 @@
 import type { Runtime } from "./runtime";
 import { USAGE_HISTORY_DAYS, type Sql, type UserScope } from "./db";
 import { SourceError } from "./errors";
-import { sourceObservations } from "./temporal";
+import { type SourceObservation, sourceObservations } from "./temporal";
 import { embeddings, countTokens, getConfig as getModelConfig } from "./models";
 import { parse as parseYaml } from "yaml";
 
@@ -43,8 +43,8 @@ function fits(value: unknown, max: number): boolean {
 }
 async function complete(
   runtime: Runtime,
-  field: string,
-  ranking: Array<{ id: string; score: number }>,
+  scope: UserScope,
+  field: "facts" | "events" | "profiles",
   input: Query,
   load: (tx: Sql, page: Array<{ id: string; score: number }>) => Promise<any[]>,
 ) {
@@ -56,6 +56,7 @@ async function complete(
       422,
       false,
     );
+  const ranking = await rank(runtime, scope, field, input);
   if (!ranking.length) return result;
   const tx = runtime.db;
   for (let start = 0; start < ranking.length; start += 20) {
@@ -107,10 +108,10 @@ async function evidence(tx: Sql, scope: UserScope, rows: any[]) {
       for (const id of group) ids.add(id);
     bySource.set(row.source_id, ids);
   }
-  const observations = new Map<string, any[]>();
+  const observations = new Map<string, Map<string, SourceObservation>>();
   const pairs = [...bySource].flatMap(([source, ids]) => [...ids].map((id) => ({ source, id })));
   if (pairs.length) {
-    const { rows } = await tx.query(
+    const { rows } = await tx.query<SourceObservation & { source_id: string }>(
       `SELECT m.source_id,m.message_id,m.occurred_at,m.time_zone
        FROM unnest($3::text[],$4::text[]) AS wanted(source_id,message_id)
        JOIN memoia.memory_messages m USING (source_id,message_id)
@@ -119,8 +120,11 @@ async function evidence(tx: Sql, scope: UserScope, rows: any[]) {
     );
     for (const row of rows) {
       let source = observations.get(row.source_id);
-      if (!source) observations.set(row.source_id, source = []);
-      source.push(row);
+      if (!source) {
+        source = new Map();
+        observations.set(row.source_id, source);
+      }
+      source.set(row.message_id, row);
     }
   }
   return new Map(
@@ -142,7 +146,7 @@ async function evidence(tx: Sql, scope: UserScope, rows: any[]) {
         fact_time: row.fact_time,
         source_messages: sourceObservations(
           row.support_groups,
-          observations.get(row.source_id) ?? [],
+          observations.get(row.source_id),
         ),
       },
     ]),
@@ -241,7 +245,7 @@ async function queryVector(
   runtime: Runtime,
   scope: UserScope,
   query: string,
-): Promise<number[] | null> {
+): Promise<string | null> {
   const config = await getModelConfig(runtime, scope.projectId);
   if (!config.enable_event_embedding) return null;
   try {
@@ -249,11 +253,15 @@ async function queryVector(
     const signal = runtime.signal
       ? AbortSignal.any([runtime.signal, timer])
       : timer;
-    return (
-      (
-        await embeddings({ ...runtime, signal }, scope.projectId, [query], "query", scope.userId, config)
-      )[0] ?? null
+    const [embedding] = await embeddings(
+      { ...runtime, signal },
+      scope.projectId,
+      [query],
+      "query",
+      scope.userId,
+      config,
     );
+    return embedding ? `[${embedding.join(",")}]` : null;
   } catch (error: any) {
     if (runtime.signal?.aborted) throw error;
     const status = error?.status;
@@ -274,9 +282,17 @@ async function queryVector(
     return null;
   }
 }
-async function vectorDistance(runtime: Runtime, column: string, parameter: number) {
-  const schema = await runtime.db.vectorSchema();
-  return `${column} OPERATOR(${schema}.<=>) $${parameter}::${schema}.vector`;
+async function semanticRank(
+  db: Runtime["db"],
+  embedding: string | null,
+  column: string,
+  values: unknown[],
+  statement: (distance: string) => string,
+) {
+  if (!embedding) return [];
+  const schema = await db.vectorSchema();
+  const distance = `${column} OPERATOR(${schema}.<=>) $${values.length + 1}::${schema}.vector`;
+  return (await db.query(statement(distance), [...values, embedding])).rows;
 }
 
 async function rank(
@@ -284,7 +300,7 @@ async function rank(
   scope: UserScope,
   kind: "facts" | "events" | "profiles",
   input: Query,
-  sharedVector?: Promise<number[] | null>,
+  sharedVector?: Promise<string | null>,
 ) {
   const base = pool(kind, scope, input);
   const cap = Math.min(500, Math.max(50, limit(input) * 5));
@@ -301,22 +317,21 @@ async function rank(
     ORDER BY ts_rank_cd(to_tsvector('simple',${base.text}),websearch_to_tsquery('simple',$${base.v.length + 1})) DESC,${base.alias}.id LIMIT ${cap}`,
     [...base.v, input.query],
   );
-  const vector =
-    kind === "profiles"
-      ? Promise.resolve(null)
-      : (sharedVector ?? queryVector(runtime, scope, input.query));
-  const [lex, embedding] = await Promise.all([lexical, vector]);
-  const distance = embedding && await vectorDistance(runtime, `${base.alias}.embedding`, base.v.length + 1);
-  const sem = embedding && distance
-    ? await runtime.db.query(
-        `SELECT ${base.alias}.id FROM ${base.from} WHERE ${base.where}
-         AND ${base.alias}.embedding IS NOT NULL AND 1-(${distance}) > 0.2
-         ORDER BY ${distance},${base.alias}.id LIMIT ${cap}`,
-        [...base.v, `[${embedding.join(",")}]`],
-      )
-    : { rows: [] };
+  const [lex, embedding] = await Promise.all([
+    lexical,
+    kind === "profiles" ? null : sharedVector ?? queryVector(runtime, scope, input.query),
+  ]);
+  const sem = await semanticRank(
+    runtime.db,
+    embedding,
+    `${base.alias}.embedding`,
+    base.v,
+    (distance) => `SELECT ${base.alias}.id FROM ${base.from} WHERE ${base.where}
+      AND ${base.alias}.embedding IS NOT NULL AND 1-(${distance}) > 0.2
+      ORDER BY ${distance},${base.alias}.id LIMIT ${cap}`,
+  );
   const scores = new Map<string, number>();
-  for (const rows of [lex.rows, sem.rows])
+  for (const rows of [lex.rows, sem])
     rows.forEach((row, i) =>
       scores.set(row.id, (scores.get(row.id) ?? 0) + 1 / (61 + i)),
     );
@@ -361,7 +376,7 @@ async function selectedRows(
   ).rows;
 }
 async function views(tx: Sql, scope: UserScope, rows: any[]) {
-  if (!rows.length) return new Map<string, any>();
+  if (!rows.length) return [];
   const edges = (
     await tx.query(
       `SELECT event_id,fact_id FROM memoia.memory_event_facts WHERE user_id=$1 AND project_id=$2 AND event_id=ANY($3::uuid[]) ORDER BY fact_id`,
@@ -373,8 +388,16 @@ async function views(tx: Sql, scope: UserScope, rows: any[]) {
     pending(tx, scope, ids),
     hydrateFacts(tx, scope, ids),
   ]);
-  const result = new Map<string, any>();
-  for (const row of rows) {
+  const factsByEvent = new Map<string, NonNullable<ReturnType<typeof hydrated.get>>[]>();
+  for (const { event_id, fact_id } of edges) {
+    if (pendingIds.has(fact_id)) continue;
+    const fact = hydrated.get(fact_id);
+    if (!fact) continue;
+    const facts = factsByEvent.get(event_id) ?? [];
+    facts.push(fact);
+    factsByEvent.set(event_id, facts);
+  }
+  return rows.map((row) => {
     const raw = row.event_data ?? {};
     const data: Record<string, unknown> = {};
     for (const key of [
@@ -402,19 +425,17 @@ async function views(tx: Sql, scope: UserScope, rows: any[]) {
         tag: item.tag,
         value: item.value,
       }));
-    const selected = edges.filter(
-      (edge) =>
-        edge.event_id === row.id &&
-        !pendingIds.has(edge.fact_id) &&
-        hydrated.has(edge.fact_id),
-    );
-    result.set(row.id, {
-      ...data,
-      evidence: selected.map((edge) => hydrated.get(edge.fact_id)!.proof),
-      fact_ids: selected.map((edge) => edge.fact_id),
-    });
-  }
-  return result;
+    const selected = factsByEvent.get(row.id) ?? [];
+    const sources = new Set(selected.map((fact) => fact.row.source_id).filter(Boolean));
+    return {
+      row,
+      eventData: Object.assign(data, {
+        evidence: selected.map((fact) => fact.proof),
+        fact_ids: selected.map((fact) => fact.row.id),
+      }),
+      sourceId: sources.size === 1 ? [...sources][0] : null,
+    };
+  });
 }
 async function profileEntries(
   tx: Sql,
@@ -455,8 +476,7 @@ export async function queryFacts(
   scope: UserScope,
   input: Query,
 ) {
-  const ranking = await rank(runtime, scope, "facts", input);
-  return complete(runtime, "facts", ranking, input, async (tx, page) => {
+  return complete(runtime, scope, "facts", input, async (tx, page) => {
     const rows = await selectedRows(
       tx,
       scope,
@@ -476,8 +496,7 @@ export async function queryEvents(
   scope: UserScope,
   input: Query,
 ) {
-  const ranking = await rank(runtime, scope, "events", input);
-  return complete(runtime, "events", ranking, input, async (tx, page) => {
+  return complete(runtime, scope, "events", input, async (tx, page) => {
     const rows = await selectedRows(
       tx,
       scope,
@@ -486,12 +505,13 @@ export async function queryEvents(
       page.map((x) => x.id),
     );
     const data = await views(tx, scope, rows);
-    const byId = new Map(rows.map((row) => [row.id, row]));
+    const byId = new Map(data.map((view) => [view.row.id, view]));
     const entries = page.flatMap(({ id, score }) => {
-      const row = byId.get(id);
-      if (!row) return [];
+      const view = byId.get(id);
+      if (!view) return [];
+      const { row, eventData } = view;
       if (input.fact_ids?.length || input.event_after || input.event_before) {
-        const refs = data.get(id).fact_ids as string[];
+        const refs = eventData.fact_ids;
         if (
           input.fact_ids?.length &&
           !refs.some((x) => input.fact_ids!.includes(x))
@@ -499,18 +519,16 @@ export async function queryEvents(
           return [];
         if (
           (input.event_after || input.event_before) &&
-          !data
-            .get(id)
-            .evidence.some(
-              (p: any) =>
-                p.fact_time &&
-                (!input.event_after ||
-                  p.fact_time.end >= input.event_after) &&
-                (!input.event_before ||
-                  p.fact_time.start <= input.event_before) &&
-                (!input.fact_ids?.length ||
-                  input.fact_ids.includes(p.fact_id)),
-            )
+          !eventData.evidence.some(
+            (p: any) =>
+              p.fact_time &&
+              (!input.event_after ||
+                p.fact_time.end >= input.event_after) &&
+              (!input.event_before ||
+                p.fact_time.start <= input.event_before) &&
+              (!input.fact_ids?.length ||
+                input.fact_ids.includes(p.fact_id)),
+          )
         )
           return [];
       }
@@ -518,7 +536,7 @@ export async function queryEvents(
         {
           id,
           score,
-          event_data: data.get(id),
+          event_data: eventData,
           created_at: row.created_at,
           updated_at: row.updated_at,
         },
@@ -532,8 +550,7 @@ export async function queryProfiles(
   scope: UserScope,
   input: Query,
 ) {
-  const ranking = await rank(runtime, scope, "profiles", input);
-  return complete(runtime, "profiles", ranking, input, async (tx, page) => {
+  return complete(runtime, scope, "profiles", input, async (tx, page) => {
     const rows = await selectedRows(
       tx,
       scope,
@@ -596,8 +613,7 @@ export async function getEvents(
 }
 async function eventRecords(tx: Sql, scope: UserScope, rows: any[]) {
   const data = await views(tx, scope, rows);
-  return rows.map((row) => {
-    const { fact_ids, ...eventData } = data.get(row.id);
+  return data.map(({ row, eventData: { fact_ids, ...eventData } }) => {
     return {
       id: row.id,
       event_data: eventData,
@@ -628,7 +644,7 @@ async function legacyRank(
   query: string,
   excluded: string[],
   count: number,
-  sharedVector?: Promise<number[] | null>,
+  sharedVector?: Promise<string | null>,
 ) {
   const args = [...params(scope), excluded, query];
   const cap = Math.min(500, Math.max(50, count * 5));
@@ -638,18 +654,17 @@ async function legacyRank(
     `SELECT id FROM memoia.user_events WHERE ${where} AND (to_tsvector('simple',${text}) @@ websearch_to_tsquery('simple',$4) OR position(lower($4) in lower(${text}))>0) ORDER BY ts_rank_cd(to_tsvector('simple',${text}),websearch_to_tsquery('simple',$4)) DESC,id LIMIT ${cap}`,
     args,
   );
-  const vector = sharedVector ?? queryVector(runtime, scope, query);
-  const [lex, embedding] = await Promise.all([lexical, vector]);
-  const distance = embedding && await vectorDistance(runtime, "embedding", 4);
-  const sem = embedding && distance
-    ? await runtime.db.query(
-        `SELECT id FROM memoia.user_events WHERE ${where} AND embedding IS NOT NULL
-         AND 1-(${distance})>0.2 ORDER BY ${distance},id LIMIT ${cap}`,
-        [...params(scope), excluded, `[${embedding.join(",")}]`],
-      )
-    : { rows: [] };
+  const [lex, embedding] = await Promise.all([lexical, sharedVector ?? queryVector(runtime, scope, query)]);
+  const sem = await semanticRank(
+    runtime.db,
+    embedding,
+    "embedding",
+    [...params(scope), excluded],
+    (distance) => `SELECT id FROM memoia.user_events WHERE ${where} AND embedding IS NOT NULL
+      AND 1-(${distance})>0.2 ORDER BY ${distance},id LIMIT ${cap}`,
+  );
   const scores = new Map<string, number>();
-  for (const rows of [lex.rows, sem.rows])
+  for (const rows of [lex.rows, sem])
     rows.forEach((row, i) =>
       scores.set(row.id, (scores.get(row.id) ?? 0) + 1 / (61 + i)),
     );
@@ -668,6 +683,13 @@ export async function search(
     excludedEvents = input.exclude_event_ids ?? [],
     excludedProfiles = input.exclude_profile_ids ?? [],
     excludedTopics = input.exclude_profile_topics ?? [];
+  const bundle: { facts: any[]; events: any[]; profiles: any[] } = {
+    facts: [],
+    events: [],
+    profiles: [],
+  };
+  if (!fits(bundle, max))
+    throw new SourceError("search_rejected", "Search request rejected", 422, false);
   const candidateLimit = Math.min(500, Math.max(50, count * 5));
   const query: Query = {
     query: input.query,
@@ -702,18 +724,6 @@ export async function search(
           vector,
         ),
   ]);
-  const bundle: { facts: any[]; events: any[]; profiles: any[] } = {
-      facts: [],
-      events: [],
-      profiles: [],
-  };
-  if (!fits(bundle, max))
-      throw new SourceError(
-        "search_rejected",
-        "Search request rejected",
-        422,
-        false,
-    );
   if (!unseen.length && !seen.length && !legacy.length) return bundle;
   const tx = runtime.db;
   const hydrated = await hydrateFacts(
@@ -738,32 +748,56 @@ export async function search(
     if (hydrated.has(entry.id)) selectedScores.set(entry.id, entry.score);
   const ids = [...selectedScores.keys()];
   const scores = ids.map((id) => selectedScores.get(id)!);
-  const profiles = ids.length
-    ? (
-        await tx.query(
-          `SELECT p.* FROM memoia.user_profiles p
-          CROSS JOIN LATERAL (SELECT max(s.score) AS score FROM unnest($5::text[], $6::float8[]) AS s(id,score)
-            WHERE p.attributes->'fact_ids' @> jsonb_build_array(s.id)) matched
-          WHERE p.user_id=$1 AND p.project_id=$2 AND NOT(p.id=ANY($3::uuid[]))
-            AND (p.attributes->>'topic' IS NULL OR NOT(p.attributes->>'topic'=ANY($4::text[]))) AND matched.score IS NOT NULL
-          ORDER BY matched.score DESC,p.id LIMIT $7`,
-          [
-            ...params(scope),
-            excludedProfiles,
-            excludedTopics,
-            ids,
-            scores,
-            candidateLimit,
-          ],
-        )
-      ).rows
-    : [];
-  const profileCandidates = await profileEntries(
-    tx,
-    scope,
-    profiles,
-    new Map(),
-  );
+  const legacyCandidates = legacy.slice(0, candidateLimit);
+  const [profileRows, eventRows, legacyRows] = await Promise.all([
+    ids.length
+      ? tx
+          .query(
+            `SELECT p.* FROM memoia.user_profiles p
+            CROSS JOIN LATERAL (SELECT max(s.score) AS score FROM unnest($5::text[], $6::float8[]) AS s(id,score)
+              WHERE p.attributes->'fact_ids' @> jsonb_build_array(s.id)) matched
+            WHERE p.user_id=$1 AND p.project_id=$2 AND NOT(p.id=ANY($3::uuid[]))
+              AND (p.attributes->>'topic' IS NULL OR NOT(p.attributes->>'topic'=ANY($4::text[]))) AND matched.score IS NOT NULL
+            ORDER BY matched.score DESC,p.id LIMIT $7`,
+            [
+              ...params(scope),
+              excludedProfiles,
+              excludedTopics,
+              ids,
+              scores,
+              candidateLimit,
+            ],
+          )
+          .then(({ rows }) => rows)
+      : [],
+    input.include_events !== false && ids.length
+      ? tx
+          .query(
+            `SELECT e.* FROM memoia.user_events e JOIN (
+              SELECT ef.event_id,max(s.score) AS score FROM memoia.memory_event_facts ef
+              JOIN unnest($4::uuid[], $5::float8[]) AS s(id,score) ON s.id=ef.fact_id
+              WHERE ef.user_id=$1 AND ef.project_id=$2 AND NOT(ef.event_id=ANY($3::uuid[]))
+              GROUP BY ef.event_id
+          ) matched ON matched.event_id=e.id
+          WHERE e.user_id=$1 AND e.project_id=$2
+          ORDER BY matched.score DESC,e.id LIMIT $6`,
+          [...params(scope), excludedEvents, ids, scores, candidateLimit],
+          )
+          .then(({ rows }) => rows)
+      : [],
+    legacyCandidates.length
+      ? tx
+          .query(
+            `SELECT id,event_data,created_at FROM memoia.user_events
+            WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])
+              AND event_data->>'blob_id' IS NULL AND NOT(event_data ? 'memoia_v2')`,
+            [...params(scope), legacyCandidates.map((x) => x.id)],
+          )
+          .then(({ rows }) => rows)
+      : [],
+  ]);
+  const profileCandidates = await profileEntries(tx, scope, profileRows, new Map());
+  const eventViews = await views(tx, scope, eventRows);
   const associated: any[] = [];
   for (const p of profileCandidates) {
     const matched = p.fact_ids.filter((id) => selectedScores.has(id));
@@ -771,102 +805,52 @@ export async function search(
     p.score = Math.max(...matched.map((id) => selectedScores.get(id)!));
     associated.push({ kind: "profiles", value: p });
   }
-  if (input.include_events !== false) {
-    const events = ids.length
-      ? (
-          await tx.query(
-            `SELECT e.* FROM memoia.user_events e JOIN (
-              SELECT ef.event_id,max(s.score) AS score FROM memoia.memory_event_facts ef
-              JOIN unnest($4::uuid[], $5::float8[]) AS s(id,score) ON s.id=ef.fact_id
-              WHERE ef.user_id=$1 AND ef.project_id=$2 AND NOT(ef.event_id=ANY($3::uuid[]))
-              GROUP BY ef.event_id
-            ) matched ON matched.event_id=e.id
-            WHERE e.user_id=$1 AND e.project_id=$2
-            ORDER BY matched.score DESC,e.id LIMIT $6`,
-            [...params(scope), excludedEvents, ids, scores, candidateLimit],
-          )
-        ).rows
-      : [];
-    const data = await views(tx, scope, events);
-    const allRefs = [
-      ...new Set(
-        events.flatMap((row) => data.get(row.id).fact_ids as string[]),
-      ),
-    ];
-    const sourcesById = new Map(
-      (await factRows(tx, scope, allRefs)).map((row) => [
-        row.id,
-        row.source_id,
-      ]),
-    );
-    for (const row of events) {
-      const v = data.get(row.id);
-      const refs = (v.fact_ids as string[]).filter((id) =>
-        selectedScores.has(id),
-      );
-      if (!refs.length) continue;
-      const sources = new Set(
-        v.evidence
-          .map((p: any) => sourcesById.get(p.fact_id))
-          .filter(Boolean),
-      );
-      const blobs = new Set(v.evidence.map((p: any) => p.blob_id));
-      associated.push({
-        kind: "events",
-        value: {
-          id: row.id,
-          content: v.content || v.event_tip || "",
-          title: v.title ?? null,
-          summary: v.summary ?? null,
-          keywords: v.keywords ?? null,
-          event_time: v.event_time ?? null,
-          location: v.location ?? null,
-          interpretation: v.interpretation ?? null,
-          fact_ids: v.fact_ids,
-          source_id: sources.size === 1 ? [...sources][0] : null,
-          blob_id: blobs.size === 1 ? [...blobs][0] : null,
-          score: Math.max(...refs.map((id) => selectedScores.get(id)!)),
-          occurred_at: row.created_at,
-          evidence: v.evidence,
-        },
-      });
-    }
-    if (legacy.length) {
-      const rows = (
-        await tx.query(
-          `SELECT * FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[]) AND event_data->>'blob_id' IS NULL AND NOT(event_data ? 'memoia_v2')`,
-          [
-            ...params(scope),
-            legacy.slice(0, candidateLimit).map((x) => x.id),
-          ],
-        )
-      ).rows;
-      const scores = new Map(
-        legacy.slice(0, candidateLimit).map((x) => [x.id, x.score]),
-      );
-      for (const row of rows) {
-        const d = row.event_data ?? {};
-        associated.push({
-          kind: "events",
-          value: {
-            id: row.id,
-            content: d.event_tip || "",
-            title: d.title ?? null,
-            summary: d.summary ?? null,
-            keywords: d.keywords ?? null,
-            event_time: d.event_time ?? null,
-            location: d.location ?? null,
-            interpretation: d.interpretation ?? null,
-            fact_ids: [],
-            source_id: d.source_id ?? null,
-            blob_id: d.blob_id ?? null,
-            score: scores.get(row.id),
-            occurred_at: row.created_at,
-            evidence: [],
-          },
-        });
-      }
-    }
+  for (const { row, eventData: v, sourceId } of eventViews) {
+    const refs = v.fact_ids.filter((id) => selectedScores.has(id));
+    if (!refs.length) continue;
+    const blobs = new Set(v.evidence.map((p: any) => p.blob_id));
+    associated.push({
+      kind: "events",
+      value: {
+        id: row.id,
+        content: v.content || v.event_tip || "",
+        title: v.title ?? null,
+        summary: v.summary ?? null,
+        keywords: v.keywords ?? null,
+        event_time: v.event_time ?? null,
+        location: v.location ?? null,
+        interpretation: v.interpretation ?? null,
+        fact_ids: v.fact_ids,
+        source_id: sourceId,
+        blob_id: blobs.size === 1 ? [...blobs][0] : null,
+        score: Math.max(...refs.map((id) => selectedScores.get(id)!)),
+        occurred_at: row.created_at,
+        evidence: v.evidence,
+      },
+    });
+  }
+  const legacyScores = new Map(legacyCandidates.map((x) => [x.id, x.score]));
+  for (const row of legacyRows) {
+    const d = row.event_data ?? {};
+    associated.push({
+      kind: "events",
+      value: {
+        id: row.id,
+        content: d.event_tip || "",
+        title: d.title ?? null,
+        summary: d.summary ?? null,
+        keywords: d.keywords ?? null,
+        event_time: d.event_time ?? null,
+        location: d.location ?? null,
+        interpretation: d.interpretation ?? null,
+        fact_ids: [],
+        source_id: d.source_id ?? null,
+        blob_id: d.blob_id ?? null,
+        score: legacyScores.get(row.id),
+        occurred_at: row.created_at,
+        evidence: [],
+      },
+    });
   }
   associated.sort(
     (a, b) =>
@@ -907,20 +891,15 @@ async function contextRanking(
     ORDER BY ts_rank_cd(to_tsvector('simple',text),websearch_to_tsquery('simple',$3)) DESC,id LIMIT 250`,
     [...params(scope), query],
   );
-  const [lex, vector] = await Promise.all([
-    lexical,
-    queryVector(runtime, scope, query),
-  ]);
-  const distance = vector && await vectorDistance(runtime, "embedding", 3);
-  const sem = vector && distance
-    ? (
-        await runtime.db.query(
-          `SELECT id,kind FROM ${docs} WHERE embedding IS NOT NULL
-           AND 1-(${distance})>0.2 ORDER BY ${distance},id LIMIT 250`,
-          [...params(scope), `[${vector.join(",")}]`],
-        )
-      ).rows
-    : [];
+  const [lex, embedding] = await Promise.all([lexical, queryVector(runtime, scope, query)]);
+  const sem = await semanticRank(
+    runtime.db,
+    embedding,
+    "embedding",
+    params(scope),
+    (distance) => `SELECT id,kind FROM ${docs} WHERE embedding IS NOT NULL
+      AND 1-(${distance})>0.2 ORDER BY ${distance},id LIMIT 250`,
+  );
   const scores = new Map<string, { id: string; kind: string; score: number }>();
   for (const ranking of [lex.rows, sem])
     ranking.forEach((row, i) => {

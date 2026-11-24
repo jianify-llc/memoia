@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Database } from "../src/db";
-import { context, search } from "../src/retrieval";
+import { getSource } from "../src/facts";
+import { context, getEvents, search } from "../src/retrieval";
 
 const id = (n: number) =>
   `00000000-0000-0000-0000-${n.toString(16).padStart(12, "0")}`;
@@ -18,11 +19,25 @@ test("search ranks and bounds associated candidates before loading evidence", as
     excludedEvent = id(100),
     excludedProfile = id(101);
   const reads: Array<{ sql: string; values: unknown[]; count: number }> = [];
+  let profileReadPending = false;
+  let eventReadOverlapped = false;
+  let activeReads = 0;
+  let peakReads = 0;
   const tracked = (tx: any) => ({
     query: async (sql: string, values: unknown[] = []) => {
-      const result = await tx.query(sql, values);
-      reads.push({ sql, values, count: result.rows.length });
-      return result;
+      const profileRead = sql.startsWith("SELECT p.* FROM memoia.user_profiles p");
+      if (profileRead) profileReadPending = true;
+      if (sql.startsWith("SELECT e.* FROM memoia.user_events e JOIN ("))
+        eventReadOverlapped = profileReadPending;
+      peakReads = Math.max(peakReads, ++activeReads);
+      try {
+        const result = await tx.query(sql, values);
+        reads.push({ sql, values, count: result.rows.length });
+        return result;
+      } finally {
+        activeReads--;
+        if (profileRead) profileReadPending = false;
+      }
     },
   });
   const runtime = {
@@ -97,6 +112,11 @@ test("search ranks and bounds associated candidates before loading evidence", as
     assert.equal(result.events.length, 10);
     assert.equal(result.profiles.length, 10);
     assert.equal(result.events[0].id, late);
+    assert.equal(result.events[0].source_id, "s");
+    assert.equal(
+      result.events.find((event) => event.id !== late)?.source_id,
+      "other",
+    );
     assert.equal(result.profiles[0].id, id(4000));
     assert.ok(result.events.every((x) => x.id !== excludedEvent));
     assert.ok(
@@ -114,16 +134,31 @@ test("search ranks and bounds associated candidates before loading evidence", as
     )!;
     assert.equal(events.count, 50);
     assert.equal(profiles.count, 50);
+    assert.equal(eventReadOverlapped, true);
+    assert.ok(peakReads <= 3, `search issued ${peakReads} concurrent database reads`);
     assert.deepEqual(events.values.slice(0, 2), [userId, projectId]);
     assert.deepEqual(profiles.values.slice(0, 2), [userId, projectId]);
     const edges = reads.find((x) =>
       x.sql.startsWith("SELECT event_id,fact_id"),
     )!;
     assert.equal((edges.values[2] as string[]).length, 50);
+    const factReads = reads.filter(({ sql }) =>
+      sql.startsWith("SELECT f.*,b.source_id,b.external_id"),
+    );
+    assert.equal(factReads.length, 3);
+
+    const source = await getSource(runtime, { userId, projectId }, "other");
+    assert.deepEqual(source.evidence[0]?.source_messages, [
+      { message_id: "m", recorded_at: "2026-02-01T00:00:00.000000Z", time_zone: null },
+    ]);
 
     const coordinates = Array(1536).fill(0.01);
     const vector = JSON.stringify(coordinates);
     const legacy = randomUUID();
+    await db.query(
+      "INSERT INTO memoia.memory_event_facts(user_id,project_id,event_id,fact_id) VALUES($1,$2,$3,$4)",
+      [userId, projectId, late, weak],
+    );
     await db.query("UPDATE memoia.memory_facts SET embedding=$1 WHERE id=$2 AND project_id=$3", [vector, strong, projectId]);
     await db.query(
       "INSERT INTO memoia.user_events(id,user_id,project_id,event_data,embedding) VALUES($1,$2,$3,$4,$5)",
@@ -147,10 +182,18 @@ test("search ranks and bounds associated candidates before loading evidence", as
     const semantic = await search(vectorRuntime, scope, { query });
     assert.equal(semantic.facts[0]?.id, strong);
     assert.ok(semantic.events.some((event) => event.id === legacy));
+    assert.equal(
+      semantic.events.find((event) => event.id === late)?.source_id,
+      null,
+    );
     const recalled = await context(vectorRuntime, scope, { query });
     assert.ok(recalled.entries.some((entry) => entry.includes("hiking")));
     assert.ok(recalled.entries.includes("A legacy outing"));
     assert.equal(embeddingCall.mock.callCount(), 2);
+    const recent = await getEvents(vectorRuntime, scope, 1, 7);
+    assert.equal(recent.events[0]?.id, legacy);
+    assert.equal(recent.events[0]?.event_data.event_tip, "A legacy outing");
+    assert.equal("fact_ids" in recent.events[0]!.event_data, false);
   } finally {
     await db.query("DELETE FROM memoia.projects WHERE project_id=$1", [
       projectId,

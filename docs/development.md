@@ -33,6 +33,8 @@ Dependency versions and security overrides live in package manifests/locks. The 
 The rules below define the target for implementation and review. Verify each affected entry point against them.
 
 - Use standalone, schema-qualified statements for probes, ordinary retrieval and independent writes. Retrieval uses ordinary `SELECT` statements without an explicit read transaction.
+- Reuse rows and derived values already loaded by the same request. Read them again only when the next operation needs a newer committed value to enforce a business rule.
+- Reject a response budget that cannot hold an empty result before reading candidates or requesting embeddings.
 - Use PostgreSQL’s default isolation for short write transactions (normally READ COMMITTED). Open one only when dependent writes must commit together. For each explicit lock or transaction, identify the concrete failure it prevents and the business rule at stake. Prefer existing constraints and conditional writes.
 - Use Legato's standalone claim for Fact and maintenance tasks, with the watchdog tracking execution ownership. Read the fixed batch after claiming. Never wrap an entire Queue task in a transaction. Release the transaction and checked-out connection before model calls (including Flex), embedding, Queue sends, other external I/O or retry waits.
 - Vector ranking qualifies the pgvector type and operator with the extension schema resolved from PostgreSQL. It runs as a standalone read.
