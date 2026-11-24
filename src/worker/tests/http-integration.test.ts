@@ -273,10 +273,17 @@ test(
       );
       let embeddingCalls = 0;
       let responseVector = vector;
+      let duringEmbedding: (() => Promise<unknown>) | undefined;
       const server = createServer((req, res) => {
         embeddingCalls++;
         req.resume();
-        req.on("end", () => {
+        req.on("end", async () => {
+          try {
+            await duringEmbedding?.();
+          } catch {
+            res.writeHead(500).end();
+            return;
+          }
           res.setHeader("Content-Type", "application/json");
           res.end(
             JSON.stringify({
@@ -360,7 +367,7 @@ test(
         assert.equal(embeddingCalls, 5);
         const indexedPath = `${eventsPath}/${indexedId}`;
         assert.equal((await writeEvent("PATCH", indexedPath, {
-          content: "Walked in the park.", interpretation: "Enjoyed the calm.",
+          interpretation: "Enjoyed the calm.",
         })).status, 204);
         assert.equal(embeddingCalls, 5);
         responseVector = [0, 1, ...Array(1534).fill(0)];
@@ -373,6 +380,16 @@ test(
           [indexedId],
         );
         assert.deepEqual(JSON.parse(persisted.embedding), responseVector);
+        duringEmbedding = () => db.query(
+          `UPDATE memoia.user_events SET event_data=event_data || '{"summary":"Concurrent maintenance"}',version=version+1 WHERE id=$1`,
+          [indexedId],
+        );
+        const conflicted = await writeEvent("PATCH", indexedPath, { content: "Changed during indexing." });
+        assert.equal(conflicted.status, 409);
+        assert.equal((await conflicted.json() as { detail: { code: string } }).detail.code, "write_conflict");
+        const latestIndexed = await api("GET", indexedPath, reader);
+        assert.equal(latestIndexed.data.event_data.content, "Walked by the river.");
+        assert.equal(latestIndexed.data.event_data.summary, "Concurrent maintenance");
         assert.equal((await api("DELETE", indexedPath, admin)).status, 204);
       } finally {
         server.close();
@@ -432,14 +449,25 @@ test(
       const edited = { content: "A confirmed coffee preference.", interpretation: "Likes the ritual." };
       assert.equal((await api("PATCH", `/api/users/${foreign}/events/${event}`, admin, edited)).status, 404);
       assert.equal((await api("PATCH", `${eventPath}/${event}`, reader, edited)).status, 403);
+      const beforeEdit = await api("GET", `${eventPath}/${event}`, reader);
+      assert.equal(beforeEdit.data.event_data.summary, null);
+      await db.query(
+        `UPDATE memoia.user_events SET event_data=event_data || '{"summary":"Updated by maintenance"}',version=version+1 WHERE id=$1`,
+        [event],
+      );
       assert.equal((await api("PATCH", `${eventPath}/${event}`, admin, edited)).status, 204);
       const editedEvent = await api("POST", `${eventPath}/query`, reader, { ids: [event] });
       assert.equal(editedEvent.status, 200);
       assert.equal(editedEvent.data.events[0].event_data.content, edited.content);
-      assert.equal(editedEvent.data.events[0].event_data.title, null);
+      assert.equal(editedEvent.data.events[0].event_data.title, "Coffee");
+      assert.equal(editedEvent.data.events[0].event_data.summary, "Updated by maintenance");
       assert.deepEqual(editedEvent.data.events[0].event_data.fact_ids, [fact]);
       const { rows: [eventVersion] } = await db.query("SELECT version FROM memoia.user_events WHERE id=$1", [event]);
-      assert.equal(eventVersion.version, "2");
+      assert.equal(eventVersion.version, "3");
+      assert.equal((await api("PATCH", `${eventPath}/${event}`, admin, { title: null })).status, 204);
+      const cleared = await api("GET", `${eventPath}/${event}`, reader);
+      assert.equal(cleared.data.event_data.title, null);
+      assert.equal(cleared.data.event_data.summary, "Updated by maintenance");
       await db.query(
         `UPDATE memoia.memory_blobs SET fact_completed_at=now(),fact_changes=$2::jsonb WHERE id=$1`,
         [blob, JSON.stringify([{ kind: "updated", fact_id: fact }])],

@@ -597,7 +597,7 @@ export function createApp(
     c.json(await retrieval.getEvent(runtime(c), scope(c), pathUuid(c, "event_id"))),
   );
   app.patch("/api/users/:user_id/events/:event_id", async (c) => {
-    await management.updateEvent(runtime(c), scope(c), pathUuid(c, "event_id"), body(c, "EventInput"));
+    await management.updateEvent(runtime(c), scope(c), pathUuid(c, "event_id"), body(c, "EventPatch"));
     return c.body(null, 204);
   });
   app.delete("/api/users/:user_id/events/:event_id", async (c) => {

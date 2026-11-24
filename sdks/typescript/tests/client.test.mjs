@@ -31,13 +31,16 @@ it("writes editable Event fields and reads a single Event or Profile", async () 
   });
   const input = { content: "Visited the park.", title: null };
   assert.deepEqual(await api.addEvent(user, input), { id: eventId });
-  await api.updateEvent(user, eventId, input);
+  const patch = { title: null };
+  await api.updateEvent(user, eventId, patch);
   assert.deepEqual(await api.getEvent(user, eventId), event);
   assert.deepEqual(await api.getProfile(user, eventId), profile);
   assert.throws(() => api.addEvent(user, { ...input, fact_ids: [eventId] }), { code: "INVALID_INPUT" });
+  assert.throws(() => api.updateEvent(user, eventId, {}), { code: "INVALID_INPUT" });
+  assert.throws(() => api.updateEvent(user, eventId, { content: null }), { code: "INVALID_INPUT" });
   assert.deepEqual(calls, [
     ["POST", `/api/users/${user}/events`, input],
-    ["PATCH", `/api/users/${user}/events/${eventId}`, input],
+    ["PATCH", `/api/users/${user}/events/${eventId}`, patch],
     ["GET", `/api/users/${user}/events/${eventId}`, undefined],
     ["GET", `/api/users/${user}/profiles/${eventId}`, undefined],
   ]);

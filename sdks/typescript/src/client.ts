@@ -45,6 +45,7 @@ export type UsersQuery = NonNullable<paths["/api/users"]["get"]["parameters"]["q
 export type Events = ResponseBody<paths["/api/users/{user_id}/events"]["get"]>;
 export type EventRecord = ResponseBody<paths["/api/users/{user_id}/events/{event_id}"]["get"]>;
 export type EventInput = RequestBody<paths["/api/users/{user_id}/events"]["post"]>;
+export type EventPatch = RequestBody<paths["/api/users/{user_id}/events/{event_id}"]["patch"]>;
 export type EventId = ResponseBody<paths["/api/users/{user_id}/events"]["post"]>;
 export type EventsQuery = NonNullable<paths["/api/users/{user_id}/events"]["get"]["parameters"]["query"]>;
 export type ProfileInput = RequestBody<paths["/api/users/{user_id}/profiles"]["post"]>;
@@ -355,8 +356,8 @@ export class MemoiaClient {
     return this.request("POST", `${this.userPath(userId)}/events`, validators.validateEventId, options, input, 201);
   }
 
-  updateEvent(userId: string, eventId: string, input: EventInput, options?: RequestOptions): Promise<void> {
-    if (!validators.validateEventInput(input)) throw new MemoiaError("INVALID_INPUT", null, false);
+  updateEvent(userId: string, eventId: string, input: EventPatch, options?: RequestOptions): Promise<void> {
+    if (!validators.validateEventPatch(input)) throw new MemoiaError("INVALID_INPUT", null, false);
     return this.request("PATCH", `${this.userPath(userId)}/events/${segment(eventId)}`, (value) => value === undefined, options, input);
   }
 

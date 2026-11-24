@@ -32,6 +32,7 @@ const targets = {
   validateEventsQuery: ["get", `${route}/events`, "query"],
   validateProfileInput: ["post", `${route}/profiles`, "request"],
   validateEventInput: ["post", `${route}/events`, "request"],
+  validateEventPatch: ["patch", `${route}/events/{event_id}`, "request"],
   validateEventId: ["post", `${route}/events`, "response"],
   validateEvent: ["get", `${route}/events/{event_id}`, "response"],
   validateProfile: ["get", `${route}/profiles/{profile_id}`, "response"],

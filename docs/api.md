@@ -157,7 +157,7 @@ Fact 人工编辑、删除或时间证据变化时同步清理相关历史画像
 - GET users/{uid}/operations/by-key/{key}、operations/{id}：查询原回执。POST operations/{id}/retry 仅恢复 Fact flush 和维护 flush。Fact flush 复用原范围及仍有效的检查点；输入过期后，原回执持续返回 input_required。
 - GET users/{uid}/maintenance：未封闭 Blob 数量及最近 flush 状态、错误、尝试次数和固定 Blob ID。
 - DELETE sources/{source_id}/messages：删除消息贡献；DELETE events/{id} 与 DELETE users/{uid} 独立。
-- POST users/{uid}/events 新建独立 Event，返回 201 和 ID。PATCH users/{uid}/events/{event_id} 替换可编辑的故事字段，返回 204。两者需要 write scope，接收 `EventInput`，正文必填，可选字段省略即清除。新建的 Event 可独立查询，未关联 Fact 时不会被 Fact-first 检索召回。编辑保留原 Fact 支撑和影响范围，支撑变化仍由统一维护处理。索引随写入更新，发布时检查已有 Event 的版本。人工写入无需生成 Blob 或排队。
+- POST users/{uid}/events 用 `EventInput` 新建独立 Event，正文必填，返回 201 和 ID。PATCH users/{uid}/events/{event_id} 用 `EventPatch` 提交至少一项改动，返回 204。省略字段保留当前值，可选字段传 `null` 清除，提交正文时必须为非空文本。两者都需要 write scope。新建 Event 可独立查询，未关联 Fact 时不会被 Fact-first 检索召回。编辑保留原 Fact 支撑和影响范围，支撑变化仍由统一维护处理。索引根据合并后的正文计算，提交检查 Event 版本，遇到 `write_conflict` 先读当前记录。人工写入无需生成 Blob 或排队。
 - GET users/{uid}/events/{event_id} 和 GET users/{uid}/profiles/{profile_id} 按 ID 返回一条完整记录，使用 read scope。条目不存在或不属于当前项目和用户时返回 404。单条读取沿用列表的返回结构与证据过滤。
 - PUT users/{uid}/facts/{fact_id}、DELETE users/{uid}/facts/{fact_id}：write scope；稳定 idempotency_key、expected_revision 和人工 reason，成功后返回 kind=correct 的完成 Operation。编辑提交完整 content/subject/reporter/certainty/support_groups/fact_time，证据遵循上文的原 Blob 支持组约束；原文已清除，身份和结构校验不能证明编辑内容语义为真。版本冲突先读当前 Fact，再确认修改。
 - POST search、POST context：私密查询留在 JSON body，使用 read scope。

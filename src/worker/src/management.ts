@@ -6,6 +6,7 @@ import type { Runtime } from "./runtime";
 import type { components } from "../../../sdks/typescript/src/generated/openapi";
 
 type EventInput = components["schemas"]["EventInput"];
+type EventPatch = components["schemas"]["EventPatch"];
 type IndexedEvent = { event_data: components["schemas"]["EventData"]; embedding: string | null };
 
 function authorize(
@@ -317,7 +318,7 @@ export async function deleteProfile(
 async function eventEmbedding(
   runtime: Runtime,
   scope: UserScope,
-  body: EventInput,
+  body: IndexedEvent["event_data"],
   existing?: IndexedEvent,
 ): Promise<string | null> {
   const config = await getConfig(runtime, scope.projectId);
@@ -350,18 +351,22 @@ export async function addEvent(runtime: Runtime, scope: UserScope, body: EventIn
   return { id };
 }
 
-export async function updateEvent(runtime: Runtime, scope: UserScope, id: string, body: EventInput) {
+export async function updateEvent(runtime: Runtime, scope: UserScope, id: string, body: EventPatch) {
   const { rows: [existing] } = await runtime.db.query<IndexedEvent & { version: string }>(
     "SELECT event_data,embedding::text,version FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=$3",
     [scope.userId, scope.projectId, id],
   );
   if (!existing) return missing("Event");
-  const embedding = await eventEmbedding(runtime, scope, body, existing);
+  const merged = {
+    ...existing.event_data,
+    content: existing.event_data.content ?? existing.event_data.event_tip,
+    ...body,
+  };
+  const embedding = await eventEmbedding(runtime, scope, merged, existing);
   const saved = await runtime.db.query(
     `UPDATE memoia.user_events
-        SET event_data=(event_data-ARRAY['content','event_tip','title','summary','keywords','event_time','location','interpretation'])
-              || $4::jsonb
-              || CASE WHEN event_data ? 'event_tip'
+        SET event_data=event_data || $4::jsonb
+              || CASE WHEN $4::jsonb ? 'content' AND event_data ? 'event_tip'
                  THEN jsonb_build_object('event_tip',$4::jsonb->>'content') ELSE '{}'::jsonb END,
             embedding=$5::vector,version=version+1,updated_at=clock_timestamp()
       WHERE user_id=$1 AND project_id=$2 AND id=$3 AND version=$6`,

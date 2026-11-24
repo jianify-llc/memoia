@@ -2144,7 +2144,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/EventInput"
+                "$ref": "#/components/schemas/EventPatch"
               }
             }
           }
@@ -2993,6 +2993,61 @@
         "required": [
           "content"
         ]
+      },
+      "EventPatch": {
+        "type": "object",
+        "title": "EventPatch",
+        "properties": {
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16000
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 4000
+          },
+          "keywords": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 1000
+          },
+          "event_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 1000
+          },
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 1000
+          },
+          "interpretation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 4000
+          }
+        },
+        "additionalProperties": false,
+        "minProperties": 1
       },
       "EventQuery": {
         "properties": {

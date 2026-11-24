@@ -758,6 +758,16 @@ export interface components {
             location?: string | null;
             interpretation?: string | null;
         };
+        /** EventPatch */
+        EventPatch: {
+            content?: string;
+            title?: string | null;
+            summary?: string | null;
+            keywords?: string | null;
+            event_time?: string | null;
+            location?: string | null;
+            interpretation?: string | null;
+        };
         /** EventQuery */
         EventQuery: {
             /** Query */
@@ -3112,7 +3122,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["EventInput"];
+                "application/json": components["schemas"]["EventPatch"];
             };
         };
         responses: {

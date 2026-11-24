@@ -55,7 +55,7 @@ Only safe reads receive bounded backoff. Each SDK write sends one request. A tim
 
 ## Maintain and query derived memory
 
-`addEvent(userId, input)` creates a standalone story and returns its ID. `updateEvent(userId, eventId, input)` replaces editable story fields and keeps existing Fact associations. Omitted optional fields are cleared. A Fact change can still trigger maintenance of the edited Event. Use `getEvents()` or `queryEvents()` to read standalone stories. `deleteEvent()` deletes an Event and leaves its Facts in place.
+`addEvent(userId, input)` creates a standalone story and returns its ID. `updateEvent(userId, eventId, patch)` accepts an `EventPatch` with at least one editable field. Send only fields the user changed. Omitted fields retain their current values. Use explicit `null` to clear an optional field. If supplied, `content` must be non-empty text. The edit keeps existing Fact associations, so a Fact change can still trigger maintenance of the Event. When a concurrent write returns `write_conflict`, read the current Event before retrying the intended patch. `deleteEvent()` deletes an Event and leaves its Facts in place.
 
 `getEvent(userId, eventId)` and `getProfile(userId, profileId)` read a single record by ID with the same shape as the corresponding list entry. A missing or out-of-scope ID returns 404. These reads apply the same evidence filtering as the lists and have no search token budget.
 
