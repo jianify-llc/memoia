@@ -2,9 +2,11 @@
 
 Memoia is an Apache-2.0 memory service derived from [Memobase](https://github.com/memodb-io/memobase). Preserve [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-The service is implemented in TypeScript with two deployment adapters: Cloudflare Workers with Supabase/Hyperdrive and Queue/Cron, or Docker with a Node API, a persistent maintenance worker and its own PostgreSQL/pgvector. Both use the same business code, authenticated API, SDK and Legato task state. Luvel uses Service Binding on Cloudflare and HTTP for a Docker deployment; Inspector uses authenticated HTTP. This branch contains no Python service or Python recovery runtime.
+The TypeScript service supports Cloudflare Workers with Hyperdrive, Queue and Cron, and Docker with a Node API, a persistent worker and PostgreSQL/pgvector. Both deployments use the same business code, authenticated API, SDK and Legato tasks. Luvel and Inspector can use Service Binding or authenticated HTTP according to their deployment.
 
-Messages synchronously produce supported Facts, indexes and durable Operation receipts. Fixed Blobs preserve each change batch. A flush seals completed Blobs; Queue delivery or database polling starts the same user-scoped AgentLoop to maintain Profile and Event together. Legato owns execution leases, safe checkpoints, retries and slice timing. PostgreSQL owns all memory and task state; Redis is needed only to import statistics from a prior installation.
+Each session uses one Blob. Message imports append to that Blob and return a staged Operation receipt. A Fact flush fixes the append IDs for one extraction task. The task saves Facts and indexes, clears temporary input, and completes the receipt together. Later appends stay in the same Blob for a later Fact flush.
+
+Background maintenance seals a bounded batch of committed Fact changes. One user-scoped AgentLoop maintains Profile and Event. Queue delivery on Cloudflare and database polling in Docker run the same Legato tasks, with leases, checkpoints, retries and execution slices. PostgreSQL stores the memory and task state. Redis is used only to import historical usage counters during migration.
 
 Deleting a message immediately removes its Fact contribution. Profile/Event may remain readable until the original flush succeeds. Permanent forgetting immediately blocks reads and late writes. Unknown results are resolved through the original Operation rather than replaying input with a new identity.
 
@@ -16,4 +18,4 @@ Deleting a message immediately removes its Fact contribution. Profile/Event may 
 - [Data migration and recovery](docs/guide/typescript-worker-migration.md)
 - [Behavioral test coverage](docs/guide/ts-contract-coverage.md)
 
-Local contract and database tests establish their specific behaviors. Real-provider semantics/cache benefits, deployed Queue delivery and shared Test cutover require separate acceptance. No deployment has been performed for this candidate.
+Local contract and database tests verify the covered behaviors. Real-provider semantics, cache behavior and deployed endpoints need environment-specific validation.

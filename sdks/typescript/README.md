@@ -11,52 +11,55 @@ instead. Both transports use the same authenticated API and operation receipts.
 
 `listUsageEvents({ date, user_id, cursor, limit })` lists the authenticated project's model usage events for a UTC recording date. Pass `user_id` to read one user and pass `next_cursor` to continue that page sequence.
 
-`importBlob(userId, input)` appends text to the Blob identified by `source_id`. For an image message, the caller can include `visual_description`. Call `flushBlob(userId, blobId, { idempotency_key, append_operation_ids })` to extract from those accepted appends. Poll the original `fact_flush` Operation for the final Fact IDs. Later appends use the same Blob ID and a new flush. The optional `maintenance_reasoning_effort` selects reasoning for derived maintenance.
+## Append and extract Facts
 
-`updateFact(userId, factId, input)` and `deleteFact(userId, factId, input)` correct an existing extraction using a caller-owned idempotency key, `expected_revision` and a short `reason`. Updates replace the complete editable content, subject, reporter, certainty, support groups and event time; identity and original Blob remain unchanged. Support must reference undeleted messages from that original Blob. These are human-reviewed repairs, not a new source of facts: Memoia no longer has the original chat body to verify semantics. A `kind: "correct"` Operation confirms the Fact/index change, while its new correction Blob enters normal timed flush. Old Profile/Event text can remain readable until that flush succeeds. A stale revision requires a fresh read and deliberate proposal, not an automatic merge or retry. Deleting a Fact does not delete messages or other Facts.
-
-Fact `created_at` is its first database insertion time; `updated_at` is its latest content/evidence update. Unknown legacy times are null. Neither replaces message recording time or `fact_time`, and neither automatically overrides older statements. Strict ID exclusions still exclude an edited Fact in the current conversation.
-
-`queryFacts(userId, input)`, `queryEvents(userId, input)` and `queryProfiles(userId, input)` query independent pre-filtered pools; they do not slice `search` results. Query text stays in private read-only POST bodies, using the existing read timeout/retry policy. OpenAPI-derived `FactQuery`/`EventQuery`/`ProfileQuery` and result types are exported. Supported filters and the distinct recording/creation/calendar times are documented in [API-DESIGN](../../docs/api.md#独立只读查询). `getProjectIdentity()` returns the authenticated `project_id` for server-owned cache scope; client input cannot override it. This SDK 0.11.0 local candidate requires the matching source/Blob/Fact API and coordinated consumers. The Worker schema uses its own Drizzle migration ledger; the legacy data importer accepts known 0015/0016 source schemas.
+`importBlob(userId, input)` appends messages to the session Blob. The public Blob ID equals `source_id`. Collect operation IDs from `staged` receipts, pass 1–32 from the same Blob to `flushBlob(userId, blobId, { idempotency_key, append_operation_ids })` and poll the resulting `fact_flush` Operation. Later messages use the same Blob and a new flush. The optional `maintenance_reasoning_effort` applies to Profile/Event maintenance.
 
 ```ts
 import { MemoiaClient } from "@jianify/memoia";
 
-const memoia = new MemoiaClient({ baseUrl: "https://test-memoia.jianify.dev", apiKey: projectToken });
+const memoia = new MemoiaClient({ baseUrl: memoiaOrigin, apiKey: projectToken });
+const sessionId = String(dialogId);
 const operation = await memoia.importBlob(userId, {
   idempotency_key: batchKey,
-  source_id: String(dialogId),
+  source_id: sessionId,
   messages: [{ message_id: "123", role: "user", content: "I live in Tokyo.", occurred_at: "2026-10-02T00:00:00Z" }],
 }, { deadline: Date.now() + 90_000 });
 
-if (operation.status === "staged" && operation.blob_id) {
-  const flush = await memoia.flushBlob(userId, String(dialogId), {
-    idempotency_key: `extract:${batchKey}`, append_operation_ids: [operation.operation_id],
+if (operation.status === "staged") {
+  const flush = await memoia.flushBlob(userId, sessionId, {
+    idempotency_key: flushKey,
+    append_operation_ids: [operation.operation_id],
   });
-  // Read this Operation later to confirm each Blob's result.
-  await memoia.getOperation(userId, flush.operation_id);
+  // Save flush.operation_id and poll it until the original task finishes.
 }
-await memoia.deleteMessages(userId, String(dialogId), {
-  idempotency_key: deletionKey,
-  message_ids: ["123"],
-});
 ```
 
-A Source is unique within the authenticated project and user. Every import or message deletion creates one server-owned Blob tied to its fixed idempotency key. Messages belong to the Source, not the Blob: overlapping batches reuse their identity and cannot create independent evidence from the same message. Changed body, role or occurrence time for an existing message ID returns a conflict. `deleteMessages()` deletes contributions across all Blobs in that Source; it does not require message bodies or event IDs. Event deletion and permanent account forgetting remain distinct operations.
+A Source is unique within the authenticated project and user. Messages belong to the Source. Overlapping appends reuse message identities, and changing the body, role or recording time for an existing ID returns a conflict. For image messages, the caller can pass `visual_description` with the text. Memoia stages the description until Fact completion or input expiry. Source evidence retains message IDs and times so the caller can resolve the image from its own storage.
 
-Completed imports atomically erase the temporary messages and candidates. Unfinished input defaults to seven days and an identical stage replay does not extend it. An expired staged Blob returns a terminal `input_required` result. For a lost acknowledgement, look up the original key before sending anything. Corrections retain their existing recovery protocol and require the same revision and original proposal.
+On completion, the Fact flush saves the Facts and indexes, clears temporary input and candidates, and records `fact_ids` and `memory_version` in the same commit. Unfinished input expires after seven days by default. Replay does not extend the deadline. If sealing returns `expired_append_inputs`, read `MemoiaError.expiredAppendOperationIds` and seal the still-valid range separately. If an accepted flush's input expires, the original receipt continues to report `input_required`.
+
+## Delete and correct Facts
+
+`deleteMessages(userId, sourceId, { idempotency_key, message_ids })` removes the messages' Fact contributions in the Source and returns a synchronous receipt. It needs neither message bodies nor Event IDs.
+
+`updateFact(userId, factId, input)` and `deleteFact(userId, factId, input)` use a caller-owned idempotency key, `expected_revision` and a short `reason`. An update replaces the editable content, subject, reporter, certainty, support groups and `fact_time`. The Fact retains its identity and must reference undeleted messages in its original Blob. A stale revision requires a fresh read and a new proposal. Fact deletion leaves the messages and other Facts intact. The `correct` receipt confirms the Fact/index change. Related Profile/Event text can remain readable until maintenance succeeds.
+
+## Recover original operations
 
 The base URL is an origin, without `/api`. `deadline` is an absolute Unix timestamp in milliseconds; `signal` may also cancel a request. The SDK sends `X-Memoia-Deadline-Ms` as the positive remaining duration in milliseconds, calculated for each attempt; the server applies it from receipt time and also enforces its own execution limit. Reads retain a 5-second per-attempt limit, writes a 90-second limit, both bounded by the caller's remaining deadline. The client never generates or replaces an idempotency key.
 
-Completed results are schema-validated Fact receipts with an immutable `memory_version`, not a promise of completed Profile/Event. `processing` is not success. Every mutation is sent once, including explicitly retryable 409/429 responses. Only safe reads receive bounded backoff. A transport timeout, lost write response, or any write 5xx throws `MemoiaError` with `outcome === "unknown"`; it does not prove rollback. For source operations, query `getOperationByKey()` before deciding how to recover. For unkeyed management writes, read the affected resource before another deliberate mutation.
+Only safe reads receive bounded backoff. Each SDK write sends one request. A timeout, lost response or write 5xx yields `MemoiaError` with `outcome === "unknown"`. Check `getOperationByKey()` for the original receipt. If the request needs resending, use the same key and original input. For unkeyed management writes, read the affected resource first. A retryable 409 requires the server's explicit `write_conflict` or `lease_lost` classification. `maxAttempts` controls read attempts.
 
-`flushUser(userId, { idempotency_key })` seals the user's completed, unassigned Blobs across Sources and returns a `kind: "flush"` Operation with `source_id`/`blob_id` null. `flush.blob_ids` is fixed; an empty flush completes without a model. `getMaintenance(userId)` exposes `pending_blob_count` and recent `flushes` with operation IDs, status, attempts and errors. Query `getOperation()`/`getOperationByKey()` and explicitly `retryOperation(userId, originalFlushId)` after repair; this does not resend source input. Profile/Event commit atomically with the flush receipt. Timed flushing defaults to 30s quiet / 120s maximum; old failed flushes retain their own retry budget while newer batches can proceed. Message deletion immediately removes invalid Fact evidence, but old derived text may remain readable until maintenance succeeds. Permanent user forgetting has no such delay.
+`retryOperation(userId, id)` resumes only an eligible original Fact flush or maintenance flush. It uses the original scope and checkpoints on the server. For delete or correction, recover using the original endpoint and idempotency key. Historical synchronous import receipts remain queryable.
 
-A flush selects a bounded prefix of whole Blobs (up to 100 scanned, 256 KiB of changes/current Facts); the tail remains in `pending_blob_count` for subsequent flushes. An indivisible oversized Blob fails explicitly without calling the model. Automatic backoff keeps the original Operation `processing` and its flush `pending`, with the last retryable error; only permanent failure or exhausted attempts becomes `failed`. Repeating recovery while processing does not reset attempts. SDK validation rejects contradictory Operation/progress states.
+## Maintain and query derived memory
+
+`flushUser(userId, { idempotency_key })` seals a bounded batch of already committed Fact changes and returns a `kind: "flush"` Operation. A session Blob can contribute multiple maintenance pages without changing its public ID. Timed flushing defaults to 30 seconds of quiet and a 120-second maximum wait to seal. `getMaintenance(userId)` reports pending Blob count and recent flush receipts. An empty flush completes without a model. Completed Profile/Event writes remain in place while a failed task recovers. The maintenance receipt completes after all writes succeed.
+
+`queryFacts()`, `queryEvents()` and `queryProfiles()` query independent pools. Query text stays in read-only POST bodies. The SDK exports the OpenAPI-derived request and result types. See the [API reference](../../docs/api.md) for filters and time fields. `getProjectIdentity()` returns the authenticated `project_id` for cache scope.
 
 `search()` returns complete `facts`, associated `events` and `profiles` as separate objects with stable IDs; a missing/deleted Event does not invalidate its Fact. `max_token_size` is the shared response budget (default 8192, range 1–10000). `exclude_fact_ids`, `exclude_event_ids` and `exclude_profile_ids` accept at most 500 UUIDs each and independently exclude those exact output IDs, without revision tracking. An excluded Fact may still locate unseen associated Events/Profiles, including entries generated later by maintenance or omitted from a previous response budget. Navigation anchors have a separate bounded candidate pool and never displace unseen Facts; all returned objects and evidence remain within the shared budget. `exclude_profile_topics` accepts at most 50 nonempty topic strings of at most 256 characters and filters only Profiles, not Facts or Events. Invalid or oversized exclusions fail locally rather than being silently shortened. Existing `include_events` / `event_max_tokens` options remain compatible; no execution controls enter the POST body. Story fields include title, summary, keywords, `event_time`, location, content and a separate interpretation which is not Fact evidence. Event `event_time` remains nullable prose, distinct from structured `FactTime`; no runtime alias reads the former Event `time` key. Search rejects that old key; list/query EventData retains its existing extensible response shape.
-
-HTTP 409 is recoverable only when the server explicitly supplies `detail.retryable: true` with `detail.code: "write_conflict"` or `"lease_lost"`. The SDK preserves that classification for the caller; `retryable` is not permission for SDK write replay. Other conflicts, including changed idempotent input, do not authorize recovery. Task consumers own receipt lookup and explicit `retryOperation()` on persisted input. `maxAttempts` controls read attempts only.
 
 `forgetUser(userId, { deadline })` permanently forgets an account within the authenticated project. It requires a valid UUID and accepts only HTTP 200 with the same UUID and `forgotten: true`; an empty response, another user's receipt, or a malformed acknowledgment is not proof of forgetting. UUID letter casing is normalized for identity comparison. This is not ordinary event deletion, message retraction, or an unconfirmed deletion. The server tombstone also blocks later imports and resumed operations with `410 user_forgotten`, a permanent non-retryable error.
 
@@ -68,21 +71,21 @@ Transport callbacks are invoked as standalone functions, never as methods of the
 
 Requests use `redirect: "manual"`, which the Worker runtime supports, and reject every 3xx response without following `Location` or disclosing it. Redirected mutations retain an unknown outcome because their first request may already have executed. `pnpm test` runs both Node contract tests and an isolated workerd transport regression; all workerd outbound requests are intercepted locally, without business credentials or network access.
 
-`listSources()`, `listOperations()`, and `getHistory()` accept server-defined `limit`/`offset` pagination together with transport options. Operation listings allow an Inspector refresh to recover accepted work without storing a second browser session. History contains actual profile revisions and added/removed diffs; it excludes withdrawn evidence and is not a restore API. `retryOperation()` resumes the server's persisted request without resending message bodies.
+`listSources()`, `listOperations()` and `getHistory()` accept server-defined `limit`/`offset` pagination and transport options. Operation listings let callers locate accepted work after a refresh. History returns profile revisions and added/removed diffs with withdrawn evidence excluded.
 
 Administrative methods are `listProjects`, `createProject`, `updateProject`, `listKeys`, `createKey`, `revokeKey`, and the explicit `rotateLegacyToken`. Project/key pagination follows server OpenAPI. Authorization remains on the server: root creates/suspends projects; project administrators manage only their own keys. Key creation returns its token once, revocation returns no body, and lost administrative mutation acknowledgements are not silently replayed. Rotating a legacy token immediately invalidates clients using the prior token.
 
-## Bounded provenance reads (0.5)
+## Bounded provenance reads
 
 `listSources()` returns summaries only (`source_id`, `legacy`, `created_at`). Detail reads use `getSource(userId, sourceId, requestOptions?, page?)`; the third argument remains transport options. `page` accepts `limit` (default 50, maximum 100), `message_offset`, `blob_offset`, and `evidence_offset` (default 0).
 
 Each detail collection has its own required nullable `next_*_offset`. Only `null` means that collection is exhausted; missing pagination fields are an invalid response, not proof of completion. Message pages include active and deleted IDs, with `deleted_message_ids` as a subset of that same page. Evidence retains its supporting message observations even when they lie outside the message page. The SDK never traverses a whole source automatically.
 
-Ordering is message ID, Blob `(created_at, id)`, and evidence `(occurred_at, id)`. Offset pagination is bounded per response, not a snapshot or an O(1) deep-page guarantee; refresh after concurrent changes. This read-contract change requires coordinated server/consumer rollout but no new schema revision.
+Ordering is message ID, Blob `(created_at, id)`, and evidence `(occurred_at, id)`. Offset pagination is bounded per response. Refresh after concurrent changes.
 
 ## Build and local consumption
 
-Daily usage requires all counters and `usage_complete`: false marks recorded calls without provider token counts. Totals are recorded subtotals, not estimated consumption or a financial ledger. Statistics outages return an error, not a zero total; lost/expired Redis counters cannot be reconstructed from this flag. Evidence responses require `certainty` (including `legacy`) and the actual positive `revision`. Missing response fields fail SDK validation rather than being replaced with zero, a guessed revision or a completeness flag. Request parameters with server defaults remain optional.
+Daily usage requires all counters and `usage_complete`. A false value flags recorded calls without provider token counts. Usage values are recorded subtotals. Evidence responses require `certainty` (including `legacy`) and a positive `revision`. Missing required fields fail SDK validation.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -93,30 +96,9 @@ pnpm pack
 
 The generated validators are standalone JavaScript: runtime use requires no Node.js APIs, dynamic evaluation, or Ajv dependency. A fixed-version tarball can be copied into a consumer's `vendor/` directory and referenced through a `file:` dependency with its lockfile; no registry publication is required for first integration. Regenerate after exporting server OpenAPI. The generated-schema check must be part of verification before distribution.
 
-## Transient image input
+## Time evidence
 
-Import messages may include `images: [{ url, mimeType, width, height, byteSize }]`: at most one
-public HTTP(S) image per message, declared size at most 10 MiB, JPEG/PNG/WebP or non-animated GIF.
-`content` remains required and may be empty only with an image. The caller validates actual
-bytes, ownership and link availability. Memoia forwards the image to the extraction model with
-`store: false`; URLs exist only in the current extraction process/request and are never written to
-Operation input or durable memory. Stored input has only an image-count marker; message identity
-hashes include the original attachment. Text input and validated candidates retain their existing
-seven-day expiry. For unfinished image operations, `retryOperation()` returns `input_required`
-instead of attempting extraction without images. Query the original receipt first; after confirming
-resupply is needed, call `importBlob()` with the same key and complete original messages/images.
-This resumes an eligible original failure, reuses its saved candidate where available, returns a
-completed receipt unchanged and does not replay permanent failures. Never blindly resubmit an
-unknown write; inspect its original handle. Concurrent same-key requests retain one effect.
-An `input_required` receipt remains recoverable by explicit same-key resupply; it is not a permanent
-model/configuration rejection.
-Source evidence and search keep only existing message IDs/times, never image URLs. Resolve
-images from those IDs in the calling system. No new database migration or image retrieval
-field is introduced. This wire extension does not prove deployed vision-model quality.
-
-## Time evidence (0.4)
-
-Import messages may include `time_zone` (original IANA zone). `occurred_at` remains the message recording instant, not the date of the fact it describes. Returned source evidence and search facts preserve `fact_time` (inclusive `YYYY-MM-DD` dates, precision and verbatim source expressions) and `source_messages` (recording instants/zones). `FactTime` and `Evidence` are exported from generated OpenAPI. The former `EventTime` type and Fact evidence `event_time` field are removed; Event story `event_time` is separate nullable prose. Server and consumers must upgrade together. `event_after` and `event_before` query parameters are unchanged. Unknown dates must remain unknown. A month/year range is not an exact occurrence or duration. No model backfill of historical identity or time is performed.
+Import messages may include the original IANA `time_zone`. `occurred_at` is the message recording instant. Fact `fact_time` carries the supported calendar date or range, precision and original expressions. Fact `created_at` is first insertion and `updated_at` is the latest content or evidence change. Unknown legacy timestamps are null. `source_messages` carries supporting message times and zones. The SDK exports `FactTime` and `Evidence`. Event `event_time` is separate, nullable story text.
 
 `search` and `getContext` send private queries in POST JSON bodies and use read timeouts/retry classification. User, profiles, events, project config/usage and source operations all use this same client. Query retrieval fuses lexical/vector rankings per Fact independently of Event; context keeps their global order. Temporary query embedding failure preserves lexical retrieval; input or configuration rejection fails explicitly. No query date parsing or temporal score is added.
 

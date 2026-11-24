@@ -12,7 +12,7 @@ Fact 抽取与 Profile/Event 统一 maintenance 始终发送 Responses `reasonin
 
 ## 不变量与归属
 
-Fact 是有消息支持的历史陈述，不维护唯一正确的当前真相；显式人工编辑可原位纠正抽取错误。Profile 整理长期属性和人物关系，Event 组织故事。后两者不能修改 Fact 或产生新的事实依据。Luvel 决定消息范围并压缩分段；Memoia 只处理一个完整有界 Blob，不建设第二套分块或通用任务平台。
+Fact 是有消息支持的历史陈述，不维护唯一正确的当前真相；显式人工编辑可原位纠正抽取错误。Profile 整理长期属性和人物关系，Event 组织故事。后两者不能修改 Fact 或产生新的事实依据。Luvel 决定消息范围并压缩分段；Memoia 按会话接收追加，每次 Fact flush 处理调用方指定的有界范围。
 
 ```text
 Project → User → Source（调用方 source_id）
@@ -21,7 +21,7 @@ Project → User → Source（调用方 source_id）
                                               ├→ 独立检索索引
                                               ├→ Profile（Fact 支撑）
                                               └↔ Event（多对多）
-User → flush Operation（固定 Blob 集合）→ 一个 AgentLoop → 写入 Profile / Event → 完成回执
+User → flush Operation（固定 Fact 变更批次）→ 一个 AgentLoop → 写入 Profile / Event → 完成回执
 ```
 
 Source 的自然键为 (project_id, user_id, source_id)，Message 再加 message_id；消息属于 Source，不属于 Blob。幂等键映射一次追加、封批或修正操作，正文 hash 只验证同键同请求，不将两次真实发生去重。重叠消息不能成为第二份独立证据；同消息 ID 的正文、角色或发生时间冲突明确报错。复合外键约束用户、项目、来源、批次与派生关联，不能只靠代码填对字段。
@@ -71,11 +71,11 @@ Fact.created_at 是首次数据库插入时间，updated_at 是最近修改时�
 
 Source／用户整组清理仍由 PostgreSQL 外键在原事务内完成。0016 在所属 Source 已消失时跳过无意义的延迟逐消息扫描；来源仍在时保留证据及 Blob 成员约束，并使用现有归属和消息成员索引。移除重复旧单列 Fact→Blob 外键，保留复合归属外键；不新增清理任务、不延长超时、不改删除 API 语义。
 
-## 固定 Blob、flush 与统一 AgentLoop
+## 会话 Blob、flush 与统一 AgentLoop
 
 同一 Session 的消息追加到同一 Blob；删除和人工 Fact 编辑另记变更 Blob。幂等键定位原 Operation，重试不能扩大处理范围。Fact、索引、回执和 Blob 的 fact_changes（新增、人工编辑、删除、证据及时间变化引用）同事务提交。Blob 不保存聊天原文。人工 Profile 编辑、Event 删除和 Agent 写入不生产 Blob。
 
-主动 POST flush 或 Worker 定时 flush，在短事务按完成顺序选取待处理的 Blob 变更；可跨 Source，不跨项目/用户。每次扫描最多 100 个，变更引用与当前有效 Fact 的 JSON 总预算为 256 KiB，长会话 Blob 可以按变更前缀分批处理。剩余、在途及随后完成的 Blob 留给下一次，pending_blob_count 可见；同键重试不扩大集合。单个 Blob 已超限时固定原集合并明确报 maintenance_capacity，不无限调用模型；恢复仍受容量校验。查询不改变计时，自动静默 30 秒、最长等待 120 秒。显式空 flush 保留 completed 回执。自动唤醒发现已没有待处理 Blob 时直接返回。
+主动 POST flush 或 Worker 定时 flush，在短事务按完成顺序选取待处理的 Blob 变更。每次扫描最多 100 个 Blob，可跨 Source，范围仍限当前项目和用户。变更引用与当前有效 Fact 的 JSON 总预算为 256 KiB。会话 Blob 按待维护变更前缀分批，旧固定 Blob 仍作为一个整体。若首个不可再拆的变更或旧批次超限，原回执报告 `maintenance_capacity`。剩余及随后完成的变更留给下一次，`pending_blob_count` 可见。同键重试沿用已封范围。自动静默 30 秒、最长等待 120 秒，查询不改变计时。显式空 flush 保留 `completed` 回执。自动唤醒发现没有待处理 Blob 时直接返回。
 
 Operation（`kind=flush`）是公开身份，保存固定范围；同 ID 的 `queue_tasks` 保存执行状态、租约及恢复进度。每个项目和用户最多一个派生执行者。首次失败后按 5／15／60 分钟退避，耗尽后沿原 Operation 显式恢复。退避期间后续批次可以运行。
 
