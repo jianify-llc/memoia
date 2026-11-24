@@ -559,6 +559,9 @@ export function createApp(
       201,
     ),
   );
+  app.get("/api/users/:user_id/profiles/:profile_id", async (c) =>
+    c.json(await retrieval.getProfile(runtime(c), scope(c), pathUuid(c, "profile_id"))),
+  );
   app.patch("/api/users/:user_id/profiles/:profile_id", async (c) => {
     await management.updateProfile(
       runtime(c).db,
@@ -586,6 +589,16 @@ export function createApp(
         p.time_range_in_days,
       ),
     );
+  });
+  app.post("/api/users/:user_id/events", async (c) =>
+    c.json(await management.addEvent(runtime(c), scope(c), body(c, "EventInput")), 201),
+  );
+  app.get("/api/users/:user_id/events/:event_id", async (c) =>
+    c.json(await retrieval.getEvent(runtime(c), scope(c), pathUuid(c, "event_id"))),
+  );
+  app.patch("/api/users/:user_id/events/:event_id", async (c) => {
+    await management.updateEvent(runtime(c), scope(c), pathUuid(c, "event_id"), body(c, "EventInput"));
+    return c.body(null, 204);
   });
   app.delete("/api/users/:user_id/events/:event_id", async (c) => {
     await management.deleteEvent(

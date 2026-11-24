@@ -555,23 +555,29 @@ export async function getProfiles(runtime: Runtime, scope: UserScope) {
       [...params(scope)],
     )
   ).rows;
+  return {
+    profiles: (await profileRecords(tx, scope, rows)).sort(
+      (a, b) =>
+        a.topic.localeCompare(b.topic) ||
+        a.sub_topic.localeCompare(b.sub_topic) ||
+        a.id.localeCompare(b.id),
+    ),
+  };
+}
+async function profileRecords(tx: Sql, scope: UserScope, rows: any[]) {
   const entries = await profileEntries(tx, scope, rows, new Map());
   const sourceById = new Map(rows.map((row) => [row.id, row.attributes]));
-  return {
-    profiles: entries
-      .map(({ score, fact_ids, ...row }) => {
-        const attrs = sourceById.get(row.id);
-        return attrs && !Object.hasOwn(attrs, "fact_ids")
-          ? { ...row, source_ids: attrs.source_ids ?? [] }
-          : row;
-      })
-      .sort(
-        (a, b) =>
-          a.topic.localeCompare(b.topic) ||
-          a.sub_topic.localeCompare(b.sub_topic) ||
-          a.id.localeCompare(b.id),
-      ),
-  };
+  return entries.map(({ score, fact_ids, ...row }) => {
+    const attrs = sourceById.get(row.id);
+    return attrs && !Object.hasOwn(attrs, "fact_ids")
+      ? { ...row, source_ids: attrs.source_ids ?? [] }
+      : row;
+  });
+}
+export async function getProfile(runtime: Runtime, scope: UserScope, id: string) {
+  const rows = await selectedRows(runtime.db, scope, "profiles", {}, [id]);
+  if (!rows.length) throw new SourceError("not_found", "Profile not found", 404, false);
+  return (await profileRecords(runtime.db, scope, rows))[0];
 }
 export async function getEvents(
   runtime: Runtime,
@@ -586,18 +592,24 @@ export async function getEvents(
       [...params(scope), days, count],
     )
   ).rows;
+  return { events: await eventRecords(tx, scope, rows) };
+}
+async function eventRecords(tx: Sql, scope: UserScope, rows: any[]) {
   const data = await views(tx, scope, rows);
-  return {
-    events: rows.map((row) => {
-      const { fact_ids, ...eventData } = data.get(row.id);
-      return {
-        id: row.id,
-        event_data: eventData,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-      };
-    }),
-  };
+  return rows.map((row) => {
+    const { fact_ids, ...eventData } = data.get(row.id);
+    return {
+      id: row.id,
+      event_data: eventData,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  });
+}
+export async function getEvent(runtime: Runtime, scope: UserScope, id: string) {
+  const rows = await selectedRows(runtime.db, scope, "events", {}, [id]);
+  if (!rows.length) throw new SourceError("not_found", "Event not found", 404, false);
+  return (await eventRecords(runtime.db, scope, rows))[0];
 }
 type Search = {
   query: string;

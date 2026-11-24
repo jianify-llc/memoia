@@ -17,6 +17,32 @@ it("requires exactly one destination for a bound client", () => {
   assert.throws(() => new MemoiaClient({ apiKey, binding, baseUrl: "https://elsewhere.invalid" }), TypeError);
 });
 
+it("writes editable Event fields and reads a single Event or Profile", async () => {
+  const calls = [];
+  const time = "2026-10-02T00:00:00Z";
+  const baseRecord = { id: eventId, created_at: time, updated_at: time };
+  const event = { ...baseRecord, event_data: { content: "Visited the park." } };
+  const profile = { ...baseRecord, content: "Enjoys walking.", topic: "lifestyle", sub_topic: "", source_ids: [] };
+  const api = client(async (url, init) => {
+    const path = new URL(url).pathname;
+    calls.push([init.method, path, init.body ? JSON.parse(init.body) : undefined]);
+    if (init.method === "GET") return json(path.includes("/profiles/") ? profile : event);
+    return init.method === "POST" ? json({ id: eventId }, 201) : new Response(null, { status: 204 });
+  });
+  const input = { content: "Visited the park.", title: null };
+  assert.deepEqual(await api.addEvent(user, input), { id: eventId });
+  await api.updateEvent(user, eventId, input);
+  assert.deepEqual(await api.getEvent(user, eventId), event);
+  assert.deepEqual(await api.getProfile(user, eventId), profile);
+  assert.throws(() => api.addEvent(user, { ...input, fact_ids: [eventId] }), { code: "INVALID_INPUT" });
+  assert.deepEqual(calls, [
+    ["POST", `/api/users/${user}/events`, input],
+    ["PATCH", `/api/users/${user}/events/${eventId}`, input],
+    ["GET", `/api/users/${user}/events/${eventId}`, undefined],
+    ["GET", `/api/users/${user}/profiles/${eventId}`, undefined],
+  ]);
+});
+
 describe("staging and Fact flush", () => {
   const input = { ...source, messages: [{ ...source.messages[0], content: "", visual_description: "A blue bicycle." }] };
   const staged = { ...complete, kind: "append", blob_id: sourceId, status: "staged", result: null };

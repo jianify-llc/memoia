@@ -471,7 +471,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** Get Profile */
+        get: operations["getProfile"];
         put?: never;
         post?: never;
         /** Delete Profile */
@@ -492,7 +493,8 @@ export interface paths {
         /** Get Events */
         get: operations["getEvents"];
         put?: never;
-        post?: never;
+        /** Add Event */
+        post: operations["addEvent"];
         delete?: never;
         options?: never;
         head?: never;
@@ -506,14 +508,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** Get Event */
+        get: operations["getEvent"];
         put?: never;
         post?: never;
         /** Delete Event */
         delete: operations["deleteEvent"];
         options?: never;
         head?: never;
-        patch?: never;
+        /** Update Event */
+        patch: operations["updateEvent"];
         trace?: never;
     };
     "/api/users/{user_id}/context": {
@@ -743,6 +747,16 @@ export interface components {
              * @description List of event tags
              */
             event_tags?: components["schemas"]["EventTag"][] | null;
+        };
+        /** EventInput */
+        EventInput: {
+            content: string;
+            title?: string | null;
+            summary?: string | null;
+            keywords?: string | null;
+            event_time?: string | null;
+            location?: string | null;
+            interpretation?: string | null;
         };
         /** EventQuery */
         EventQuery: {
@@ -2856,6 +2870,36 @@ export interface operations {
             };
         };
     };
+    getProfile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Profile"];
+                };
+            };
+            /** @description Profile not found in this user and project */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     deleteProfile: {
         parameters: {
             query?: never;
@@ -2954,6 +2998,78 @@ export interface operations {
             };
         };
     };
+    addEvent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EventInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IdData"];
+                };
+            };
+            /** @description The request or Event text exceeds the configured input budget. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    getEvent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+                event_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EventRecord"];
+                };
+            };
+            /** @description Event not found in this user and project */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     deleteEvent: {
         parameters: {
             query?: never;
@@ -2968,6 +3084,54 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    updateEvent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                user_id: string;
+                event_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EventInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The Event changed before the edit was saved. Read the Event before retrying. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request or Event text exceeds the configured input budget. */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };

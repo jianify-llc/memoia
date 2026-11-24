@@ -10,8 +10,17 @@ import { SourceError } from "./errors.js";
 import { inSpan } from "./observability.js";
 import { readServiceConfig } from "./config.js";
 import { writeUsageEvent } from "./usage.js";
+import type { components } from "../../../sdks/typescript/src/generated/openapi";
 
 export const countTokens = (text: string): number => encode(text).length;
+export function eventIndexText(event: Partial<Pick<
+  components["schemas"]["EventData"],
+  "title" | "summary" | "keywords" | "event_time" | "location" | "content"
+>>): string {
+  return [event.title, event.summary, event.keywords, event.event_time, event.location, event.content]
+    .filter(Boolean)
+    .join("\n");
+}
 export interface ModelConfig {
   llm_model: string;
   reasoning_effort: string;
@@ -495,7 +504,7 @@ async function embed(
   if (texts.some((text) => countTokens(text) > config.embedding_max_token_size))
     throw new SourceError(
       "embedding_input_too_long",
-      "Complete Fact exceeds embedding input limit",
+      "Text exceeds embedding input limit",
       413,
       false,
     );

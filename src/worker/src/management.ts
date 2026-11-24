@@ -1,6 +1,12 @@
-import { isForgottenUser, type Database, type UserScope } from "./db";
+import { assertActive, isForgottenUser, type Database, type UserScope } from "./db";
 import type { Principal, Scope } from "./auth";
 import { SourceError } from "./errors";
+import { embeddings, eventIndexText, getConfig } from "./models";
+import type { Runtime } from "./runtime";
+import type { components } from "../../../sdks/typescript/src/generated/openapi";
+
+type EventInput = components["schemas"]["EventInput"];
+type IndexedEvent = { event_data: components["schemas"]["EventData"]; embedding: string | null };
 
 function authorize(
   principal: Principal,
@@ -308,6 +314,63 @@ export async function deleteProfile(
   );
   if (!r.rowCount) missing("Profile");
 }
+async function eventEmbedding(
+  runtime: Runtime,
+  scope: UserScope,
+  body: EventInput,
+  existing?: IndexedEvent,
+): Promise<string | null> {
+  const config = await getConfig(runtime, scope.projectId);
+  if (!config.enable_event_embedding) return null;
+  const text = eventIndexText(body);
+  if (existing?.embedding && eventIndexText({
+    ...existing.event_data,
+    content: existing.event_data.content ?? existing.event_data.event_tip,
+  }) === text) return existing.embedding;
+  const [vector] = await embeddings(runtime, scope.projectId, [text], "document", scope.userId, config);
+  return JSON.stringify(vector);
+}
+
+export async function addEvent(runtime: Runtime, scope: UserScope, body: EventInput) {
+  await assertActive(runtime.db, scope);
+  const embedding = await eventEmbedding(runtime, scope, body);
+  const id = crypto.randomUUID();
+  const saved = await runtime.db.query(
+    `INSERT INTO memoia.user_events (id,user_id,project_id,event_data,embedding)
+     SELECT $3,id,project_id,$4::jsonb,$5::vector FROM memoia.users
+      WHERE id=$1 AND project_id=$2`,
+    [scope.userId, scope.projectId, id, JSON.stringify({
+      ...body, memoia_v2: true, _impact_fact_ids: [],
+    }), embedding],
+  );
+  if (!saved.rowCount) {
+    await assertActive(runtime.db, scope);
+    missing("User");
+  }
+  return { id };
+}
+
+export async function updateEvent(runtime: Runtime, scope: UserScope, id: string, body: EventInput) {
+  const { rows: [existing] } = await runtime.db.query<IndexedEvent & { version: string }>(
+    "SELECT event_data,embedding::text,version FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=$3",
+    [scope.userId, scope.projectId, id],
+  );
+  if (!existing) return missing("Event");
+  const embedding = await eventEmbedding(runtime, scope, body, existing);
+  const saved = await runtime.db.query(
+    `UPDATE memoia.user_events
+        SET event_data=(event_data-ARRAY['content','event_tip','title','summary','keywords','event_time','location','interpretation'])
+              || $4::jsonb
+              || CASE WHEN event_data ? 'event_tip'
+                 THEN jsonb_build_object('event_tip',$4::jsonb->>'content') ELSE '{}'::jsonb END,
+            embedding=$5::vector,version=version+1,updated_at=clock_timestamp()
+      WHERE user_id=$1 AND project_id=$2 AND id=$3 AND version=$6`,
+    [scope.userId, scope.projectId, id, JSON.stringify(body), embedding, existing.version],
+  );
+  if (!saved.rowCount)
+    throw new SourceError("write_conflict", "Event changed before publication", 409, true);
+}
+
 export async function deleteEvent(db: Database, scope: UserScope, id: string) {
   const removed = await db.query(
     `WITH removed AS (

@@ -1908,6 +1908,50 @@
             }
           }
         }
+      },
+      "get": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Get Profile",
+        "operationId": "getProfile",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          },
+          {
+            "name": "profile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Profile Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Profile"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Profile not found in this user and project"
+          }
+        }
       }
     },
     "/api/users/{user_id}/events": {
@@ -1972,6 +2016,60 @@
             }
           }
         }
+      },
+      "post": {
+        "summary": "Add Event",
+        "operationId": "addEvent",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdData"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request or Event text exceeds the configured input budget."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "events"
+        ]
       }
     },
     "/api/users/{user_id}/events/{event_id}": {
@@ -2013,6 +2111,110 @@
                 }
               }
             }
+          }
+        }
+      },
+      "patch": {
+        "summary": "Update Event",
+        "operationId": "updateEvent",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Event Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "The Event changed before the edit was saved. Read the Event before retrying."
+          },
+          "413": {
+            "description": "The request or Event text exceeds the configured input budget."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "events"
+        ]
+      },
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Get Event",
+        "operationId": "getEvent",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "User Id"
+            }
+          },
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Event Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventRecord"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Event not found in this user and project"
           }
         }
       }
@@ -2734,6 +2936,63 @@
         },
         "type": "object",
         "title": "EventData"
+      },
+      "EventInput": {
+        "type": "object",
+        "title": "EventInput",
+        "properties": {
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16000
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 4000
+          },
+          "keywords": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 1000
+          },
+          "event_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 1000
+          },
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 1000
+          },
+          "interpretation": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 4000
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "content"
+        ]
       },
       "EventQuery": {
         "properties": {

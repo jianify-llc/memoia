@@ -272,6 +272,7 @@ test(
         [event, `[${vector.join(",")}]`],
       );
       let embeddingCalls = 0;
+      let responseVector = vector;
       const server = createServer((req, res) => {
         embeddingCalls++;
         req.resume();
@@ -280,7 +281,7 @@ test(
           res.end(
             JSON.stringify({
               object: "list",
-              data: [{ object: "embedding", index: 0, embedding: vector }],
+              data: [{ object: "embedding", index: 0, embedding: responseVector }],
               model: "test",
               usage: { prompt_tokens: 1, total_tokens: 1 },
             }),
@@ -346,6 +347,33 @@ test(
         const data: any = await result.json();
         assert.match(data.context, /enjoys coffee/);
         assert.equal(embeddingCalls, 4);
+        const eventsPath = `/api/users/${user}/events`;
+        const writeEvent = (method: string, path: string, body: unknown) =>
+          app.request(path, {
+            method,
+            headers: { Authorization: `Bearer ${admin}`, "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          }, semanticEnv);
+        const indexed = await writeEvent("POST", eventsPath, { content: "Walked in the park." });
+        assert.equal(indexed.status, 201);
+        const { id: indexedId } = await indexed.json() as { id: string };
+        assert.equal(embeddingCalls, 5);
+        const indexedPath = `${eventsPath}/${indexedId}`;
+        assert.equal((await writeEvent("PATCH", indexedPath, {
+          content: "Walked in the park.", interpretation: "Enjoyed the calm.",
+        })).status, 204);
+        assert.equal(embeddingCalls, 5);
+        responseVector = [0, 1, ...Array(1534).fill(0)];
+        assert.equal((await writeEvent("PATCH", indexedPath, {
+          content: "Walked by the river.",
+        })).status, 204);
+        assert.equal(embeddingCalls, 6);
+        const { rows: [persisted] } = await db.query(
+          "SELECT embedding::text AS embedding FROM memoia.user_events WHERE id=$1",
+          [indexedId],
+        );
+        assert.deepEqual(JSON.parse(persisted.embedding), responseVector);
+        assert.equal((await api("DELETE", indexedPath, admin)).status, 204);
       } finally {
         server.close();
         await once(server, "close");
@@ -396,6 +424,22 @@ test(
         (await api("GET", "/api/project/config", reader)).data.profile_config,
         "language: en",
       );
+      const eventPath = `/api/users/${user}/events`;
+      const directProfile = await api("GET", `/api/users/${user}/profiles/${profile.data.id}`, reader);
+      assert.equal(directProfile.status, 200);
+      assert.ok(validators.validateProfile(directProfile.data));
+      assert.equal((await api("GET", `/api/users/${foreign}/profiles/${profile.data.id}`, reader)).status, 404);
+      const edited = { content: "A confirmed coffee preference.", interpretation: "Likes the ritual." };
+      assert.equal((await api("PATCH", `/api/users/${foreign}/events/${event}`, admin, edited)).status, 404);
+      assert.equal((await api("PATCH", `${eventPath}/${event}`, reader, edited)).status, 403);
+      assert.equal((await api("PATCH", `${eventPath}/${event}`, admin, edited)).status, 204);
+      const editedEvent = await api("POST", `${eventPath}/query`, reader, { ids: [event] });
+      assert.equal(editedEvent.status, 200);
+      assert.equal(editedEvent.data.events[0].event_data.content, edited.content);
+      assert.equal(editedEvent.data.events[0].event_data.title, null);
+      assert.deepEqual(editedEvent.data.events[0].event_data.fact_ids, [fact]);
+      const { rows: [eventVersion] } = await db.query("SELECT version FROM memoia.user_events WHERE id=$1", [event]);
+      assert.equal(eventVersion.version, "2");
       await db.query(
         `UPDATE memoia.memory_blobs SET fact_completed_at=now(),fact_changes=$2::jsonb WHERE id=$1`,
         [blob, JSON.stringify([{ kind: "updated", fact_id: fact }])],
@@ -417,6 +461,34 @@ test(
       );
       assert.equal(pendingEvent.status, 200);
       assert.deepEqual(pendingEvent.data.events, []);
+      const directPending = await api("GET", `${eventPath}/${event}`, reader);
+      assert.equal(directPending.status, 200);
+      assert.deepEqual(directPending.data.event_data.evidence, []);
+      assert.equal((await api("GET", `/api/users/${foreign}/events/${event}`, reader)).status, 404);
+      const eventBody = { title: "Manual observation", content: "用户周末骑自行车去公园，回家后记录了路线和天气。".repeat(260) };
+      assert.equal((await api("POST", eventPath, reader, eventBody)).status, 403);
+      assert.equal((await api("POST", eventPath, admin, { ...eventBody, fact_ids: [fact] })).status, 422);
+      const manualEvent = await api("POST", eventPath, admin, eventBody);
+      assert.equal(manualEvent.status, 201);
+      assert.equal((await api("PATCH", `${eventPath}/${manualEvent.data.id}`, admin, eventBody)).status, 204);
+      const manual = await api("POST", `${eventPath}/query`, reader, {
+        ids: [manualEvent.data.id],
+        max_token_size: 10000,
+      });
+      assert.equal(manual.status, 200);
+      assert.equal(manual.data.events[0].event_data.content, eventBody.content);
+      assert.deepEqual(manual.data.events[0].event_data.fact_ids, []);
+      assert.deepEqual(manual.data.events[0].event_data.evidence, []);
+      const budgetLimited = await api("POST", `${eventPath}/query`, reader, {
+        ids: [manualEvent.data.id], max_token_size: 100,
+      });
+      assert.deepEqual(budgetLimited.data.events, []);
+      const directManual = await api("GET", `${eventPath}/${manualEvent.data.id}`, reader);
+      assert.ok(validators.validateEvent(directManual.data));
+      assert.equal(directManual.data.event_data.content, eventBody.content);
+      assert.equal((await api("DELETE", `${eventPath}/${manualEvent.data.id}`, admin)).status, 204);
+      const deleted = await api("POST", `${eventPath}/query`, reader, { ids: [manualEvent.data.id] });
+      assert.deepEqual(deleted.data.events, []);
       const revoke = await api(
         "DELETE",
         `/api/projects/${project}/keys/${read.data.key_id}`,

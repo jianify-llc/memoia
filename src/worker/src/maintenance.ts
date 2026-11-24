@@ -20,6 +20,7 @@ import {
 } from "./runtime.js";
 import {
   embeddings,
+  eventIndexText,
   getConfig,
   getConfigSnapshot,
   type ModelConfig,
@@ -1800,17 +1801,6 @@ export class MaintenanceContext {
       ([, change]) => change.action === "upsert",
     );
     if (!this.config.enable_event_embedding || !upserts.length) return vectors;
-    const indexText = (event: Mutation) =>
-      [
-        event.title,
-        event.summary,
-        event.keywords,
-        event.event_time,
-        event.location,
-        event.content,
-      ]
-        .filter(Boolean)
-        .join("\n");
     const existing = await this.runtime.db.query(
       "SELECT id,version,event_data AS data,embedding FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])",
       [...scoped(this.claim), upserts.map(([id]) => id)],
@@ -1821,10 +1811,10 @@ export class MaintenanceContext {
       const row = current.get(id);
       if (resuming && alreadyPublished(change, this.reads.events.get(id) ?? null, row))
         continue;
-      const text = indexText(change);
+      const text = eventIndexText(change);
       if (
         row?.embedding &&
-        indexText({
+        eventIndexText({
           ...row.data,
           content: row.data.content ?? row.data.event_tip,
         }) === text

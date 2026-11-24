@@ -55,6 +55,10 @@ Only safe reads receive bounded backoff. Each SDK write sends one request. A tim
 
 ## Maintain and query derived memory
 
+`addEvent(userId, input)` creates a standalone story and returns its ID. `updateEvent(userId, eventId, input)` replaces editable story fields and keeps existing Fact associations. Omitted optional fields are cleared. A Fact change can still trigger maintenance of the edited Event. Use `getEvents()` or `queryEvents()` to read standalone stories. `deleteEvent()` deletes an Event and leaves its Facts in place.
+
+`getEvent(userId, eventId)` and `getProfile(userId, profileId)` read a single record by ID with the same shape as the corresponding list entry. A missing or out-of-scope ID returns 404. These reads apply the same evidence filtering as the lists and have no search token budget.
+
 `flushUser(userId, { idempotency_key })` seals a bounded batch of already committed Fact changes and returns a `kind: "flush"` Operation. A session Blob can contribute multiple maintenance pages without changing its public ID. Timed flushing defaults to 30 seconds of quiet and a 120-second maximum wait to seal. `getMaintenance(userId)` reports pending Blob count and recent flush receipts. An empty flush completes without a model. Completed Profile/Event writes remain in place while a failed task recovers. The maintenance receipt completes after all writes succeed.
 
 `queryFacts()`, `queryEvents()` and `queryProfiles()` query independent pools. Query text stays in read-only POST bodies. The SDK exports the OpenAPI-derived request and result types. See the [API reference](../../docs/api.md) for filters and time fields. `getProjectIdentity()` returns the authenticated `project_id` for cache scope.

@@ -20,6 +20,7 @@ export type UpdateFact = RequestBody<paths["/api/users/{user_id}/facts/{fact_id}
 export type DeleteFact = RequestBody<paths["/api/users/{user_id}/facts/{fact_id}"]["delete"]>;
 export type Blob = ResponseBody<paths["/api/users/{user_id}/blobs/{blob_id}"]["get"]>;
 export type Profiles = ResponseBody<paths["/api/users/{user_id}/profiles"]["get"]>;
+export type Profile = ResponseBody<paths["/api/users/{user_id}/profiles/{profile_id}"]["get"]>;
 export type Sources = ResponseBody<paths["/api/users/{user_id}/sources"]["get"]>;
 export type Source = ResponseBody<paths["/api/users/{user_id}/sources/{source_id}"]["get"]>;
 export type History = ResponseBody<paths["/api/users/{user_id}/history"]["get"]>;
@@ -42,6 +43,9 @@ export type User = ResponseBody<paths["/api/users/{user_id}"]["get"]>;
 export type Users = ResponseBody<paths["/api/users"]["get"]>;
 export type UsersQuery = NonNullable<paths["/api/users"]["get"]["parameters"]["query"]>;
 export type Events = ResponseBody<paths["/api/users/{user_id}/events"]["get"]>;
+export type EventRecord = ResponseBody<paths["/api/users/{user_id}/events/{event_id}"]["get"]>;
+export type EventInput = RequestBody<paths["/api/users/{user_id}/events"]["post"]>;
+export type EventId = ResponseBody<paths["/api/users/{user_id}/events"]["post"]>;
 export type EventsQuery = NonNullable<paths["/api/users/{user_id}/events"]["get"]["parameters"]["query"]>;
 export type ProfileInput = RequestBody<paths["/api/users/{user_id}/profiles"]["post"]>;
 export type ProfileId = ResponseBody<paths["/api/users/{user_id}/profiles"]["post"]>;
@@ -316,6 +320,18 @@ export class MemoiaClient {
     return this.request("GET", this.page(`${this.userPath(userId)}/events`, options, validators.validateEventsQuery), validators.validateEvents, options);
   }
 
+  getEvent(userId: string, eventId: string, options?: RequestOptions): Promise<EventRecord> {
+    const id = eventId.toLowerCase();
+    return this.request("GET", `${this.userPath(userId)}/events/${segment(id)}`,
+      (value) => validators.validateEvent(value) && (value as EventRecord).id === id, options);
+  }
+
+  getProfile(userId: string, profileId: string, options?: RequestOptions): Promise<Profile> {
+    const id = profileId.toLowerCase();
+    return this.request("GET", `${this.userPath(userId)}/profiles/${segment(id)}`,
+      (value) => validators.validateProfile(value) && (value as Profile).id === id, options);
+  }
+
   addProfile(userId: string, input: ProfileInput, options?: RequestOptions): Promise<ProfileId> {
     if (!validators.validateProfileInput(input)) throw new MemoiaError("INVALID_INPUT", null, false);
     return this.request("POST", `${this.userPath(userId)}/profiles`, validators.validateProfileId, options, input, 201);
@@ -332,6 +348,16 @@ export class MemoiaClient {
 
   deleteEvent(userId: string, eventId: string, options?: RequestOptions): Promise<void> {
     return this.request("DELETE", `${this.userPath(userId)}/events/${segment(eventId)}`, (value) => value === undefined, options);
+  }
+
+  addEvent(userId: string, input: EventInput, options?: RequestOptions): Promise<EventId> {
+    if (!validators.validateEventInput(input)) throw new MemoiaError("INVALID_INPUT", null, false);
+    return this.request("POST", `${this.userPath(userId)}/events`, validators.validateEventId, options, input, 201);
+  }
+
+  updateEvent(userId: string, eventId: string, input: EventInput, options?: RequestOptions): Promise<void> {
+    if (!validators.validateEventInput(input)) throw new MemoiaError("INVALID_INPUT", null, false);
+    return this.request("PATCH", `${this.userPath(userId)}/events/${segment(eventId)}`, (value) => value === undefined, options, input);
   }
 
   getConfig(options?: RequestOptions): Promise<ProfileConfig> {
