@@ -800,14 +800,15 @@ export async function prepareFactAppend(
 
 export async function commitFactFlush(
   runtime: Runtime, scope: UserScope, flushId: string, owner: string, budget: SliceBudget,
-  rows: { id: string; blob_id: string; prepared: PreparedAppend }[],
+  rows: { id: string; blob_id: string; prepared: PreparedAppend; maintenance_effort: ReasoningEffort | null }[],
 ) {
   const first = rows[0];
   if (!first || rows.some((row) => !row.prepared)) throw new TaskYield();
   const facts: PreparedAppend["facts"] = [];
   const vectors: PreparedAppend["vectors"] = [];
   const seen = new Set<string>();
-  for (const { prepared } of rows) {
+  const effortByFact = new Map<string, ReasoningEffort>();
+  for (const { prepared, maintenance_effort } of rows) {
     budget.assertActive();
     for (const [index, fact] of prepared.facts.entries()) {
       const { id: _id, support_groups, ...attributes } = fact;
@@ -819,6 +820,7 @@ export async function commitFactFlush(
       seen.add(key);
       facts.push(fact);
       vectors.push(prepared.vectors[index] ?? null);
+      if (maintenance_effort != null) effortByFact.set(fact.id, maintenance_effort);
     }
   }
   const output = await runtime.db.transaction(async (tx) => {
@@ -844,7 +846,9 @@ export async function commitFactFlush(
       [flushId, JSON.stringify(output), rows.map(({ id }) => id), first.prepared.input_revision],
     );
     if (updated.rowCount !== rows.length) throw new TaskYield();
-    if (changes.length) await recordChanges(tx, scope, first.blob_id, version, changes, true);
+    if (changes.length) await recordChanges(tx, scope, first.blob_id, version, changes.map((change) => ({
+      ...change, maintenance_reasoning_effort: effortByFact.get(change.fact_id) ?? null,
+    })), true);
     budget.assertActive();
     if (!await maintenanceTasks.completeInTx(tx, flushId, owner, {
       resultCode: "COMPLETED", result: output, executionState: null,

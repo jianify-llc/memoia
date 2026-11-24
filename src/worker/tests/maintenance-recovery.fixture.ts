@@ -1130,6 +1130,73 @@ try {
     );
     assert.deepEqual(visible, { blobs: 1, facts: 3 });
   });
+  await test("maintenance uses the last explicit effort from appends that actually publish Facts", async () => {
+    const taskEffort = async (id: string) => (await db.query(
+      "SELECT biz_params->>'reasoning_effort' AS effort FROM memoia.queue_tasks WHERE id=$1",
+      [id],
+    )).rows[0].effort;
+    for (const scenario of [null, "medium", "high", "legacy"] as const) {
+      const expected = scenario === "legacy" ? "medium" : scenario;
+      const scope = await user();
+      const append = (id: string, effort?: "medium" | "high") =>
+        stageImport(runtime, scope, {
+          source_id: "s", idempotency_key: `stage-${id}`,
+          messages: [sourceMessage(id)],
+          ...(effort ? { maintenance_reasoning_effort: effort } : {}),
+        });
+      const receipts = [
+        await append("first", expected ? "medium" : undefined),
+        await append("second", expected === "high" ? "high" : undefined),
+        await append("third"),
+        await append("noop", expected === "high" ? "medium" : "high"),
+      ];
+      globalThis.fetch = async (_url, init) => {
+        const id = ["first", "second", "third", "noop"].find(
+          (name) => String(init?.body).includes(`tea (${name})`),
+        )!;
+        const candidate = factCandidate(id);
+        if (id === "noop") candidate.messages[0].facts = [];
+        return toolResponse("finish_facts", { candidate });
+      };
+      const publish = async (key: string, ids: string[]) => {
+        const op = await flushBlob(runtime, scope, "s", {
+          idempotency_key: key, append_operation_ids: ids,
+        });
+        if (scenario === "medium" && key === "seal") {
+          // A Fact task sealed by the old worker can still complete on the new worker.
+          await db.query(
+            "UPDATE memoia.memory_operations SET request=request || '{\"maintenance_reasoning_effort\":\"high\"}'::jsonb WHERE id=$1",
+            [op.operation_id],
+          );
+        }
+        await consume(runtime, { ...wake(scope, op.operation_id), kind: "fact_flush" });
+        const result = await operationState(op.operation_id);
+        assert.equal(result.status, "completed");
+        return result;
+      };
+      const first = await publish("seal", receipts.map((r) => r.operation_id).reverse());
+      assert.equal(first.result.fact_ids.length, 3);
+      if (scenario === "legacy") {
+        // An older worker saved the override on the completed Fact flush receipt.
+        await db.query(
+          "UPDATE memoia.memory_operations SET request=request || '{\"maintenance_reasoning_effort\":\"medium\"}'::jsonb WHERE id=$1",
+          [first.id],
+        );
+        await db.query(
+          `UPDATE memoia.memory_blobs b SET fact_changes=(
+             SELECT jsonb_agg(change-'maintenance_reasoning_effort' ORDER BY position)
+             FROM jsonb_array_elements(b.fact_changes) WITH ORDINALITY AS changes(change,position)
+           ) FROM memoia.memory_operations o WHERE o.id=$1 AND b.id=o.blob_id`,
+          [first.id],
+        );
+      }
+      const later = await append("later");
+      globalThis.fetch = async () => toolResponse("finish_facts", { candidate: factCandidate("later") });
+      assert.equal((await publish("seal-later", [later.operation_id])).result.fact_ids.length, 1);
+      const maintenance = await flush(runtime, scope, "derived");
+      assert.equal(await taskEffort(maintenance.operation_id), expected);
+    }
+  });
   await test("deletion from an unsealed tail preserves the active range and its Blob status", async () => {
     const scope = await user();
     const group = await importGroup(scope, ["active"]);
@@ -1487,7 +1554,10 @@ try {
     }));
     await db.query(
       "UPDATE memoia.memory_blobs SET fact_changes=$2::jsonb,fact_completed_at=clock_timestamp() WHERE id=$1",
-      [receipt.blob_id, JSON.stringify(changes)],
+      [receipt.blob_id, JSON.stringify(changes.map((change, index) => ({
+        ...change,
+        maintenance_reasoning_effort: index === 0 ? "medium" : index === changes.length - 1 ? "high" : undefined,
+      })))],
     );
     const first = await flush(runtime, scope, "derived-first");
     const second = await flush(runtime, scope, "derived-second");
@@ -1501,6 +1571,11 @@ try {
       .legacy_changes;
     assert.ok(before.length > 0 && after.length > 0);
     assert.deepEqual([...before, ...after], changes);
+    const { rows: efforts } = await db.query(
+      "SELECT biz_params->>'reasoning_effort' AS effort FROM memoia.queue_tasks WHERE id=ANY($1::uuid[]) ORDER BY array_position($1::uuid[],id)",
+      [[first.operation_id, second.operation_id]],
+    );
+    assert.deepEqual(efforts.map((row) => row.effort), ["medium", "high"]);
   });
   await test("completed Agent checkpoint resumes commit without replaying the model", async () => {
     const scope = await user();

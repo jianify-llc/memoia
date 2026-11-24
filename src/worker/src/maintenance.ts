@@ -51,7 +51,12 @@ import {
   type Json,
 } from "@jianify/legato";
 
-export type Change = { kind: string; fact_id?: string; version?: number };
+export type Change = {
+  kind: string;
+  fact_id?: string;
+  version?: number;
+  maintenance_reasoning_effort?: ReasoningEffort | null;
+};
 const TABLES = {
   facts: "memory_facts",
   profiles: "user_profiles",
@@ -410,19 +415,29 @@ async function seal(
     }
     const rows = (
       await tx.query(
-        `SELECT b.id,b.external_id,b.xmin::text AS row_version,o.maintenance_effort,
-          CASE WHEN b.external_id IS NULL THEN b.fact_changes ELSE (
-            SELECT COALESCE(jsonb_agg(page.change ORDER BY page.position),'[]'::jsonb)
-              FROM (SELECT change,position FROM jsonb_array_elements(b.fact_changes)
-                    WITH ORDINALITY list(change,position) LIMIT 100) page
-          ) END AS fact_changes
-        FROM memoia.memory_blobs b LEFT JOIN LATERAL (
+        `SELECT b.id,b.external_id,b.xmin::text AS row_version,o.maintenance_effort,prior.efforts,
+          COALESCE(page.fact_changes,b.fact_changes) AS fact_changes
+        FROM memoia.memory_blobs b
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(jsonb_agg(p.change ORDER BY p.position),'[]'::jsonb) AS fact_changes,
+            array_agg(p.change->>'version') FILTER (WHERE NOT (p.change ? 'maintenance_reasoning_effort')) AS versions
+          FROM (SELECT change,position FROM jsonb_array_elements(b.fact_changes)
+                WITH ORDINALITY list(change,position) LIMIT 100) p
+        ) page ON b.external_id IS NOT NULL
+        LEFT JOIN LATERAL (
           SELECT o.request->>'maintenance_reasoning_effort' AS maintenance_effort
-          FROM memoia.memory_operations o LEFT JOIN memoia.queue_tasks t ON t.id=o.id
+          FROM memoia.memory_operations o
           WHERE o.blob_id=b.id AND o.user_id=b.user_id AND o.project_id=b.project_id
-            AND ((o.kind='import' AND b.external_id IS NULL) OR (o.kind='fact_flush' AND t.status='succeeded'))
-          ORDER BY t.finished_at DESC NULLS LAST,o.created_at DESC,o.id DESC LIMIT 1
+            AND o.kind='import' AND b.external_id IS NULL
+          ORDER BY o.created_at DESC,o.id DESC LIMIT 1
         ) o ON true
+        LEFT JOIN LATERAL (
+          SELECT jsonb_object_agg(t.result->>'memory_version', f.request->>'maintenance_reasoning_effort') AS efforts
+          FROM memoia.memory_operations f JOIN memoia.queue_tasks t ON t.id=f.id
+          WHERE page.versions IS NOT NULL AND f.blob_id=b.id AND f.user_id=b.user_id AND f.project_id=b.project_id
+            AND f.kind='fact_flush' AND f.request->>'maintenance_reasoning_effort' IS NOT NULL
+            AND t.status='succeeded' AND t.result->>'memory_version'=ANY(page.versions)
+        ) prior ON true
         WHERE b.user_id=$1 AND b.project_id=$2 AND b.fact_completed_at IS NOT NULL AND b.flush_operation_id IS NULL
         ORDER BY b.fact_completed_at,b.id LIMIT 100`,
         scoped(scope),
@@ -452,10 +467,13 @@ async function seal(
     const factsById = new Map(current.map((fact) => [fact.id, fact]));
     let size = 0;
     let effort: ReasoningEffort | undefined;
+    let effortVersion = -1;
+    const changesForTask = (items: Change[]) =>
+      items.map(({ maintenance_reasoning_effort: _, ...change }) => change);
     for (const row of rows) {
       let changes: Change[] = row.fact_changes ?? [];
       const cost = (items: Change[]) => bytes({
-        changes: items,
+        changes: changesForTask(items),
         facts: items.flatMap((change) => {
           const fact = factsById.get(change.fact_id);
           return fact ? [fact] : [];
@@ -473,10 +491,20 @@ async function seal(
         if (!count && chosen.length) break;
         changes = changes.slice(0, Math.max(1, count));
       } else if (chosen.length && size + cost(changes) > 262144) break;
-      chosen.push({ ...row, fact_changes: changes });
-      if (changes.some((change) => change.kind !== "noop")) {
-        effort = reasoningEffort.safeParse(row.maintenance_effort).data ?? effort;
+      for (const change of changes) {
+        if (change.kind === "noop") continue;
+        const override = reasoningEffort.safeParse(
+          change.maintenance_reasoning_effort === undefined
+            ? row.efforts?.[change.version ?? 0] ?? row.maintenance_effort
+            : change.maintenance_reasoning_effort,
+        ).data;
+        const version = change.version ?? 0;
+        if (override !== undefined && version >= effortVersion) {
+          effort = override;
+          effortVersion = version;
+        }
       }
+      chosen.push({ ...row, fact_changes: changesForTask(changes) });
       size += cost(changes);
       if (size > 262144) break;
     }

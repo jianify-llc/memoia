@@ -58,7 +58,7 @@ export async function flushBlob(
       return projectOperation(tx, { ...existing, external_id: blobId });
     }
     const staged = await tx.query(
-      `SELECT a.id,a.fact_flush_id,a.status,b.id AS internal_id,b.source_id, a.request->>'maintenance_reasoning_effort' AS maintenance_effort
+      `SELECT a.id,a.fact_flush_id,a.status,b.id AS internal_id,b.source_id
          FROM memoia.memory_operations a JOIN memoia.memory_blobs b ON b.id=a.blob_id
         WHERE a.user_id=$1 AND a.project_id=$2 AND b.external_id=$3 AND a.kind='append'
           AND a.id=ANY($4::uuid[]) ORDER BY a.created_at,a.id`,
@@ -90,8 +90,6 @@ export async function flushBlob(
           hash,
           JSON.stringify({
             append_operation_ids: appendIds,
-            maintenance_reasoning_effort:
-              staged.rows.at(-1)?.maintenance_effort,
           }),
           blob.source_id,
           blob.internal_id,
@@ -267,16 +265,17 @@ export async function consumeFactFlush(
         // The normal path checks ownership and inputs in the publication transaction.
         const { rows } = await db.query(
           `SELECT a.id,a.blob_id,a.status,a.error,a.request->'fact_prepared' AS prepared,
+                  a.request->>'maintenance_reasoning_effort' AS maintenance_effort,
                   (a.input_expires_at IS NULL OR a.input_expires_at<=clock_timestamp()) AS expired,
                   (a.request->'fact_prepared'->>'input_revision'=coalesce(o.request->>'input_revision','0')) AS ready,
                   least(coalesce(a.available_at,clock_timestamp()),a.input_expires_at) AS next_run_at
              FROM memoia.memory_operations a JOIN memoia.memory_operations o ON o.id=a.fact_flush_id
-            WHERE a.fact_flush_id=$1 ORDER BY a.id`,
+            WHERE a.fact_flush_id=$1 ORDER BY a.created_at,a.id`,
           [id],
         );
         if (
           rows.length !== appendIds.length ||
-          rows.some((row, i) => row.id !== appendIds[i])
+          rows.map((row) => row.id).sort().some((id, i) => id !== appendIds[i])
         )
           throw new SourceError(
             "fact_flush_manifest_mismatch",
@@ -290,6 +289,7 @@ export async function consumeFactFlush(
         if (!failures.length && !waiting.length) {
           await commitFactFlush(slice, scope, id, owner, budget, rows.map((row) => ({
             id: row.id, blob_id: row.blob_id, prepared: row.prepared,
+            maintenance_effort: row.maintenance_effort,
           })));
           return;
         }
