@@ -49,6 +49,8 @@ test("service settings reject unsupported keys, wrong types and invalid budgets 
     JSON.stringify({ source_max_input_tokens: -1 }),
     JSON.stringify({ source_output_reserve_tokens: 0.5 }),
     JSON.stringify({ embedding_dim: 0 }),
+    JSON.stringify({ embedding_dim: 3072 }),
+    JSON.stringify({ embedding_provider: "jina", embedding_model: "jina-embeddings-v3" }),
     JSON.stringify({ embedding_provider: "unknown" }),
     JSON.stringify({ use_timezone: "Invalid/Timezone" }),
     JSON.stringify({

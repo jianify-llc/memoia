@@ -249,7 +249,7 @@ test("configured input retention preserves live retries and purges expired input
         MEMOIA_CONFIG: JSON.stringify({
           source_input_retention_seconds: 30,
           embedding_provider: "jina",
-          embedding_model: "jina-embeddings-v3",
+          embedding_model: "jina-embeddings-v4",
         }),
       },
     };

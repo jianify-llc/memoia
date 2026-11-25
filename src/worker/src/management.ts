@@ -2,12 +2,15 @@ import { assertActive, isForgottenUser, type Database, type UserScope } from "./
 import type { Principal, Scope } from "./auth";
 import { SourceError } from "./errors";
 import { embeddings, eventIndexText, getConfig } from "./models";
+import { pendingFactChanges } from "./retrieval";
 import type { Runtime } from "./runtime";
 import type { components } from "../../../sdks/typescript/src/generated/openapi";
 
 type EventInput = components["schemas"]["EventInput"];
 type EventPatch = components["schemas"]["EventPatch"];
-type IndexedEvent = { event_data: components["schemas"]["EventData"]; embedding: string | null };
+type IndexedEvent = {
+  event_data: components["schemas"]["EventData"] & { fact_ids?: string[]; _impact_fact_ids?: string[] | null };
+};
 
 function authorize(
   principal: Principal,
@@ -315,30 +318,20 @@ export async function deleteProfile(
   );
   if (!r.rowCount) missing("Profile");
 }
-async function eventEmbedding(
-  runtime: Runtime,
-  scope: UserScope,
-  body: IndexedEvent["event_data"],
-  existing?: IndexedEvent,
-): Promise<string | null> {
+async function eventEmbedding(runtime: Runtime, scope: UserScope, text: string): Promise<string | null> {
   const config = await getConfig(runtime, scope.projectId);
   if (!config.enable_event_embedding) return null;
-  const text = eventIndexText(body);
-  if (existing?.embedding && eventIndexText({
-    ...existing.event_data,
-    content: existing.event_data.content ?? existing.event_data.event_tip,
-  }) === text) return existing.embedding;
   const [vector] = await embeddings(runtime, scope.projectId, [text], "document", scope.userId, config);
   return JSON.stringify(vector);
 }
 
 export async function addEvent(runtime: Runtime, scope: UserScope, body: EventInput) {
   await assertActive(runtime.db, scope);
-  const embedding = await eventEmbedding(runtime, scope, body);
+  const embedding = await eventEmbedding(runtime, scope, eventIndexText(body));
   const id = crypto.randomUUID();
   const saved = await runtime.db.query(
     `INSERT INTO memoia.user_events (id,user_id,project_id,event_data,embedding)
-     SELECT $3,id,project_id,$4::jsonb,$5::vector FROM memoia.users
+     SELECT $3,id,project_id,$4::jsonb,$5 FROM memoia.users
       WHERE id=$1 AND project_id=$2`,
     [scope.userId, scope.projectId, id, JSON.stringify({
       ...body, memoia_v2: true, _impact_fact_ids: [],
@@ -353,24 +346,32 @@ export async function addEvent(runtime: Runtime, scope: UserScope, body: EventIn
 
 export async function updateEvent(runtime: Runtime, scope: UserScope, id: string, body: EventPatch) {
   const { rows: [existing] } = await runtime.db.query<IndexedEvent & { version: string }>(
-    "SELECT event_data,embedding::text,version FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=$3",
+    "SELECT event_data,version FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=$3",
     [scope.userId, scope.projectId, id],
   );
   if (!existing) return missing("Event");
-  const merged = {
-    ...existing.event_data,
-    content: existing.event_data.content ?? existing.event_data.event_tip,
-    ...body,
+  const original = {
+    ...existing.event_data, content: existing.event_data.content ?? existing.event_data.event_tip,
   };
-  const embedding = await eventEmbedding(runtime, scope, merged, existing);
+  const text = eventIndexText({ ...original, ...body });
+  const changedText = text !== eventIndexText(original);
+  let embedding: string | null = null;
+  if (changedText) {
+    const evidence = original._impact_fact_ids == null
+      ? null
+      : [...new Set([...(original.fact_ids ?? []), ...original._impact_fact_ids])];
+    if ((await pendingFactChanges(runtime.db, scope, evidence)).size)
+      throw new SourceError("write_conflict", "Event evidence is awaiting maintenance", 409, true);
+    embedding = await eventEmbedding(runtime, scope, text);
+  }
   const saved = await runtime.db.query(
     `UPDATE memoia.user_events
         SET event_data=event_data || $4::jsonb
               || CASE WHEN $4::jsonb ? 'content' AND event_data ? 'event_tip'
                  THEN jsonb_build_object('event_tip',$4::jsonb->>'content') ELSE '{}'::jsonb END,
-            embedding=$5::vector,version=version+1,updated_at=clock_timestamp()
+            embedding=CASE WHEN $7::boolean THEN $5 ELSE embedding END,version=version+1,updated_at=clock_timestamp()
       WHERE user_id=$1 AND project_id=$2 AND id=$3 AND version=$6`,
-    [scope.userId, scope.projectId, id, JSON.stringify(body), embedding, existing.version],
+    [scope.userId, scope.projectId, id, JSON.stringify(body), embedding, existing.version, changedText],
   );
   if (!saved.rowCount)
     throw new SourceError("write_conflict", "Event changed before publication", 409, true);

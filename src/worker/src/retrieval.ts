@@ -69,22 +69,23 @@ async function complete(
   }
   return result;
 }
-async function pending(
+export async function pendingFactChanges(
   tx: Sql,
   scope: UserScope,
-  ids: string[],
+  ids: string[] | null,
 ): Promise<Set<string>> {
-  if (!ids.length) return new Set();
+  if (ids?.length === 0) return new Set();
   const r = await tx.query(
     `SELECT DISTINCT x.value->>'fact_id' AS id FROM memoia.memory_blobs b
     CROSS JOIN LATERAL jsonb_array_elements(COALESCE(b.fact_changes,'[]'::jsonb)) x(value)
     WHERE b.user_id=$1 AND b.project_id=$2 AND b.fact_completed_at IS NOT NULL
       AND (b.flush_operation_id IS NULL OR NOT EXISTS (SELECT 1 FROM memoia.memory_operations o JOIN memoia.queue_tasks t ON t.id=o.id WHERE o.id=b.flush_operation_id AND o.user_id=$1 AND o.project_id=$2 AND o.kind='flush' AND t.status='succeeded'))
-      AND x.value->>'kind' IN ('updated','evidence','deleted') AND x.value->>'fact_id'=ANY($3::text[])
+      AND x.value->>'kind' IN ('updated','evidence','deleted') AND ($3::text[] IS NULL OR x.value->>'fact_id'=ANY($3::text[]))
     UNION SELECT DISTINCT x.value->>'fact_id' FROM memoia.memory_operations o LEFT JOIN memoia.queue_tasks t ON t.id=o.id
     CROSS JOIN LATERAL jsonb_array_elements(COALESCE(o.request->'legacy_changes','[]'::jsonb)) x(value)
     WHERE o.user_id=$1 AND o.project_id=$2 AND o.kind='flush' AND t.status IS DISTINCT FROM 'succeeded'
-      AND x.value->>'kind' IN ('updated','evidence','deleted') AND x.value->>'fact_id'=ANY($3::text[])`,
+      AND x.value->>'kind' IN ('updated','evidence','deleted') AND ($3::text[] IS NULL OR x.value->>'fact_id'=ANY($3::text[]))
+    ${ids === null ? 'LIMIT 1' : ''}`,
     [...params(scope), ids],
   );
   return new Set(r.rows.map((row) => row.id));
@@ -245,6 +246,7 @@ async function queryVector(
   runtime: Runtime,
   scope: UserScope,
   query: string,
+  allowLexicalFallback = false,
 ): Promise<string | null> {
   const config = await getModelConfig(runtime, scope.projectId);
   if (!config.enable_event_embedding) return null;
@@ -264,10 +266,12 @@ async function queryVector(
     return embedding ? `[${embedding.join(",")}]` : null;
   } catch (error: any) {
     if (runtime.signal?.aborted) throw error;
+    if (allowLexicalFallback && error instanceof SourceError &&
+        error.code === "embedding_configuration_rejected") return null;
     const status = error?.status;
     if (
       (error instanceof SourceError &&
-        ![429, 500, 502, 503, 504].includes(error.status)) ||
+        !error.retryable) ||
       (typeof status === "number" &&
         status >= 400 &&
         status < 500 &&
@@ -295,15 +299,19 @@ async function semanticRank(
   return (await db.query(statement(distance), [...values, embedding])).rows;
 }
 
+function rankingCap(count: number) {
+  return Math.min(500, Math.max(50, count * 5));
+}
+
 async function rank(
   runtime: Runtime,
   scope: UserScope,
   kind: "facts" | "events" | "profiles",
   input: Query,
   sharedVector?: Promise<string | null>,
+  cap = rankingCap(limit(input)),
 ) {
   const base = pool(kind, scope, input);
-  const cap = Math.min(500, Math.max(50, limit(input) * 5));
   if (!input.query) {
     const r = await runtime.db.query(
       `SELECT ${base.alias}.id FROM ${base.from} WHERE ${base.where} ORDER BY ${base.timestamp} DESC,${base.alias}.id LIMIT ${cap}`,
@@ -385,7 +393,7 @@ async function views(tx: Sql, scope: UserScope, rows: any[]) {
   ).rows;
   const ids = [...new Set(edges.map((edge) => edge.fact_id))];
   const [pendingIds, hydrated] = await Promise.all([
-    pending(tx, scope, ids),
+    pendingFactChanges(tx, scope, ids),
     hydrateFacts(tx, scope, ids),
   ]);
   const factsByEvent = new Map<string, NonNullable<ReturnType<typeof hydrated.get>>[]>();
@@ -447,7 +455,7 @@ async function profileEntries(
     ...new Set(rows.flatMap((row) => validIds(row.attributes?.fact_ids))),
   ];
   const [blocked, facts] = await Promise.all([
-    pending(tx, scope, ids),
+    pendingFactChanges(tx, scope, ids),
     factRows(tx, scope, ids),
   ]);
   const byId = new Map(facts.map((row) => [row.id, row]));
@@ -643,11 +651,10 @@ async function legacyRank(
   scope: UserScope,
   query: string,
   excluded: string[],
-  count: number,
+  cap: number,
   sharedVector?: Promise<string | null>,
 ) {
   const args = [...params(scope), excluded, query];
-  const cap = Math.min(500, Math.max(50, count * 5));
   const where = `user_id=$1 AND project_id=$2 AND NOT(id=ANY($3::uuid[])) AND event_data->>'blob_id' IS NULL AND NOT (event_data ? 'memoia_v2')`;
   const text = "COALESCE(event_data->>'event_tip','')";
   const lexical = runtime.db.query(
@@ -676,6 +683,7 @@ export async function search(
   runtime: Runtime,
   scope: UserScope,
   input: Search,
+  allowLexicalFallback = false,
 ) {
   const count = input.limit ?? 10,
     max = input.max_token_size ?? 8192,
@@ -690,15 +698,15 @@ export async function search(
   };
   if (!fits(bundle, max))
     throw new SourceError("search_rejected", "Search request rejected", 422, false);
-  const candidateLimit = Math.min(500, Math.max(50, count * 5));
+  const candidateLimit = rankingCap(count);
+  // Fuse the established ranking windows before limiting the rows we hydrate.
+  const rankWindow = rankingCap(candidateLimit);
   const query: Query = {
     query: input.query,
-    limit: candidateLimit,
     exclude_ids: excludedFacts,
   };
   const nav: Query = {
     query: input.query,
-    limit: candidateLimit,
     ids: excludedFacts,
     navigation: {
       excludeEventIds: excludedEvents,
@@ -707,11 +715,11 @@ export async function search(
       includeEvents: input.include_events !== false,
     },
   };
-  const vector = queryVector(runtime, scope, input.query);
+  const vector = queryVector(runtime, scope, input.query, allowLexicalFallback);
   const [unseen, seen, legacy] = await Promise.all([
-    rank(runtime, scope, "facts", query, vector),
+    rank(runtime, scope, "facts", query, vector, rankWindow),
     excludedFacts.length
-      ? rank(runtime, scope, "facts", nav, vector)
+      ? rank(runtime, scope, "facts", nav, vector, rankWindow)
       : Promise.resolve([]),
     input.include_events === false
       ? Promise.resolve([])
@@ -720,7 +728,7 @@ export async function search(
           scope,
           input.query,
           excludedEvents,
-          candidateLimit,
+          rankWindow,
           vector,
         ),
   ]);

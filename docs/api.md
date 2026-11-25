@@ -57,7 +57,7 @@ occurred_at 是当前支持消息的最新记录时间；删除较新独立组�
 
 fact_time 保存包含首尾两天的 ISO 8601 日期 start/end（YYYY-MM-DD）、year/month/day/range/unknown 精度及原消息表达。年月边界只说明精度，不表示状态持续了整年/月。持续、周期或未解析表达不能确定完整日期区间时使用双 null 与 unknown；正文及 evidence 保留时间含义，不补造结束日。没有时间表达时 fact_time 为 null。模型 Schema 区分完整日期与双 null 分支，共用 FactTime 日历校验；严格输出字段仍必填，业务未知值用 null。unknown 可以参与文本/向量检索，但不命中精确日期筛选。
 
-原消息 time_zone 由代码用于计算 local_recorded_date；抽取 input 只传计算后的日期，不重复传 IANA 时区。记录／处理时刻不能直接代替发生日期。维护 Loop 使用当前 fact_time 和正文中的明确时间表达，不重新按本轮日期换算历史。删除时间依据立即清除不再有支撑的 fact_time；新旧索引文本相同则复用向量，否则重新 embedding。
+原消息 time_zone 由代码用于计算 local_recorded_date；抽取 input 只传计算后的日期，不重复传 IANA 时区。记录／处理时刻不能直接代替发生日期。维护 Loop 使用当前 fact_time 和正文中的明确时间表达，不重新按本轮日期换算历史。撤回后删除失去支撑的 Fact。幸存 Fact 的索引文本未变时保留向量；有变化且启用向量时，先在事务外同步生成，再与证据、Fact 和完成回执一起提交。供应商失败时本次撤回没有提交，调用方用原幂等键重试。
 
 0014 将原 event_time 列及未完成纠错／抽取候选中的对应字段改为 fact_time，保留日期值和证据。公开 API/SDK 只提供新名，消息输入及 event_after/before 查询参数不变。旧操作的 request_hash 不改；纠错 fingerprint 仍以历史 event_time 键规范化，确保载荷已清除的完成回执与过期原操作仍使用原幂等身份。已存索引文本不因字段改名重写或重算向量。
 
@@ -75,7 +75,7 @@ Source／用户整组清理仍由 PostgreSQL 外键在原事务内完成。0016 
 
 同一 Session 的消息追加到同一 Blob；删除和人工 Fact 编辑另记变更 Blob。幂等键定位原 Operation，重试不能扩大处理范围。Fact、索引、回执和 Blob 的 fact_changes（新增、人工编辑、删除、证据及时间变化引用）同事务提交。Blob 不保存聊天原文。人工 Profile 编辑、Event 删除和 Agent 写入不生产 Blob。
 
-主动 POST flush 或 Worker 定时 flush，在短事务按完成顺序选取待处理的 Blob 变更。每次扫描最多 100 个 Blob，可跨 Source，范围仍限当前项目和用户。变更引用与当前有效 Fact 的 JSON 总预算为 256 KiB。会话 Blob 按待维护变更前缀分批，旧固定 Blob 仍作为一个整体。若首个不可再拆的变更或旧批次超限，原回执报告 `maintenance_capacity`。剩余及随后完成的变更留给下一次，`pending_blob_count` 可见。同键重试沿用已封范围。自动静默 30 秒、最长等待 120 秒，查询不改变计时。显式空 flush 保留 `completed` 回执。自动唤醒发现没有待处理 Blob 时直接返回。
+主动 POST flush 或 Worker 定时 flush，在短事务按完成顺序选取待处理的 Blob 变更。每次扫描最多 100 个 Blob，可跨 Source，范围仍限当前项目和用户。变更引用与当前有效 Fact 的 JSON 总预算为 256 KiB。会话和撤回 Blob 按待维护变更前缀分批，其余固定 Blob 仍作为一个整体。若首个不可再拆的变更或旧批次超限，原回执报告 `maintenance_capacity`。剩余及随后完成的变更留给下一次，`pending_blob_count` 可见。同键重试沿用已封范围。自动静默 30 秒、最长等待 120 秒，查询不改变计时。显式空 flush 保留 `completed` 回执。自动唤醒发现没有待处理 Blob 时直接返回。
 
 Operation（`kind=flush`）是公开身份，保存固定范围；同 ID 的 `queue_tasks` 保存执行状态、租约及恢复进度。每个项目和用户最多一个派生执行者。首次失败后按 5／15／60 分钟退避，耗尽后沿原 Operation 显式恢复。退避期间后续批次可以运行。
 
@@ -139,7 +139,7 @@ DELETE sources/{source_id}/messages 接收用户定位、message_ids 与稳定�
 
 Profile/Event 鼓励基于当前有效 Fact 作有用的推断，而非仅摘抄。Profile 可归纳特点和关系模式，在现有正文中用“可能／倾向于”等表达区分推断与明确描述，不新增字段。Event 的 title/summary/keywords/event_time/location/content 保留有依据的经历，未知为空；可能的原因、动机、影响或意义放入 interpretation。两者都须直接关联作为判断依据的 Fact；派生解释不能回写 Fact 或成为另一条记忆的独立证据，依据修改或删除后须重新判断推断是否成立。同人物/关键词不自动合并故事，Fact 与 Event 多对多。原文已清除，遗漏的具体经历不能靠推断补造。
 
-Fact 抽取只产生事实，不重复生成 Event 标签或画像分类。Fact-first search 使用 Fact 向量；独立 events/query 使用 Event 向量。Loop 完成修改集后，在写锁和 SQL 事务外批量计算新增／文本变化 Event 的向量；每条 Event 将向量、正文和关联一起写入。向量生成失败时沿原 flush 恢复；发布前校验事实和目标版本。未变的索引文本复用向量。Loop 与人工 Event 路径共用 factual title/summary/keywords/event_time/location/content 的索引文本，旧 event_tip/profile_delta/tag 保留兼容，不把 interpretation 当成事实索引正文。显式关闭 embedding 时仅词法查询。
+Fact 抽取只产生事实，不重复生成 Event 标签或画像分类。Fact-first search 使用 Fact 向量；独立 events/query 使用 Event 向量。维护发布前批量生成新增或索引文本变更的 Event 向量。每条 Event 将正文、证据和向量一起写入。供应商失败沿原维护回执重试。人工编辑仅在索引文本变化时同步生成向量；已有依据正在撤回维护中的 Event 暂不允许修改索引文本。只改解读等字段时保留原向量。Loop 与人工 Event 路径共用 factual title/summary/keywords/event_time/location/content 的索引文本，旧 event_tip/profile_delta/tag 保留兼容，不把 interpretation 当成事实索引正文。显式关闭 embedding 时仅词法查询。
 
 Profile/Event 的 created_at 由数据库在创建时生成，更新不改变；不再用支撑消息的 occurred_at 覆盖。Event.event_time 是故事发生时间的文字描述，Fact.fact_time 是事实的结构化日期及证据；两者都不同于入库时间。旧记录曾将来源时间写进 created_at，不能可靠还原的保持 legacy，不以当前时间或 updated_at 猜补；历史 created_* 筛选因此不能保证精确。
 
@@ -164,7 +164,7 @@ Fact 人工编辑、删除或时间证据变化时同步清理相关历史画像
 
 POST search 的 `query` 保留在请求正文：并行计算查询向量和文本候选，以 pgvector、PostgreSQL FTS/字面匹配融合排序。先按顺序选择完整 Fact，再读取这些 Fact 关联的 Event/Profile；返回 `facts`、`events`、`profiles` 三个独立字段，不把 Fact 包装成 Event，也不新增查询分类模型。相同关联条目去重；三类完整对象及证据共同计入 `max_token_size`（默认 8,192，上限 10,000），放不下整条就跳过，不截断正文或证据。无 Event 的有效 Fact 立即可搜，删除 Event 不影响 Fact 召回。
 
-`exclude_fact_ids`、`exclude_event_ids`、`exclude_profile_ids` 各最多 500 个 UUID。三类输出独立按 ID 排除，不改变数据库，也不新增 revision 协议。已注入 Fact 不再独立输出，但仍可导航到未注入的关联 Event/Profile，包括异步维护后来生成、或上次预算未容纳的条目。候选只保留未见 Fact，或仍关联允许返回的未见派生对象的已见 Fact；两类各有有界候选池，已见 Fact 不挤占未见 Fact 的位置。关联内容和完整证据仍计入响应总预算。调用方在整个 Dialog 内保留实际已注入的 ID：同 ID 后续文本更新仍被该会话排除，新会话自行重置。本人的每轮画像读取仍是独立调用，不因检索排除消失。现有 `include_events=false` 可以明确关闭故事扩展，旧 `event_max_tokens` 可进一步限制故事子预算，但不能突破总预算。临时 query embedding 故障保留词法召回，输入/配置拒绝仍失败。不承诺精确时间过滤或穷尽列举。
+`exclude_fact_ids`、`exclude_event_ids`、`exclude_profile_ids` 各最多 500 个 UUID。三类输出独立按 ID 排除，不改变数据库，也不新增 revision 协议。已注入 Fact 不再独立输出，但仍可导航到未注入的关联 Event/Profile，包括异步维护后来生成、或上次预算未容纳的条目。候选只保留未见 Fact，或仍关联允许返回的未见派生对象的已见 Fact；两类各有独立候选池，共用本次查询向量。融合沿用原排名窗口，默认每路 250 条，融合后每类最多读取 50 条候选详情。关联内容和完整证据仍计入响应总预算。调用方在整个 Dialog 内保留实际已注入的 ID：同 ID 后续文本更新仍被该会话排除，新会话自行重置。本人的每轮画像读取仍是独立调用，不因检索排除消失。现有 `include_events=false` 可以明确关闭故事扩展，旧 `event_max_tokens` 可进一步限制故事子预算，但不能突破总预算。临时 query embedding 故障保留词法召回，输入/配置拒绝仍失败。不承诺精确时间过滤或穷尽列举。
 
 `exclude_profile_topics` 接收最多 50 个一级 Topic 名称（每个 1–256 字符），只排除这些分类的关联画像，不排除 Fact/Event。调用方按项目定义选择本人分类；服务端不猜人物归属。默认目录的关系人物 Topic 是 `relationships`，其它预设分类用于本人，项目自定义目录不能套用这一默认假设。超出 ID/Topic 上限明确拒绝；调用方可降级当前可选检索，不能截断集合后重搜或清空整个 Dialog 的去重记录。
 

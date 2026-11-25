@@ -31,6 +31,12 @@ export function isDatabaseTransportError(error: unknown): boolean {
   );
 }
 
+export function isRetryableDatabaseError(error: unknown): boolean {
+  return isDatabaseTransportError(error) ||
+    (typeof error === "object" && error !== null && "code" in error &&
+      ["40001", "40P01", "55P03", "57014"].includes(String(error.code)));
+}
+
 function isConnectionLimit(error: unknown): boolean {
   return error instanceof pg.DatabaseError && error.code === "53300";
 }
@@ -84,7 +90,6 @@ export class Database {
       statement_timeout: 30_000,
       query_timeout: 32_000,
       lock_timeout: 5_000,
-      options: "-c search_path=memoia,extensions,public",
     });
     this.pool.on("error", () => {
       try {
@@ -274,6 +279,14 @@ export async function assertActive(tx: Sql, scope: UserScope): Promise<void> {
 
 export function isForgottenUser(error: unknown): boolean {
   return error instanceof pg.DatabaseError && error.constraint === "memoia_user_forgotten";
+}
+
+export async function memoryVersion(db: Sql, scope: UserScope) {
+  const { rows: [row] } = await db.query<{ version: string }>(
+    "SELECT version FROM memoia.memory_user_states WHERE user_id=$1 AND project_id=$2",
+    [scope.userId, scope.projectId],
+  );
+  return Number(row?.version ?? 0);
 }
 
 export async function bumpMemoryVersion(sql: Sql, scope: UserScope): Promise<number> {

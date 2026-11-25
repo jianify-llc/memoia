@@ -31,6 +31,9 @@ const topics = z
   )
   .nullish();
 const stringMap = z.record(z.string(), z.string()).nullish();
+export const EMBEDDING_DIMENSIONS = 1536;
+export const JINA_EMBEDDING_MODEL = "jina-embeddings-v4";
+
 const serviceConfig = z
   .object({
     language: z.enum(["en", "zh"]).optional(),
@@ -58,7 +61,7 @@ const serviceConfig = z
       .string()
       .refine((value) => !!value.trim())
       .optional(),
-    embedding_dim: positiveInteger.optional(),
+    embedding_dim: z.literal(EMBEDDING_DIMENSIONS).optional(),
     embedding_batch_size: positiveInteger.optional(),
     embedding_max_token_size: positiveInteger.optional(),
     enable_event_embedding: z.boolean().optional(),
@@ -72,7 +75,14 @@ const serviceConfig = z
       .array(z.object({ name: z.string(), description }).strict())
       .nullish(),
   })
-  .strict();
+  .strict()
+  .refine(
+    ({ embedding_provider, embedding_model }) =>
+      embedding_provider !== "jina" ||
+      embedding_model === undefined ||
+      embedding_model === JINA_EMBEDDING_MODEL,
+    { path: ["embedding_model"] },
+  );
 
 /** Bindings are deployment input: reject mistakes before accepting business work. */
 export function readServiceConfig(raw?: string): z.infer<typeof serviceConfig> {

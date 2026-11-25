@@ -18,7 +18,7 @@ test("search ranks and bounds associated candidates before loading evidence", as
     late = id(2000),
     excludedEvent = id(100),
     excludedProfile = id(101);
-  const reads: Array<{ sql: string; values: unknown[]; count: number }> = [];
+  const reads: Array<{ sql: string; values: unknown[]; count: number; ms: number }> = [];
   let profileReadPending = false;
   let eventReadOverlapped = false;
   let activeReads = 0;
@@ -31,8 +31,9 @@ test("search ranks and bounds associated candidates before loading evidence", as
         eventReadOverlapped = profileReadPending;
       peakReads = Math.max(peakReads, ++activeReads);
       try {
+        const start = performance.now();
         const result = await tx.query(sql, values);
-        reads.push({ sql, values, count: result.rows.length });
+        reads.push({ sql, values, count: result.rows.length, ms: performance.now() - start });
         return result;
       } finally {
         activeReads--;
@@ -186,10 +187,65 @@ test("search ranks and bounds associated candidates before loading evidence", as
       semantic.events.find((event) => event.id === late)?.source_id,
       null,
     );
+    await db.query("UPDATE memoia.memory_facts SET search_text='周末徒步' WHERE id=$1", [strong]);
+    await db.query(
+      `INSERT INTO memoia.memory_facts(id,user_id,project_id,blob_id,content,support_groups,occurred_at)
+       SELECT ('00000000-0000-0000-0000-' || lpad(to_hex(n),12,'0'))::uuid,$1,$2,$3,'周末徒步','[["m"]]',now()
+       FROM generate_series(5000,5159) n`,
+      [userId, projectId, blob],
+    );
+    reads.length = 0;
+    const measured = {
+      ...vectorRuntime,
+      db: { ...tracked(db), vectorSchema: db.vectorSchema.bind(db) },
+    };
+    const chinese = await search(measured, scope, { query: "周末徒步" });
+    assert.equal(chinese.facts[0]?.id, strong);
+    const navigation = await search(measured, scope, {
+      query: "周末徒步", exclude_fact_ids: [strong],
+    });
+    assert.ok(navigation.facts.every(({ id }) => id !== strong));
+    assert.ok(navigation.events.some(({ id }) => id === late));
+    assert.ok(navigation.profiles.some((item) => item.id === id(4000)));
+    const rankedFacts = reads.filter(({ sql }) => sql.startsWith("SELECT f.id "));
+    assert.equal(rankedFacts.length, 6);
+    assert.ok(rankedFacts.every(({ sql }) => sql.endsWith("LIMIT 250")));
+    t.diagnostic(JSON.stringify({
+      factCandidateRows: rankedFacts.map(({ count }) => count),
+      factRankingSqlMs: Math.round(rankedFacts.reduce((sum, read) => sum + read.ms, 0) * 100) / 100,
+    }));
     const recalled = await context(vectorRuntime, scope, { query });
     assert.ok(recalled.entries.some((entry) => entry.includes("hiking")));
     assert.ok(recalled.entries.includes("A legacy outing"));
-    assert.equal(embeddingCall.mock.callCount(), 2);
+    assert.equal(embeddingCall.mock.callCount(), 4);
+    // Each individual rank puts this Fact 51st; its combined score is highest.
+    await db.query("UPDATE memoia.memory_facts SET embedding=NULL WHERE id=$1", [strong]);
+    const fusedWinner = id(6200);
+    const almost = JSON.stringify(coordinates.map((value, i) => i === 0 ? -value : value));
+    await db.query(
+      `INSERT INTO memoia.memory_facts(id,user_id,project_id,blob_id,content,support_groups,occurred_at)
+       SELECT ('00000000-0000-0000-0000-' || lpad(to_hex(n),12,'0'))::uuid,$1,$2,$3,
+         CASE WHEN n<6050 THEN 'fusionneedle' ELSE 'semantic alternative' END,'[["m"]]',now()
+       FROM generate_series(6000,6099) n`,
+      [userId, projectId, blob],
+    );
+    await db.query(
+      "UPDATE memoia.memory_facts SET embedding=$1 WHERE user_id=$2 AND project_id=$3 AND id BETWEEN $4 AND $5",
+      [vector, userId, projectId, id(6050), id(6099)],
+    );
+    await db.query(
+      `INSERT INTO memoia.memory_facts(id,user_id,project_id,blob_id,content,support_groups,occurred_at,embedding)
+       VALUES($1,$2,$3,$4,'fusionneedle','[["m"]]',now(),$5)`,
+      [fusedWinner, userId, projectId, blob, almost],
+    );
+    const overlap = await search(vectorRuntime, scope, { query: "fusionneedle" });
+    assert.equal(overlap.facts[0]?.id, fusedWinner);
+    embeddingCall.mock.mockImplementation(async () => Response.json({
+      data: [{ index: 0, embedding: Array(768).fill(0.01) }],
+    }));
+    await assert.rejects(search(vectorRuntime, scope, { query: "hiking" }), {
+      code: "query_configuration", status: 422,
+    });
     const recent = await getEvents(vectorRuntime, scope, 1, 7);
     assert.equal(recent.events[0]?.id, legacy);
     assert.equal(recent.events[0]?.event_data.event_tip, "A legacy outing");

@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { embeddings, recordUsage } from "../src/models";
 import type { Runtime } from "../src/runtime";
 
+const vector = (...prefix: number[]) => [...prefix, ...Array(1536 - prefix.length).fill(0)];
+
 function runtime(
   config: Record<string, unknown>,
   bindings: Record<string, string> = {},
@@ -41,7 +43,7 @@ test("Jina uses independent key and base, bounded batches and task by phase", as
     return Response.json({
       data: body.input.map((_: string, index: number) => ({
         index,
-        embedding: [index, 1],
+        embedding: vector(index, 1),
       })),
     });
   };
@@ -49,8 +51,7 @@ test("Jina uses independent key and base, bounded batches and task by phase", as
     const rt = runtime(
       {
         embedding_provider: "jina",
-        embedding_model: "jina-embeddings-v3",
-        embedding_dim: 2,
+        embedding_model: "jina-embeddings-v4",
       },
       {
         EMBEDDING_API_KEY: "jina-key",
@@ -73,7 +74,7 @@ test("Jina uses independent key and base, bounded batches and task by phase", as
     assert.equal(requests[0].url, "https://jina.invalid/v1/embeddings");
     assert.equal(requests[0].auth, "Bearer jina-key");
     assert.equal(requests[0].body.truncate, true);
-    assert.equal(requests[0].body.dimensions, 2);
+    assert.equal(requests[0].body.dimensions, 1536);
   } finally {
     globalThis.fetch = prior;
   }
@@ -87,8 +88,8 @@ test("Ollama uses the native API without inventing indexed results or task", asy
     captured = { url: req.url, auth: req.headers.get("authorization"), body };
     return Response.json({
       embeddings: [
-        [1, 2],
-        [3, 4],
+        vector(1, 2),
+        vector(3, 4),
       ],
     });
   };
@@ -97,7 +98,6 @@ test("Ollama uses the native API without inventing indexed results or task", asy
       {
         embedding_provider: "ollama",
         embedding_model: "embed",
-        embedding_dim: 2,
       },
       {
         EMBEDDING_API_KEY: "ollama-key",
@@ -105,14 +105,14 @@ test("Ollama uses the native API without inventing indexed results or task", asy
       },
     );
     assert.deepEqual(await embeddings(rt, "p", ["a", "b"], "query"), [
-      [1, 2],
-      [3, 4],
+      vector(1, 2),
+      vector(3, 4),
     ]);
     assert.equal(captured?.url, "https://ollama.invalid/api/embed");
     assert.equal(captured?.auth, "Bearer ollama-key");
     assert.equal(captured?.body.task, undefined);
     assert.equal(captured?.body.truncate, true);
-    assert.equal(captured?.body.dimensions, 2);
+    assert.equal(captured?.body.dimensions, 1536);
   } finally {
     globalThis.fetch = prior;
   }
@@ -137,27 +137,27 @@ test("OpenAI query uses embedding-specific settings, no retries, and restores in
       ? Response.json({ error: { message: "private" } }, { status: 503 })
       : Response.json({
           data: [
-            { index: 1, embedding: [3, 4] },
-            { index: 0, embedding: [1, 2] },
+            { index: 1, embedding: vector(3, 4) },
+            { index: 0, embedding: vector(1, 2) },
           ],
         });
   };
   try {
     const rt = runtime(
-      { embedding_dim: 2 },
+      {},
       {
         EMBEDDING_API_KEY: "embedding-key",
         EMBEDDING_BASE_URL: "https://embedding.invalid/v1",
       },
     );
     assert.deepEqual(await embeddings(rt, "p", ["a", "b"], "query"), [
-      [1, 2],
-      [3, 4],
+      vector(1, 2),
+      vector(3, 4),
     ]);
     assert.equal(auth, "Bearer embedding-key");
     assert.equal(url, "https://embedding.invalid/v1/embeddings");
     assert.equal(model, "text-embedding-3-large");
-    assert.equal(dimensions, 2);
+    assert.equal(dimensions, 1536);
     fail = true;
     await assert.rejects(
       embeddings(rt, "p", ["a"], "query"),
@@ -180,8 +180,7 @@ test("complete input budget and malformed embeddings fail before acceptance", as
     const rt = runtime(
       {
         embedding_provider: "jina",
-        embedding_model: "jina-embeddings-v3",
-        embedding_dim: 2,
+        embedding_model: "jina-embeddings-v4",
         embedding_max_token_size: 1,
       },
       { EMBEDDING_API_KEY: "key" },
@@ -194,16 +193,16 @@ test("complete input budget and malformed embeddings fail before acceptance", as
     for (const rows of [
       [],
       [
-        { index: 0, embedding: [1, 2] },
-        { index: 0, embedding: [3, 4] },
+        { index: 0, embedding: vector(1, 2) },
+        { index: 0, embedding: vector(3, 4) },
       ],
       [
         { index: 0, embedding: [1] },
-        { index: 1, embedding: [1, 2] },
+        { index: 1, embedding: vector(1, 2) },
       ],
       [
-        { index: 0, embedding: [1, "bad"] },
-        { index: 1, embedding: [1, 2] },
+        { index: 0, embedding: ["bad", ...vector(1).slice(1)] },
+        { index: 1, embedding: vector(1, 2) },
       ],
     ]) {
       data = rows;
@@ -270,8 +269,7 @@ test("provider rejections keep configuration failures separate from temporary fa
     const rt = runtime(
       {
         embedding_provider: "jina",
-        embedding_model: "jina-embeddings-v3",
-        embedding_dim: 2,
+        embedding_model: "jina-embeddings-v4",
       },
       { EMBEDDING_API_KEY: "key" },
     );

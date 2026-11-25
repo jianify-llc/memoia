@@ -16,7 +16,7 @@ import {
   getStatus,
   type Claim,
 } from "../src/maintenance";
-import { createUser } from "../src/management";
+import { createUser, updateEvent } from "../src/management";
 import worker from "../src/index";
 import { createApp } from "../src/http";
 import { createCloudflareRuntime } from "../src/cloudflare-runtime";
@@ -1577,6 +1577,292 @@ try {
     );
     assert.deepEqual(efforts.map((row) => row.effort), ["medium", "high"]);
   });
+  await test("qualified deferred checks still reject wrong Blob ownership and Fact evidence", async () => {
+    const scope = await user();
+    const blob = await batch(scope, "added");
+    const operation = crypto.randomUUID();
+    await db.query(
+      `INSERT INTO memoia.memory_operations(id,user_id,project_id,idempotency_key,kind,request_hash,request,source_id,blob_id,status)
+       VALUES($1,$2,$3,'not-a-flush','correct',repeat('c',64),'{}','s',$4,'processing')`,
+      [operation, scope.userId, projectId, blob],
+    );
+    await assert.rejects(db.query(
+      "UPDATE memoia.memory_blobs SET flush_operation_id=$1 WHERE id=$2",
+      [operation, blob],
+    ), { code: "23514", message: "invalid flush batch owner or lifecycle" });
+    await assert.rejects(db.query(
+      `UPDATE memoia.memory_facts SET support_groups='[["unknown-message"]]' WHERE blob_id=$1`,
+      [blob],
+    ), { code: "23514", message: "support outside active source messages" });
+    const valid = await flush(runtime, scope, "qualified-trigger-flush");
+    assert.deepEqual(valid.flush.blob_ids, [blob]);
+  });
+
+  async function seedRetraction(
+    scope: { userId: string; projectId: string },
+    rows: { content: string; dated: boolean }[],
+  ) {
+    const blob = await batch(scope, "noop");
+    const vector = JSON.stringify(Array(1536).fill(0.01));
+    const time = {
+      start: "2025-01-01", end: "2025-01-01", precision: "day",
+      evidence: [{ message_id: "withdrawn", expression: "January 1, 2025" }],
+    };
+    await db.query(
+      `INSERT INTO memoia.memory_messages(user_id,project_id,source_id,message_id,content_hash,role,occurred_at)
+       VALUES($1,$2,'s','survivor',repeat('a',64),'user',now()),($1,$2,'s','withdrawn',repeat('b',64),'user',now())`,
+      [scope.userId, projectId],
+    );
+    await db.query(`UPDATE memoia.memory_blobs SET message_ids=message_ids || '["survivor","withdrawn"]'::jsonb WHERE id=$1`, [blob]);
+    const ids: string[] = [];
+    for (const { content, dated } of rows) {
+      const id = crypto.randomUUID();
+      await db.query(
+        `INSERT INTO memoia.memory_facts(id,user_id,project_id,blob_id,content,support_groups,occurred_at,fact_time,search_text,embedding)
+         VALUES($1,$2,$3,$4,$5,'[["survivor"],["withdrawn"]]',now(),$6,$7,$8)`,
+        [id, scope.userId, projectId, blob, content, dated ? JSON.stringify(time) : null,
+          dated ? content + " with date" : content, vector],
+      );
+      ids.push(id);
+    }
+    return ids;
+  }
+  const indexedRuntime = () => ({
+    ...runtime,
+    deadline: Date.now() + 60_000,
+    env: {
+      ...runtime.env,
+      EMBEDDING_API_KEY: "local-only",
+      EMBEDDING_BASE_URL: "https://embed.invalid/v1",
+      MEMOIA_CONFIG: JSON.stringify({ embedding_provider: "jina" }),
+    },
+  });
+
+  const fixtureVectors = (count = 1) => Response.json({
+    data: Array.from({ length: count }, (_, index) => ({ index, embedding: Array(1536).fill(0.02) })),
+  });
+
+  await test("withdrawal commits new evidence and vectors together and replays the original receipt", async (t) => {
+    const scope = await user();
+    const [dated, undated] = await seedRetraction(scope, [
+      { content: "Dated memory", dated: true }, { content: "Undated memory", dated: false },
+    ]);
+    const configured = indexedRuntime();
+    const input = { idempotency_key: "sync-withdraw", message_ids: ["withdrawn"] };
+    const facts = async () => (await db.query(
+      "SELECT id,revision,support_groups,embedding::text,search_text FROM memoia.memory_facts WHERE id=ANY($1::uuid[]) ORDER BY id",
+      [[dated, undated]],
+    )).rows;
+    const before = await facts();
+    let calls = 0;
+    const provider = t.mock.method(globalThis, "fetch", async () => {
+      calls++;
+      return new Response(null, { status: 503 });
+    });
+    await assert.rejects(deleteMessages(configured, scope, "s", input), { code: "embedding_unavailable" });
+    assert.deepEqual(await facts(), before);
+    await assert.rejects(getOperation(configured, scope, { key: input.idempotency_key }), { code: "operation_not_found" });
+    assert.equal((await db.query(
+      "SELECT count(*)::int AS n FROM memoia.memory_messages WHERE user_id=$1 AND project_id=$2 AND message_id='withdrawn'",
+      [scope.userId, projectId],
+    )).rows[0].n, 1);
+    provider.mock.mockImplementation(async () => { calls++; return fixtureVectors(); });
+    const receipt = await deleteMessages(configured, scope, "s", input);
+    assert.equal(receipt.status, "completed");
+    assert.deepEqual(await deleteMessages(configured, scope, "s", input), receipt);
+    assert.equal(calls, 2);
+    const after = await facts();
+    assert.equal(after.find((fact) => fact.id === dated)!.embedding, JSON.stringify(Array(1536).fill(0.02)));
+    assert.equal(after.find((fact) => fact.id === dated)!.search_text, "Dated memory");
+    assert.equal(after.find((fact) => fact.id === undated)!.embedding, before.find((fact) => fact.id === undated)!.embedding);
+    assert.ok(after.every((fact) => fact.support_groups[0][0] === "survivor"));
+    await deleteMessages(configured, scope, "s", { idempotency_key: "delete-last-support", message_ids: ["survivor"] });
+    assert.deepEqual(await facts(), []);
+    assert.equal(calls, 2);
+  });
+
+  await test("a withdrawal committed after an Event statement began prevents stale publication", async (t) => {
+    const scope = await user();
+    const [factId] = await seedRetraction(scope, [{ content: "Went to a library", dated: true }]);
+    await db.query(
+      "UPDATE memoia.memory_blobs b SET fact_changes=$2 FROM memoia.memory_facts f WHERE f.id=$1 AND b.id=f.blob_id",
+      [factId, JSON.stringify([{ kind: "added", fact_id: factId, version: 1 }])],
+    );
+    const configured = indexedRuntime();
+    const op = await flush(configured, scope, "derive-event");
+    let modelCalls = 0;
+    t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+      if (String(input instanceof Request ? input.url : input).endsWith("/embeddings")) return fixtureVectors();
+      return ++modelCalls === 1 ? toolResponse("stage_event", {
+        changes: [{ action: "upsert", content: "Went to the library on 2025-01-01", fact_ids: ["f1"] }],
+      }) : response();
+    });
+    const withdrawDb = new Database(process.env.MEMOIA_TEST_DATABASE_URL!);
+    const transaction = withdrawDb.transaction.bind(withdrawDb);
+    let held!: () => void;
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    t.mock.method(withdrawDb, "transaction", (async (fn, options) =>
+      transaction(async (tx) => {
+        const result = await fn(tx);
+        held();
+        await released;
+        return result;
+      }, options)) as typeof withdrawDb.transaction);
+    const query = db.query.bind(db);
+    let withdrawing: ReturnType<typeof deleteMessages> | undefined;
+    t.mock.method(db, "query", (async (sql, values, operation) => {
+      if (sql.includes("INSERT INTO memoia.user_events") && !withdrawing) {
+        withdrawing = deleteMessages({ ...configured, db: withdrawDb }, scope, "s", {
+          idempotency_key: "withdraw-date", message_ids: ["withdrawn"],
+        });
+        await Promise.race([holding, withdrawing]);
+        const writing = query(sql, values, operation);
+        // Confirm the Event statement is waiting on the same version row.
+        try {
+          for (let i = 0; i < 50; i++) {
+            const waiting = (await query(
+              "SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE '%current_facts AS%'",
+            )).rowCount;
+            if (waiting) break;
+            if (i === 49) assert.fail("Event did not wait for the in-flight withdrawal");
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        } finally {
+          release();
+          await writing.catch(() => undefined);
+        }
+        return writing;
+      }
+      return query(sql, values, operation);
+    }) as typeof db.query);
+    try {
+      await consume(configured, wake(scope, op.operation_id));
+      assert.equal((await withdrawing)?.status, "completed");
+      assert.equal((await maintenanceTasks.readInTx(db, op.operation_id))?.status, "retry_wait");
+      assert.equal((await db.query(
+        "SELECT id FROM memoia.user_events WHERE user_id=$1 AND project_id=$2", [scope.userId, projectId],
+      )).rowCount, 0);
+    } finally {
+      release();
+      await withdrawing?.catch(() => undefined);
+      await withdrawDb.close();
+    }
+  });
+
+  await test("Event vector failure leaves the Event unwritten and retries the saved Agent result", async (t) => {
+    const scope = await user();
+    await batch(scope, "added");
+    const configured = indexedRuntime();
+    const op = await flush(configured, scope, "derive-event");
+    let modelCalls = 0, queryCalls = 0, documentCalls = 0;
+    t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (request.url.endsWith("/embeddings")) {
+        const { task } = await request.json() as { task: string };
+        if (task === "retrieval.query") {
+          queryCalls++;
+          return new Response(null, { status: 401 });
+        }
+        return ++documentCalls === 1 ? new Response(null, { status: 503 }) : fixtureVectors();
+      }
+      switch (++modelCalls) {
+        case 1: return toolResponse("search_memory", { query: "fact", limit: 3 });
+        case 2: return toolResponse("stage_event", {
+          changes: [{ action: "upsert", content: "A library visit", fact_ids: ["f1"] }],
+        });
+        default: return response();
+      }
+    });
+    const message = wake(scope, op.operation_id);
+    const read = async () => (await db.query(
+      "SELECT version,embedding::text FROM memoia.user_events WHERE user_id=$1 AND project_id=$2", [scope.userId, projectId],
+    )).rows;
+    await consume(configured, message);
+    const waiting = await maintenanceTasks.readInTx(db, op.operation_id);
+    assert.equal(waiting?.status, "retry_wait");
+    assert.equal(waiting?.lastFailure?.resultCode, "embedding_unavailable");
+    assert.deepEqual(await read(), []);
+    await db.query("UPDATE memoia.queue_tasks SET next_run_at=clock_timestamp() WHERE id=$1", [op.operation_id]);
+    await consume(configured, message);
+    assert.equal((await maintenanceTasks.readInTx(db, op.operation_id))?.status, "succeeded");
+    assert.deepEqual(await read(), [{ version: "1", embedding: JSON.stringify(Array(1536).fill(0.02)) }]);
+    assert.deepEqual({ modelCalls, queryCalls, documentCalls }, { modelCalls: 3, queryCalls: 1, documentCalls: 2 });
+  });
+
+  await test("manual Event edits never embed stale derived text after withdrawal", async (t) => {
+    const scope = await user();
+    const [factId] = await seedRetraction(scope, [{ content: "Old memory", dated: false }]);
+    const eventId = crypto.randomUUID(), unknownEventId = crypto.randomUUID();
+    const otherBlob = await batch(scope, "added");
+    const directFact = (await db.query("SELECT id FROM memoia.memory_facts WHERE blob_id=$1", [otherBlob])).rows[0].id;
+    await db.query("INSERT INTO memoia.user_events(id,user_id,project_id,event_data) VALUES($1,$2,$3,$4)",
+      [eventId, scope.userId, scope.projectId, { content: "Old date", fact_ids: [factId], _impact_fact_ids: [factId] }]);
+    await db.query("INSERT INTO memoia.user_events(id,user_id,project_id,event_data) VALUES($1,$2,$3,$4)",
+      [unknownEventId, scope.userId, scope.projectId, { content: "Indirect old date", fact_ids: [directFact], _impact_fact_ids: null }]);
+    const configured = indexedRuntime();
+    const provider = t.mock.method(globalThis, "fetch", async () => fixtureVectors());
+    await deleteMessages(configured, scope, "s", { idempotency_key: "withdraw", message_ids: ["withdrawn", "survivor"] });
+    await updateEvent(configured, scope, eventId, { interpretation: "Edited interpretation" });
+    await assert.rejects(updateEvent(configured, scope, eventId, { title: "New title" }), { code: "write_conflict" });
+    await assert.rejects(updateEvent(configured, scope, unknownEventId, { title: "New title" }), { code: "write_conflict" });
+    assert.equal(provider.mock.callCount(), 0);
+  });
+
+  await test("large support groups stay in PostgreSQL and do not exhaust the Agent input", async () => {
+    const scope = await user();
+    const [factId] = await seedRetraction(scope, [{ content: "A long-running activity", dated: true }]);
+    const ids = Array.from({ length: 49 }, (_, i) => String(i).padStart(3, "0").padEnd(128, "m"));
+    const groups = Array.from({ length: 19 }, (_, i) =>
+      Array.from({ length: 35 }, (_, j) => ids[(i + j) % ids.length]));
+    const { rows: [fact] } = await db.query("SELECT blob_id FROM memoia.memory_facts WHERE id=$1", [factId]);
+    await db.query(
+      `INSERT INTO memoia.memory_messages(user_id,project_id,source_id,message_id,content_hash,role,occurred_at)
+       SELECT $1,$2,'s',id,repeat('a',64),'user',now() FROM unnest($3::text[]) AS ids(id)`,
+      [scope.userId, projectId, ids],
+    );
+    await db.query("UPDATE memoia.memory_blobs SET message_ids=message_ids || $2::jsonb WHERE id=$1", [fact.blob_id, JSON.stringify(ids)]);
+    await db.query("UPDATE memoia.memory_facts SET support_groups=$2::jsonb WHERE id=$1", [factId, JSON.stringify([["withdrawn"], ...groups])]);
+    const configured = runtime;
+    await deleteMessages(configured, scope, "s", { idempotency_key: "withdraw-wide", message_ids: ["withdrawn"] });
+    const op = await flush(configured, scope, "derive");
+    const claim = {
+      ...scope, id: op.operation_id, owner: crypto.randomUUID(), blobIds: [fact.blob_id],
+      changes: [{ kind: "evidence", fact_id: factId }],
+    };
+    const context = new MaintenanceContext(configured, claim, () => {});
+    await context.prepare();
+    const changes = await context.readChanges();
+    const read = await context.read("facts", [factId], null, null);
+    assert.equal((changes.items[0] as any).current_fact.content, "A long-running activity");
+    assert.equal(read.items[0].content, "A long-running activity");
+    assert.equal("support_groups" in read.items[0], false);
+    const persisted = await db.query("SELECT support_groups FROM memoia.memory_facts WHERE id=$1", [factId]);
+    assert.deepEqual(persisted.rows[0].support_groups, groups);
+  });
+
+  await test("a large retraction keeps bounded maintenance ranges", async () => {
+    const scope = await user();
+    const ids = await seedRetraction(scope, Array.from({ length: 101 }, (_, i) => ({
+      content: `Memory ${i} ${"detail ".repeat(400)}`, dated: true,
+    })));
+    const configured = runtime;
+    const receipt = await deleteMessages(configured, scope, "s", { idempotency_key: "large-withdraw", message_ids: ["withdrawn"] });
+    assert.equal(receipt.status, "completed");
+    const assigned: string[] = [];
+    while (assigned.length < ids.length) {
+      const op = await flush(configured, scope, `bounded-${assigned.length}`);
+      assert.equal(op.status, "processing");
+      const persisted = await operationState(op.operation_id);
+      const changes = persisted.request.legacy_changes.filter((change: any) => change.kind === "evidence");
+      assert.ok(changes.length > 0 && changes.length <= 100);
+      assigned.push(...changes.map((change: any) => change.fact_id));
+    }
+    assert.deepEqual(assigned.sort(), [...ids].sort());
+    assert.equal((await flush(configured, scope, "finished")).status, "completed");
+  });
+
   await test("completed Agent checkpoint resumes commit without replaying the model", async () => {
     const scope = await user();
     const blob = await batch(scope, "added");
@@ -1839,7 +2125,7 @@ try {
         return Response.json(payload);
       };
       db.query = async (sql, values) => {
-        if (sql.startsWith("SELECT * FROM memoia.memory_facts WHERE")) {
+        if (sql.includes("FROM memoia.memory_facts WHERE") && sql.includes("ILIKE")) {
           failedReads++;
           throw failure;
         }

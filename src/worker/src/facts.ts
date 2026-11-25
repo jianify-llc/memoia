@@ -7,6 +7,7 @@ import {
 import { assertRunning, type Runtime } from "./runtime";
 import {
   bumpMemoryVersion,
+  memoryVersion,
   isForgottenUser,
   assertActive,
   lockIdentity,
@@ -20,6 +21,7 @@ import { FACT_EVIDENCE_ID_LIMIT, runFactAgent, type Draft as FactDraft } from ".
 import {
   evidenceTime,
   validateFactTime,
+  type FactTime,
   type SourceMessage,
   type SourceObservation,
   type ExtractedFact,
@@ -388,14 +390,6 @@ async function messageHash(m: SourceMessage) {
     occurred_at: utc,
   });
 }
-async function memoryVersion(db: Sql, scope: UserScope) {
-  const { rows: [row] } = await db.query<{ version: string }>(
-    "SELECT version FROM memoia.memory_user_states WHERE user_id=$1 AND project_id=$2",
-    [scope.userId, scope.projectId],
-  );
-  return Number(row?.version ?? 0);
-}
-
 async function readRegistration(sql: Sql, scope: UserScope, key: string, kind: string, digest: string) {
   const { rows: [existing] } = await sql.query(
     "SELECT id,kind,status,source_id,blob_id,result,error,request_hash FROM memoia.memory_operations WHERE user_id=$1 AND project_id=$2 AND idempotency_key=$3",
@@ -904,8 +898,9 @@ export async function deleteMessages(
   return submitFactChange(runtime, scope, change, async (prior) => {
     const previousVersion = await memoryVersion(runtime.db, scope);
     const rows = (
-      await runtime.db.query(
-        `SELECT f.* FROM memoia.memory_blobs b JOIN memoia.memory_facts f
+      await runtime.db.query<{ id: string; content: string; support_groups: string[][]; fact_time: FactTime | null; search_text: string | null }>(
+        `SELECT f.id,f.content,f.support_groups,f.fact_time,f.search_text
+         FROM memoia.memory_blobs b JOIN memoia.memory_facts f
            ON f.blob_id=b.id AND f.user_id=b.user_id AND f.project_id=b.project_id
          WHERE b.user_id=$1 AND b.project_id=$2 AND b.source_id=$3 AND b.message_ids ?| $4::text[]
            AND EXISTS (SELECT 1 FROM jsonb_array_elements(f.support_groups) AS g(evidence)
@@ -916,8 +911,8 @@ export async function deleteMessages(
     const ids = [...new Set(rows.flatMap((f) => f.support_groups.flat()))];
     const messages = ids.length
       ? (
-          await runtime.db.query(
-            "SELECT *,occurred_at::text AS occurred_at FROM memoia.memory_messages WHERE user_id=$1 AND project_id=$2 AND source_id=$3 AND message_id=ANY($4::text[])",
+          await runtime.db.query<{ message_id: string; occurred_at: string; deleted: boolean }>(
+            "SELECT message_id,occurred_at::text AS occurred_at,deleted FROM memoia.memory_messages WHERE user_id=$1 AND project_id=$2 AND source_id=$3 AND message_id=ANY($4::text[])",
             [scope.userId, scope.projectId, sourceId, ids],
           )
         ).rows
@@ -926,56 +921,48 @@ export async function deleteMessages(
       ...messages.filter((m) => m.deleted).map((m) => m.message_id),
       ...input.message_ids,
     ]);
-    const removed: any[] = [];
-    const surviving: any[] = [];
-    const reindex: any[] = [];
+    const removed: string[] = [];
+    const surviving: Array<{
+      id: string;
+      groups: string[][];
+      occurredAt: string;
+      time: FactTime | null;
+      searchText: string;
+      refreshEmbedding: boolean;
+    }> = [];
     for (const fact of rows) {
       const groups = retainedGroups(fact.support_groups, withdrawn);
       if (!groups.length) {
-        removed.push(fact);
+        removed.push(fact.id);
         continue;
       }
       const time = supportedFactTime(fact.fact_time, groups);
-      const value = {
-        ...fact,
-        support_groups: groups,
-        occurred_at: evidenceTime(groups, messages as any),
-        fact_time: time,
-        search_text: renderSearchFact(fact.content, time),
-      };
-      if (
-        value.search_text !==
-        (fact.search_text ?? renderSearchFact(fact.content, fact.fact_time))
-      )
-        reindex.push(value);
-      surviving.push(value);
+      const searchText = renderSearchFact(fact.content, time);
+      surviving.push({
+        id: fact.id,
+        groups,
+        occurredAt: evidenceTime(groups, messages),
+        time,
+        searchText,
+        refreshEmbedding: searchText !==
+          (fact.search_text ?? renderSearchFact(fact.content, fact.fact_time)),
+      });
     }
-    const config = reindex.length
-      ? await getConfig(runtime, scope.projectId)
-      : null;
-    const vectors = config?.enable_event_embedding
-      ? await embeddings(
-          runtime,
-          scope.projectId,
-          reindex.map((f) => f.search_text),
-          "document",
-          scope.userId,
-          config,
-        )
-      : reindex.map(() => null);
-    if (vectors.length !== reindex.length)
-      throw new SourceError(
-        "embedding_unavailable",
-        "Embedding count mismatch",
-        503,
-        true,
-      );
-    reindex.forEach((f, i) => {
-      f.embedding = vectors[i] ? `[${vectors[i]!.join(",")}]` : null;
-    });
+    const reindex = surviving.filter((fact) => fact.refreshEmbedding);
+    const vectors = new Map<string, string>();
+    if (reindex.length) {
+      const config = await getConfig(runtime, scope.projectId);
+      if (config.enable_event_embedding) {
+        const generated = await embeddings(runtime, scope.projectId,
+          reindex.map((fact) => fact.searchText), "document", scope.userId, config);
+        reindex.forEach(({ id }, index) => vectors.set(id, JSON.stringify(generated[index])));
+      }
+    }
     const changes = [
-      ...removed.map((f) => ({ fact_id: f.id, kind: "deleted" as const })),
-      ...surviving.map((f) => ({ fact_id: f.id, kind: "evidence" as const })),
+      ...removed.map((id) => ({ fact_id: id, kind: "deleted" as const })),
+      ...surviving.map((fact) => ({
+        fact_id: fact.id, kind: "evidence" as const,
+      })),
     ];
     const completed = await runtime.db.transaction(async (tx) => {
       await ensureSource(tx, scope, sourceId);
@@ -1022,18 +1009,19 @@ export async function deleteMessages(
       if (removed.length)
         await tx.query(
           "DELETE FROM memoia.memory_facts WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])",
-          [scope.userId, scope.projectId, removed.map((f) => f.id)],
+          [scope.userId, scope.projectId, removed],
         );
       for (const f of surviving)
         await tx.query(
-          "UPDATE memoia.memory_facts SET support_groups=$2::jsonb,occurred_at=$3,fact_time=$4::jsonb,search_text=$5,embedding=$6,revision=revision+1,updated_at=now() WHERE id=$1",
+          "UPDATE memoia.memory_facts SET support_groups=$2::jsonb,occurred_at=$3,fact_time=$4::jsonb,search_text=$5,embedding=CASE WHEN $6::boolean THEN $7 ELSE embedding END,revision=revision+1,updated_at=now() WHERE id=$1",
           [
             f.id,
-            JSON.stringify(f.support_groups),
-            f.occurred_at,
-            JSON.stringify(f.fact_time),
-            f.search_text,
-            f.embedding,
+            JSON.stringify(f.groups),
+            f.occurredAt,
+            JSON.stringify(f.time),
+            f.searchText,
+            f.refreshEmbedding,
+            vectors.get(f.id) ?? null,
           ],
         );
       await scrubHistory(tx, scope, new Set(rows.map((f) => f.id)));
@@ -1106,7 +1094,8 @@ async function correctFact(
   const change = { kind: "correct" as const, key: input.idempotency_key, digest: await hash({ kind: "correct", request: fingerprint }) };
   return submitFactChange(runtime, scope, change, async (prior) => {
     const { rows: [fact] } = await runtime.db.query(
-      `SELECT f.*,f.occurred_at::text AS occurred_at,b.source_id,b.message_ids
+      `SELECT f.blob_id,f.revision,f.content,f.subject,f.reporter,f.certainty,f.support_groups,
+         f.fact_time,f.search_text,f.occurred_at::text AS occurred_at,b.source_id,b.message_ids
        FROM memoia.memory_facts f JOIN memoia.memory_blobs b
          ON b.id=f.blob_id AND b.user_id=f.user_id AND b.project_id=f.project_id
        WHERE f.id=$1 AND f.user_id=$2 AND f.project_id=$3`,
@@ -1177,11 +1166,9 @@ async function correctFact(
         recordingTimeMicros(fact.occurred_at) !==
           recordingTimeMicros(value.occurred_at);
       value.search_text = renderSearchFact(value.content, value.fact_time);
-      value.embedding = fact.embedding;
-      if (
-        value.search_text !==
-        (fact.search_text ?? renderSearchFact(fact.content, fact.fact_time))
-      ) {
+      value.reindex = value.search_text !==
+        (fact.search_text ?? renderSearchFact(fact.content, fact.fact_time));
+      if (value.reindex) {
         const config = await getConfig(runtime, scope.projectId);
         const vectors = config.enable_event_embedding
           ? await embeddings(runtime, scope.projectId, [value.search_text], "document", scope.userId, config)
@@ -1208,11 +1195,11 @@ async function correctFact(
           ? await tx.query(
               `UPDATE memoia.memory_facts
                SET content=$5,subject=$6,reporter=$7,certainty=$8,support_groups=$9::jsonb,fact_time=$10::jsonb,
-                   occurred_at=$11,search_text=$12,embedding=$13,revision=revision+1,updated_at=now()
+                   occurred_at=$11,search_text=$12,embedding=CASE WHEN $14::boolean THEN $13 ELSE embedding END,revision=revision+1,updated_at=now()
                WHERE id=$1 AND user_id=$2 AND project_id=$3 AND revision=$4`,
               [...target, value.content, value.subject, value.reporter, value.certainty,
                 JSON.stringify(value.support_groups), JSON.stringify(value.fact_time),
-                value.occurred_at, value.search_text, value.embedding],
+                value.occurred_at, value.search_text, value.embedding ?? null, value.reindex],
             )
           : await tx.query(
               "SELECT id FROM memoia.memory_facts WHERE id=$1 AND user_id=$2 AND project_id=$3 AND revision=$4",

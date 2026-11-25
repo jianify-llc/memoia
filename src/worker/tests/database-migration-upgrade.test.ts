@@ -124,7 +124,7 @@ test(
             "SELECT hash,created_at FROM memoia.__drizzle_migrations ORDER BY id",
           )
         ).rows;
-        assert.equal(after.length, 10);
+        assert.equal(after.length, 11);
         assert.equal((await db.query("SELECT to_regclass('memoia.usage_events') AS name")).rows[0].name, "memoia.usage_events");
         assert.equal((await db.query("SELECT version FROM memoia.user_profiles WHERE id=$1", [profileId])).rows[0].version, "17");
         assert.equal((await db.query("SELECT version FROM memoia.user_events WHERE id=$1", [eventId])).rows[0].version, "29");

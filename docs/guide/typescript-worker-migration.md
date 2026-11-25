@@ -124,3 +124,5 @@ Local checks include real PostgreSQL migration/constraint/lease tests, current A
 Migration checks require a dedicated PostgreSQL admin URL with database creation and vector permissions via `MEMOIA_TEST_ADMIN_DATABASE_URL`. Set `MEMOIA_TEST_DATABASE_URL` for the regular database integration suite and use an isolated local Redis only for usage-transfer verification. A skipped check is not acceptance.
 
 Run the [full local gate](../../deploy/README.md#本地验证和推送) for the frozen candidate as required; database cases need explicit isolated targets. [.github/workflows/verify.yml](../../.github/workflows/verify.yml) checks Worker types/build and SDK generation/build/types without publication; it does not run the full local PostgreSQL/Redis/business suite. [deploy-test.yml](../../.github/workflows/deploy-test.yml) publishes an authorized current `test` HEAD; it does not migrate shared databases or establish business acceptance.
+
+Apply and verify `0010_qualify_memory_checks` before publishing the Worker or starting an upgraded Docker image. It qualifies the existing checks so the runtime can omit `search_path`.

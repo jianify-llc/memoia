@@ -8,7 +8,11 @@ import { parse } from "yaml";
 import { assertRunning, usesOpenAIBaseUrl, type Runtime } from "./runtime.js";
 import { SourceError } from "./errors.js";
 import { inSpan } from "./observability.js";
-import { readServiceConfig } from "./config.js";
+import {
+  EMBEDDING_DIMENSIONS,
+  JINA_EMBEDDING_MODEL,
+  readServiceConfig,
+} from "./config.js";
 import { writeUsageEvent } from "./usage.js";
 import type { components } from "../../../sdks/typescript/src/generated/openapi";
 
@@ -84,8 +88,12 @@ export async function getConfigSnapshot(
     language,
     use_timezone: base.use_timezone ?? "UTC",
     embedding_provider: base.embedding_provider ?? "openai",
-    embedding_model: base.embedding_model ?? "text-embedding-3-large",
-    embedding_dim: base.embedding_dim ?? 1536,
+    embedding_model:
+      base.embedding_model ??
+      (base.embedding_provider === "jina"
+        ? JINA_EMBEDDING_MODEL
+        : "text-embedding-3-large"),
+    embedding_dim: EMBEDDING_DIMENSIONS,
     embedding_batch_size: base.embedding_batch_size ?? 64,
     embedding_max_token_size: base.embedding_max_token_size ?? 8192,
     enable_event_embedding: base.enable_event_embedding ?? true,
@@ -487,20 +495,6 @@ async function embed(
     if (!account.rows.length) return [];
   }
 
-  if (
-    !["openai", "jina", "ollama"].includes(config.embedding_provider) ||
-    !Number.isSafeInteger(config.embedding_batch_size) ||
-    config.embedding_batch_size < 1 ||
-    !Number.isSafeInteger(config.embedding_max_token_size) ||
-    config.embedding_max_token_size < 1 ||
-    !Number.isSafeInteger(config.embedding_dim) ||
-    config.embedding_dim < 1 ||
-    typeof config.embedding_model !== "string" ||
-    !config.embedding_model ||
-    (config.embedding_provider === "jina" &&
-      config.embedding_model !== "jina-embeddings-v3")
-  )
-    embeddingConfigError();
   if (texts.some((text) => countTokens(text) > config.embedding_max_token_size))
     throw new SourceError(
       "embedding_input_too_long",
@@ -544,146 +538,19 @@ async function embed(
     }
     return write;
   };
+  const adapter =
+    providerName === "openai"
+      ? (slice: string[]) => openAIEmbeddingBatch(runtime, config, key, base, phase, slice, meter)
+      : (slice: string[]) => httpEmbeddingBatch(runtime, config, key, base!, phase, slice, meter);
   const vectors: number[][] = [];
-  for (
-    let offset = 0;
-    offset < texts.length;
-    offset += config.embedding_batch_size
-  ) {
+  for (let offset = 0; offset < texts.length; offset += config.embedding_batch_size) {
     assertRunning(runtime, 1000);
     const slice = texts.slice(offset, offset + config.embedding_batch_size);
-    if (providerName === "openai") {
-      const client = new UsageOpenAI({
-        apiKey: key,
-        baseURL: base,
-        fetch: usesOpenAIBaseUrl(base) ? runtime.modelFetch : undefined,
-        maxRetries: 0,
-        timeout: Math.max(1, Math.min(10_000, runtime.deadline - Date.now())),
-      });
-      let result: OpenAI.Embeddings.CreateEmbeddingResponse;
-      const remaining = AbortSignal.timeout(
-        Math.max(1, runtime.deadline - Date.now()),
-      );
-      const signal = runtime.signal
-        ? AbortSignal.any([runtime.signal, remaining])
-        : remaining;
-      for (let attempt = 0; ; attempt++) {
-        try {
-          result = await client.embeddings.create(
-            {
-              model: config.embedding_model,
-              input: slice,
-              encoding_format: "float",
-              dimensions: config.embedding_dim,
-            },
-            { signal },
-          );
-          break;
-        } catch (error) {
-          const usage = errorUsage(error);
-          await meter(
-            (usage as { input_tokens?: unknown } | null)?.input_tokens,
-          );
-          const retry =
-            phase === "document" &&
-            attempt < 2 &&
-            !signal.aborted &&
-            embeddingRetryDelay(error, attempt);
-          if (
-            typeof retry === "number" &&
-            retry < runtime.deadline - Date.now()
-          ) {
-            await delay(retry, undefined, { signal }).catch(() => undefined);
-            if (!signal.aborted) continue;
-          }
-          const failure = embeddingError(
-            error instanceof OpenAI.APIError ? error.status : undefined,
-          );
-          if (usage !== null) capturedErrorUsage.set(failure, usage);
-          throw failure;
-        }
-      }
-      await meter(
-        result?.usage?.prompt_tokens ?? result?.usage?.total_tokens,
-        result?.model,
-      );
-      if (!result || typeof result !== "object") embeddingConfigError();
-      vectors.push(
-        ...validatedVectors(
-          result.data,
-          slice.length,
-          config.embedding_dim,
-          true,
-        ),
-      );
-    } else {
-      const path = providerName === "jina" ? "embeddings" : "api/embed";
-      const endpoint = new URL(path, `${base!.replace(/\/+$/, "")}/`);
-      const payload = {
-        model: config.embedding_model,
-        input: slice,
-        truncate: true,
-        dimensions: config.embedding_dim,
-        ...(providerName === "jina"
-          ? {
-              task: phase === "query" ? "retrieval.query" : "retrieval.passage",
-            }
-          : {}),
-      };
-      const timeout = Math.max(
-        1,
-        Math.min(10_000, runtime.deadline - Date.now()),
-      );
-      const signal = runtime.signal
-        ? AbortSignal.any([runtime.signal, AbortSignal.timeout(timeout)])
-        : AbortSignal.timeout(timeout);
-      let response: Response;
-      try {
-        response = await fetch(endpoint, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${key}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(payload),
-          signal,
-        });
-      } catch {
-        await meter(null);
-        throw embeddingError();
-      }
-      if (response.status !== 200) {
-        await meter(null);
-        throw embeddingError(response.status);
-      }
-      let body: unknown;
-      try {
-        body = await response.json();
-      } catch {
-        await meter(null);
-        throw embeddingError();
-      }
-      const output = body as {
-        data?: unknown;
-        embeddings?: unknown;
-        usage?: { total_tokens?: unknown };
-        prompt_eval_count?: unknown;
-      } | null;
-      await meter(
-        providerName === "jina"
-          ? output?.usage?.total_tokens
-          : output?.prompt_eval_count,
-      );
-      if (!output || typeof output !== "object") embeddingConfigError();
-      vectors.push(
-        ...validatedVectors(
-          providerName === "jina" ? output.data : output.embeddings,
-          slice.length,
-          config.embedding_dim,
-          providerName === "jina",
-        ),
-      );
-    }
+    const result = await adapter(slice);
+    await meter(result.tokens, result.model);
+    vectors.push(...validatedVectors(
+      result.rows, slice.length, config.embedding_dim, providerName !== "ollama",
+    ));
   }
   try {
     await addUsage(runtime.db, projectId, {
@@ -698,6 +565,145 @@ async function embed(
     );
   }
   return vectors;
+}
+
+type EmbeddingBatch = { rows: unknown; tokens: unknown; model?: string };
+type MeterEmbeddingFailure = (tokens: unknown) => Promise<void> | undefined;
+
+async function openAIEmbeddingBatch(
+  runtime: Runtime,
+  config: ModelConfig,
+  key: string,
+  base: string | undefined,
+  phase: EmbeddingPhase,
+  slice: string[],
+  meterFailure: MeterEmbeddingFailure,
+): Promise<EmbeddingBatch> {
+  const client = new UsageOpenAI({
+    apiKey: key,
+    baseURL: base,
+    fetch: usesOpenAIBaseUrl(base) ? runtime.modelFetch : undefined,
+    maxRetries: 0,
+    timeout: Math.max(1, Math.min(10_000, runtime.deadline - Date.now())),
+  });
+  let result: OpenAI.Embeddings.CreateEmbeddingResponse;
+  const remaining = AbortSignal.timeout(
+    Math.max(1, runtime.deadline - Date.now()),
+  );
+  const signal = runtime.signal
+    ? AbortSignal.any([runtime.signal, remaining])
+    : remaining;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      result = await client.embeddings.create(
+        {
+          model: config.embedding_model,
+          input: slice,
+          encoding_format: "float",
+          dimensions: config.embedding_dim,
+        },
+        { signal },
+      );
+      break;
+    } catch (error) {
+      const usage = errorUsage(error);
+      await meterFailure((usage as { input_tokens?: unknown } | null)?.input_tokens);
+      if (error instanceof SyntaxError) embeddingConfigError();
+      const retry =
+        phase === "document" &&
+        attempt < 2 &&
+        !signal.aborted &&
+        embeddingRetryDelay(error, attempt);
+      if (
+        typeof retry === "number" &&
+        retry < runtime.deadline - Date.now()
+      ) {
+        await delay(retry, undefined, { signal }).catch(() => undefined);
+        if (!signal.aborted) continue;
+      }
+      const failure = embeddingError(
+        error instanceof OpenAI.APIError ? error.status : undefined,
+      );
+      if (usage !== null) capturedErrorUsage.set(failure, usage);
+      throw failure;
+    }
+  }
+  return {
+    rows: result?.data,
+    tokens: result?.usage?.prompt_tokens ?? result?.usage?.total_tokens,
+    model: result?.model,
+  };
+}
+
+async function httpEmbeddingBatch(
+  runtime: Runtime,
+  config: ModelConfig,
+  key: string,
+  base: string,
+  phase: EmbeddingPhase,
+  slice: string[],
+  meterFailure: MeterEmbeddingFailure,
+): Promise<EmbeddingBatch> {
+  const providerName = config.embedding_provider;
+  const path = providerName === "jina" ? "embeddings" : "api/embed";
+  const endpoint = new URL(path, `${base.replace(/\/+$/, "")}/`);
+  const payload = {
+    model: config.embedding_model,
+    input: slice,
+    truncate: true,
+    dimensions: config.embedding_dim,
+    ...(providerName === "jina"
+      ? {
+          task: phase === "query" ? "retrieval.query" : "retrieval.passage",
+        }
+      : {}),
+  };
+  const timeout = Math.max(
+    1,
+    Math.min(10_000, runtime.deadline - Date.now()),
+  );
+  const signal = runtime.signal
+    ? AbortSignal.any([runtime.signal, AbortSignal.timeout(timeout)])
+    : AbortSignal.timeout(timeout);
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal,
+    });
+  } catch {
+    await meterFailure(null);
+    throw embeddingError();
+  }
+  if (response.status !== 200) {
+    await meterFailure(null);
+    throw embeddingError(response.status);
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch (error) {
+    await meterFailure(null);
+    if (error instanceof SyntaxError) embeddingConfigError();
+    throw embeddingError();
+  }
+  const output = body as {
+    data?: unknown;
+    embeddings?: unknown;
+    usage?: { total_tokens?: unknown };
+    prompt_eval_count?: unknown;
+    model?: unknown;
+  } | null;
+  return {
+    rows: providerName === "jina" ? output?.data : output?.embeddings,
+    tokens: providerName === "jina" ? output?.usage?.total_tokens : output?.prompt_eval_count,
+    model: typeof output?.model === "string" ? output.model : undefined,
+  };
 }
 
 function embeddingRetryDelay(error: unknown, attempt: number): number | false {

@@ -637,7 +637,7 @@ export async function runMaintenance(
         query: args.query,
         limit: args.limit,
         max_token_size: 8192,
-      });
+      }, true);
       const output: Record<string, unknown> = {};
       for (const kind of ["facts", "profiles", "events"] as const) {
         const ids = (hits[kind] ?? []).map((r: { id: string }) => r.id);

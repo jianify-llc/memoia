@@ -3,7 +3,8 @@ import type { QueryResultRow } from "pg";
 import { isDeepStrictEqual } from "node:util";
 import {
   assertActive,
-  isDatabaseTransportError,
+  isRetryableDatabaseError,
+  memoryVersion,
   LeaseLostError,
   type Sql,
   type UserScope,
@@ -206,6 +207,8 @@ function configuredMutation(
 const fail = (code: string, message: string, retryable = false): never => {
   throw new SourceError(code, message, 409, retryable);
 };
+const factProjection = `id,blob_id,content,subject,reporter,certainty,occurred_at,revision,created_at,updated_at,
+  CASE WHEN jsonb_typeof(fact_time)='object' THEN fact_time - 'evidence' END AS fact_time`;
 const bytes = (value: unknown) =>
   new TextEncoder().encode(JSON.stringify(value)).length;
 export const scoped = (scope: UserScope): unknown[] => [
@@ -417,6 +420,7 @@ async function seal(
     const rows = (
       await tx.query(
         `SELECT b.id,b.external_id,b.xmin::text AS row_version,o.maintenance_effort,prior.efforts,
+          page.fact_changes IS NOT NULL AS paged,
           COALESCE(page.fact_changes,b.fact_changes) AS fact_changes
         FROM memoia.memory_blobs b
         LEFT JOIN LATERAL (
@@ -424,7 +428,7 @@ async function seal(
             array_agg(p.change->>'version') FILTER (WHERE NOT (p.change ? 'maintenance_reasoning_effort')) AS versions
           FROM (SELECT change,position FROM jsonb_array_elements(b.fact_changes)
                 WITH ORDINALITY list(change,position) LIMIT 100) p
-        ) page ON b.external_id IS NOT NULL
+        ) page ON (b.external_id IS NOT NULL OR b.kind='retract')
         LEFT JOIN LATERAL (
           SELECT o.request->>'maintenance_reasoning_effort' AS maintenance_effort
           FROM memoia.memory_operations o
@@ -459,7 +463,7 @@ async function seal(
     const current = factIds.length
       ? (
           await tx.query(
-            "SELECT id,content,subject,reporter,certainty,support_groups,occurred_at,fact_time,created_at,updated_at FROM memoia.memory_facts WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])",
+            `SELECT ${factProjection} FROM memoia.memory_facts WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])`,
             [...scoped(scope), factIds],
           )
         ).rows
@@ -480,8 +484,8 @@ async function seal(
           return fact ? [fact] : [];
         }),
       });
-      if (row.external_id !== null) {
-        // Consume a prefix of the session's derived work. The public Blob is still one row.
+      if (row.paged) {
+        // Large retractions and session appends share the same bounded flush snapshots.
         let count = 0;
         let estimated = size;
         for (const change of changes) {
@@ -537,8 +541,7 @@ async function seal(
           JSON.stringify({
             blob_ids: blobIds,
             public_blob_ids: chosen.map((b) => b.external_id ?? b.id),
-            // A session Blob can receive a later Fact flush while this task is still pending.
-            legacy_changes: chosen.filter((b) => b.external_id !== null).flatMap((b) => b.fact_changes),
+            legacy_changes: chosen.filter((b) => b.paged).flatMap((b) => b.fact_changes),
           }),
           "processing",
           empty
@@ -579,17 +582,17 @@ async function seal(
     if (blobIds.length) {
       const assigned = await tx.query(
         `UPDATE memoia.memory_blobs b
-           SET fact_changes=CASE WHEN b.external_id IS NULL THEN b.fact_changes ELSE
+           SET fact_changes=CASE WHEN NOT picked.paged THEN b.fact_changes ELSE
                  COALESCE((SELECT jsonb_agg(change ORDER BY position)
                    FROM jsonb_array_elements(b.fact_changes) WITH ORDINALITY list(change,position)
                    WHERE position>picked.used),'[]'::jsonb) END,
-               flush_operation_id=CASE WHEN b.external_id IS NOT NULL AND jsonb_array_length(b.fact_changes)>picked.used
+               flush_operation_id=CASE WHEN picked.paged AND jsonb_array_length(b.fact_changes)>picked.used
                  THEN NULL ELSE $3::uuid END
-          FROM unnest($4::uuid[],$5::int[],$6::text[]) AS picked(id,used,version)
+          FROM unnest($4::uuid[],$5::int[],$6::text[],$7::boolean[]) AS picked(id,used,version,paged)
          WHERE b.user_id=$1 AND b.project_id=$2 AND b.id=picked.id
            AND b.flush_operation_id IS NULL AND b.xmin::text=picked.version`,
         [...scoped(scope), id, blobIds, chosen.map((b) => b.fact_changes.length),
-          chosen.map((b) => b.row_version)],
+          chosen.map((b) => b.row_version), chosen.map((b) => b.paged)],
       );
       if (assigned.rowCount !== blobIds.length) throw new TaskYield();
     }
@@ -662,7 +665,7 @@ export async function dispatch(runtime: Runtime, row: QueryResultRow) {
   const { db } = runtime;
   try {
     const reserved = await maintenanceTasks.reserveDispatchInTx(
-      db, row.id, row.kind === "fact_flush" ? undefined : maintenanceRetryPolicy.limit,
+      db, row.id, row.kind === "flush" ? maintenanceRetryPolicy.limit : undefined,
     );
     if (!reserved) return;
     const delay = Math.max(
@@ -724,25 +727,8 @@ async function claim(
 }
 
 async function failClaim(runtime: Runtime, c: Claim, error: unknown) {
-  const retryable =
-    error instanceof LeaseLostError || isDatabaseTransportError(error)
-      ? true
-      : error instanceof SourceError
-        ? error.retryable
-        : Boolean(
-            error &&
-              typeof error === "object" &&
-              "code" in error &&
-              [
-                "08006",
-                "08001",
-                "57P01",
-                "40001",
-                "40P01",
-                "55P03",
-                "57014",
-              ].includes(String(error.code)),
-          );
+  const retryable = error instanceof LeaseLostError ||
+    (error instanceof SourceError ? error.retryable : isRetryableDatabaseError(error));
   const code =
     error instanceof LeaseLostError
       ? "maintenance_writer_busy"
@@ -923,7 +909,7 @@ export async function consume(runtime: Runtime, message: Wakeup) {
           const prompt = await maintenancePromptHash();
           const contextIdentity = () => digest({
             version: MAINTENANCE_CHECKPOINT_VERSION,
-            inputProtocolVersion: 2,
+            inputProtocolVersion: 3,
             prompt,
             config: context.config,
             ...(context.effortOverride === undefined
@@ -1229,7 +1215,7 @@ export class MaintenanceContext {
         kind === "profiles"
           ? ",attributes AS data"
           : kind === "events"
-            ? ",event_data AS data"
+            ? ",event_data AS data,embedding IS NOT NULL AS has_embedding"
             : "";
       const rows = (
         await this.runtime.db.query(
@@ -1314,7 +1300,7 @@ export class MaintenanceContext {
     const allFacts = allIds.length
       ? (
           await this.runtime.db.query(
-            "SELECT id,content,subject,reporter,certainty,support_groups,occurred_at,fact_time,created_at,updated_at FROM memoia.memory_facts WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])",
+            `SELECT ${factProjection} FROM memoia.memory_facts WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])`,
             [...scoped(this.claim), allIds],
           )
         ).rows
@@ -1355,7 +1341,7 @@ export class MaintenanceContext {
     const rows = ids.length
       ? (
           await this.runtime.db.query(
-            "SELECT id,blob_id,content,subject,reporter,certainty,support_groups,occurred_at,fact_time,revision,created_at,updated_at FROM memoia.memory_facts WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])",
+            `SELECT ${factProjection} FROM memoia.memory_facts WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])`,
             [...scoped(this.claim), ids],
           )
         ).rows
@@ -1432,7 +1418,7 @@ export class MaintenanceContext {
     }
     const rows = (
       await this.runtime.db.query(
-        `SELECT * FROM memoia.${TABLES[kind]} WHERE user_id=$1 AND project_id=$2 ${conditions} ORDER BY id LIMIT ${limit + 1}`,
+        `SELECT ${kind === "facts" ? factProjection : "*"} FROM memoia.${TABLES[kind]} WHERE user_id=$1 AND project_id=$2 ${conditions} ORDER BY id LIMIT ${limit + 1}`,
         values,
       )
     ).rows;
@@ -1455,17 +1441,7 @@ export class MaintenanceContext {
             ...overlayIds,
           ]);
     const itemOf = (row: QueryResultRow): QueryResultRow => {
-      if (kind === "facts") {
-        const {
-          embedding,
-          search_text,
-          user_id,
-          project_id,
-          included,
-          ...rest
-        } = row;
-        return rest;
-      }
+      if (kind === "facts") return row;
       const data = kind === "profiles" ? row.attributes : row.event_data;
       const item = {
         ...data,
@@ -1558,7 +1534,7 @@ export class MaintenanceContext {
       const facts = support.length
         ? (
             await this.runtime.db.query(
-              "SELECT id,blob_id,content,subject,reporter,certainty,support_groups,occurred_at,fact_time,revision,created_at,updated_at FROM memoia.memory_facts WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])",
+              `SELECT ${factProjection} FROM memoia.memory_facts WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])`,
               [...scoped(this.claim), support],
             )
           ).rows
@@ -1765,9 +1741,8 @@ export class MaintenanceContext {
         "maintenance_unresolved_entries",
         "Required memory decisions remain",
       );
-    const vectors = await this.eventVectors(resuming);
     const { db } = this.runtime;
-    await this.publish(vectors, resuming);
+    await this.publish(resuming);
     this.active();
     assertRunning(this.runtime, 1000);
     const ids = (kind: Derived) =>
@@ -1795,55 +1770,7 @@ export class MaintenanceContext {
     if (!completed) throw new TaskLeaseLost();
   }
 
-  private async eventVectors(resuming: boolean) {
-    const vectors = new Map<string, string>();
-    const upserts = [...this.staged.events].filter(
-      ([, change]) => change.action === "upsert",
-    );
-    if (!this.config.enable_event_embedding || !upserts.length) return vectors;
-    const existing = await this.runtime.db.query(
-      "SELECT id,version,event_data AS data,embedding FROM memoia.user_events WHERE user_id=$1 AND project_id=$2 AND id=ANY($3::uuid[])",
-      [...scoped(this.claim), upserts.map(([id]) => id)],
-    );
-    const current = new Map(existing.rows.map((row) => [row.id, row]));
-    const pending = new Map<string, string>();
-    for (const [id, change] of upserts) {
-      const row = current.get(id);
-      if (resuming && alreadyPublished(change, this.reads.events.get(id) ?? null, row))
-        continue;
-      const text = eventIndexText(change);
-      if (
-        row?.embedding &&
-        eventIndexText({
-          ...row.data,
-          content: row.data.content ?? row.data.event_tip,
-        }) === text
-      )
-        vectors.set(
-          id,
-          typeof row.embedding === "string"
-            ? row.embedding
-            : JSON.stringify(row.embedding),
-        );
-      else pending.set(id, text);
-    }
-    if (pending.size) {
-      const fresh = await embeddings(
-        this.runtime,
-        this.claim.projectId,
-        [...pending.values()],
-        "document",
-        this.claim.userId,
-        this.config,
-      );
-      [...pending.keys()].forEach((id, index) =>
-        vectors.set(id, JSON.stringify(fresh[index])),
-      );
-    }
-    return vectors;
-  }
-
-  private async publish(vectors: Map<string, string>, resuming: boolean) {
+  private async publish(resuming: boolean) {
     const { db } = this.runtime;
     const scope = scoped(this.claim);
     const { config: currentConfig, stored } = await getConfigSnapshot(
@@ -1856,6 +1783,9 @@ export class MaintenanceContext {
         "Project model configuration changed",
         true,
       );
+    const factVersion = [...this.staged.events.values()].some((change) => change.action === "upsert")
+      ? await memoryVersion(db, this.claim)
+      : 0;
     const readSet = await this.readSet(resuming);
     if (!readSet)
       return fail("maintenance_read_conflict", "Read memory changed", true);
@@ -1899,6 +1829,25 @@ export class MaintenanceContext {
     const profiles = pending("profiles");
     const events = pending("events");
     if (!profiles.length && !events.length) return;
+
+    const vectors = new Map<string, string>();
+    const changedText = new Set<string>();
+    const toEmbed: { id: string; text: string }[] = [];
+    for (const [id, change] of events) {
+      if (change.action !== "upsert") continue;
+      const previous = current.events.get(id);
+      const text = eventIndexText(change);
+      if (!previous || eventIndexText({
+        ...previous.data, content: previous.data.content ?? previous.data.event_tip,
+      }) !== text) changedText.add(id);
+      if (this.config.enable_event_embedding && (changedText.has(id) || !previous?.has_embedding))
+        toEmbed.push({ id, text });
+    }
+    if (toEmbed.length) {
+      const generated = await embeddings(this.runtime, this.claim.projectId,
+        toEmbed.map(({ text }) => text), "document", this.claim.userId, this.config);
+      toEmbed.forEach(({ id }, index) => vectors.set(id, JSON.stringify(generated[index])));
+    }
 
     const supportIds = [
       ...new Set(
@@ -1947,16 +1896,26 @@ export class MaintenanceContext {
           (change.fact_ids ?? []).map((fact) => byFact.get(fact)!.blob_id),
         ),
       ].sort();
+      // Serialize only publication with the existing Fact version write. Model I/O is already done.
       const written = await db.query(
-        `WITH ${publicationFence}, changed AS (
-           UPDATE memoia.user_events SET event_data=$10::jsonb,embedding=$11,
+        `WITH ${publicationFence}, current_facts AS (
+           INSERT INTO memoia.memory_user_states AS state(user_id,project_id,version)
+           SELECT $1,$2,0 FROM allowed
+           WHERE $13::bigint=0 OR EXISTS (
+             SELECT 1 FROM memoia.memory_user_states WHERE user_id=$1 AND project_id=$2)
+           ON CONFLICT (user_id,project_id) DO UPDATE SET version=state.version
+             WHERE state.version=$13::bigint
+           RETURNING 1
+         ), changed AS (
+           UPDATE memoia.user_events SET event_data=$10::jsonb,
+             embedding=CASE WHEN $14::boolean THEN $11 ELSE embedding END,
              version=version+1,updated_at=clock_timestamp()
-           FROM allowed
+           FROM current_facts
            WHERE id=$8 AND user_id=$1 AND project_id=$2 AND version=$9::bigint
            RETURNING id
          ), created AS (
            INSERT INTO memoia.user_events(id,user_id,project_id,event_data,embedding)
-           SELECT $8,$1,$2,$10::jsonb,$11 FROM allowed
+           SELECT $8,$1,$2,$10::jsonb,$11 FROM current_facts
            WHERE $9::bigint IS NULL AND NOT EXISTS (
              SELECT 1 FROM memoia.memory_deleted_events WHERE user_id=$1 AND project_id=$2 AND id=$8)
            ON CONFLICT DO NOTHING
@@ -1985,6 +1944,8 @@ export class MaintenanceContext {
           }),
           vectors.get(id) ?? null,
           change.fact_ids,
+          factVersion,
+          changedText.has(id) || vectors.has(id),
         ],
       );
       if (!written.rowCount)

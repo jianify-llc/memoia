@@ -29,7 +29,7 @@ function fixture() {
   };
   const runtime: Runtime = {
     db: db as unknown as Runtime["db"],
-    env: { OPENAI_API_KEY: "local-only", MEMOIA_CONFIG: '{"embedding_dim":2}' },
+    env: { OPENAI_API_KEY: "local-only" },
     deadline: Date.now() + 30000,
   };
   return { runtime, calls };
@@ -229,7 +229,7 @@ test("document embedding meters a failed physical response before retrying", asy
           { status: 503, headers: { "retry-after-ms": "1" } },
         )
       : Response.json({
-          data: [{ index: 0, embedding: [0.1, 0.2] }],
+          data: [{ index: 0, embedding: Array(1536).fill(0.1) }],
           model: "text-embedding-3-large",
           usage: { prompt_tokens: 9 },
         });
@@ -250,7 +250,7 @@ test("query embeddings return while known usage waits for the database", async (
   runtime.retrievalUsageWrites = [];
   runtime.modelFetch = async () =>
     Response.json({
-      data: [{ index: 0, embedding: [0.1, 0.2] }],
+      data: [{ index: 0, embedding: Array(1536).fill(0.1) }],
       model: "text-embedding-3-small",
       usage: { prompt_tokens: 7 },
     });
@@ -272,7 +272,7 @@ test("query embeddings return while known usage waits for the database", async (
       crypto.randomUUID(),
     );
     assert.equal(runtime.retrievalUsageWrites.length, 1);
-    assert.deepEqual(await output, [[0.1, 0.2]]);
+    assert.deepEqual(await output, [Array(1536).fill(0.1)]);
   } finally {
     release();
     await Promise.all(runtime.retrievalUsageWrites);
